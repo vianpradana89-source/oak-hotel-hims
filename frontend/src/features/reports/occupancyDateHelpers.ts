@@ -5,6 +5,20 @@ import {
 } from '../calendar/calendarDates.ts';
 import type { OccupancyPeriodPreset } from './occupancyReportingTypes.ts';
 
+function firstOfMonth(hotelDate: string): string {
+  const [y, m] = hotelDate.split('-');
+  return `${y}-${m}-01`;
+}
+
+function lastMonthRange(today: string): { start: string; endExclusive: string; lastDayInclusive: string } {
+  const thisMonthStart = firstOfMonth(today);
+  const lastMonthEndExclusive = thisMonthStart;
+  const lastMonthLastDay = addHotelDays(lastMonthEndExclusive, -1);
+  const [y, m] = lastMonthLastDay.split('-');
+  const lastMonthStart = `${y}-${m}-01`;
+  return { start: lastMonthStart, endExclusive: lastMonthEndExclusive, lastDayInclusive: lastMonthLastDay };
+}
+
 /**
  * Returns the first date of the month (YYYY-MM-01) for a given hotel date.
  */
@@ -69,6 +83,18 @@ export function buildOccupancyQueryConfig(
     };
   }
 
+  if (period === 'yesterday') {
+    const yesterday = addHotelDays(today, -1);
+    const endExclusive = addHotelDays(yesterday, 1);
+    return {
+      urlParams: `property_id=${propertyId}&date=${yesterday}&include_room_types=true&include_daily=true`,
+      startDate: yesterday,
+      endDateExclusive: endExclusive,
+      displayLabel: `Kemarin (${formatDateIndonesian(yesterday)})`,
+      isSingleDay: true,
+    };
+  }
+
   if (period === '7days') {
     // Trailing 7 days up to today: (today - 6 days) to (today + 1 day exclusive) = 7 nights
     const start = addHotelDays(today, -6);
@@ -78,6 +104,17 @@ export function buildOccupancyQueryConfig(
       startDate: start,
       endDateExclusive: endExclusive,
       displayLabel: `7 Hari Terakhir (${formatDateIndonesian(start)} – ${formatDateIndonesian(today)})`,
+      isSingleDay: false,
+    };
+  }
+
+  if (period === 'last_month') {
+    const { start, endExclusive, lastDayInclusive } = lastMonthRange(today);
+    return {
+      urlParams: `property_id=${propertyId}&start_date=${start}&end_date=${endExclusive}&include_room_types=true&include_daily=true`,
+      startDate: start,
+      endDateExclusive: endExclusive,
+      displayLabel: `Bulan Lalu (${formatDateIndonesian(start)} – ${formatDateIndonesian(lastDayInclusive)})`,
       isSingleDay: false,
     };
   }

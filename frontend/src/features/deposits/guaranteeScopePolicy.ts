@@ -67,6 +67,40 @@ export function selectActionableRoomDeposit(deposits: Deposit[]): Deposit | unde
 }
 
 /**
+ * DEPOSIT-PURPOSE-PHASE-B — dedicated UNAPPLY target selection.
+ *
+ * Backend contract (intentional): UNAPPLY is permitted on a deposit whose
+ * status is CLOSED as long as balance.applied > 0. A fully-used ADVANCE_PAYMENT
+ * reaches CLOSED (remaining === 0 && applied > 0) via deriveDepositBalance, yet
+ * its prior APPLY must remain reversible — otherwise the "Batalkan Penggunaan DP"
+ * action disappears exactly when the deposit is used up, which is the primary
+ * use case.
+ *
+ * This predicate differs from isActiveDeposit() ON PURPOSE:
+ *   - Excludes BOOKING_GROUP (read-only group guarantees stay read-only).
+ *   - Excludes CANCELLED (a reversed receipt has no surviving applied balance).
+ *   - REQUIRES balance.applied > 0 (nothing to unapply otherwise).
+ *   - Does NOT exclude CLOSED — that is the whole point of Phase B.
+ *
+ * Do NOT reuse this selector for APPLY / REFUND / REVERSE: those lifecycle
+ * mutations remain gated on the active (non-CLOSED) selectActionableRoomDeposit.
+ */
+export function isUnapplyActionableRoomDeposit(d: Deposit): boolean {
+  if (isGroupDeposit(d)) return false;          // BOOKING_GROUP stays read-only
+  if (d.status === 'CANCELLED') return false;   // reversed receipts are out
+  return (d.balance?.applied ?? 0) > 0;          // must have a surviving applied amount
+}
+
+/**
+ * Select the deterministic UNAPPLY target: first ROOM_RESERVATION deposit that
+ * isUnapplyActionableRoomDeposit(...). Includes CLOSED rows. Returns undefined
+ * when no non-group deposit has a surviving applied balance.
+ */
+export function selectUnapplyActionableRoomDeposit(deposits: Deposit[]): Deposit | undefined {
+  return deposits.find(isUnapplyActionableRoomDeposit);
+}
+
+/**
  * Select the deterministic actionable ROOM_RESERVATION custody for return.
  *
  * Rules:

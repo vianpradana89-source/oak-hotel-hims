@@ -282,4 +282,129 @@ const extraPaidTrap = sale({
 const paidOnce = groupPenjualanSaleRows([duplicatePaidTrap, extraPaidTrap]);
 check(paidOnce[0].kind === 'bid_group' && paidOnce[0].group.paid === 368000, 'S. paid is not summed from duplicated SALE-line paid_amount');
 
+// ===== T. OTA COLLECT PARENT RESPONSIBILITY REGRESSION =====
+const otaChild = sale({
+  id: 1001,
+  reservation_id: 1001,
+  stay_sequence: 1,
+  room_number_snapshot: '501',
+  room_type_name: 'DELUXE KING',
+  booked_room_type_name_snapshot: 'DELUXE KING',
+  check_in: '2026-09-26',
+  check_out: '2026-09-27',
+  amount: 500000,
+  discount_amount: 0,
+  net_amount: 500000,
+  effective_net_amount: 500000,
+  reservation_amount_paid: 0,
+  reservation_remaining_balance: 500000,
+  reservation_status: 'CHECKED_IN',
+  reservation_stay_status: 'CHECKED_IN',
+  payment_responsibility: 'OTA_COLLECT',
+  booking_bid: 'LWG-260928-KXGYGXJP',
+  booking_id: 50,
+  source_type: 'ROOM_CHARGE',
+  operational_sheet: 'PROSES'
+});
+
+// Case T1: server payload missing parent payment_responsibility
+// Child carries OTA_COLLECT; parent must derive from child.
+const otaGroupNoParentResp = groupPenjualanSaleRows([otaChild]);
+check(
+  otaGroupNoParentResp.length === 1 && otaGroupNoParentResp[0].kind === 'bid_group',
+  'T1. OTA child with no parent payment_responsibility produces one bid_group'
+);
+if (otaGroupNoParentResp[0].kind === 'bid_group') {
+  check(
+    otaGroupNoParentResp[0].group.payment_responsibility === 'OTA_COLLECT',
+    'T1. parent responsibility derives as OTA_COLLECT from child when payload is absent'
+  );
+  check(
+    otaGroupNoParentResp[0].group.children[0].payment_responsibility === 'OTA_COLLECT',
+    'T1. child retains OTA_COLLECT'
+  );
+}
+
+// Case T2: server payload explicitly sets HOTEL_COLLECT on parent
+// Child carries OTA_COLLECT; parent must NOT be overridden by child.
+const otaHotelOverridePayload = {
+  ...sale({
+    id: 1002,
+    reservation_id: 1002,
+    stay_sequence: 1,
+    room_number_snapshot: '502',
+    room_type_name: 'STANDARD KING',
+    booked_room_type_name_snapshot: 'STANDARD KING',
+    check_in: '2026-09-26',
+    check_out: '2026-09-27',
+    amount: 400000,
+    discount_amount: 0,
+    net_amount: 400000,
+    effective_net_amount: 400000,
+    reservation_amount_paid: 400000,
+    reservation_remaining_balance: 0,
+    reservation_status: 'CHECKED_OUT',
+    reservation_stay_status: 'CHECKED_OUT',
+    booking_bid: 'LWG-260928-OVERRIDE',
+    booking_id: 51,
+    source_type: 'ROOM_CHARGE',
+    operational_sheet: 'SELESAI'
+  }),
+  booking_bid_group: {
+    bid: 'LWG-260928-OVERRIDE',
+    booking_id: 51,
+    guest_name: 'Override Guest',
+    room_count: 1,
+    stay_type_label: 'OVERNIGHT',
+    totals_scope: 'PERIOD_ACTIVITY' as const,
+    member_transaction_ids: [1002],
+    gross: 400000,
+    discount: 0,
+    net: 400000,
+    paid: 400000,
+    remaining: 0,
+    payment_status: 'PAID',
+    payment_responsibility: 'HOTEL_COLLECT',
+    operational_sheet: 'SELESAI' as const,
+    children: [
+      {
+        reservation_id: 1002,
+        primary_transaction_id: 1002,
+        room_number: '502',
+        room_type_name: 'STANDARD KING',
+        check_in: '2026-09-26',
+        check_out: '2026-09-27',
+        stay_type: 'OVERNIGHT',
+        stay_sequence: 1,
+        gross: 400000,
+        discount: 0,
+        net: 400000,
+        paid: 400000,
+        remaining: 0,
+        payment_status: 'PAID',
+        payment_responsibility: 'OTA_COLLECT',
+        reservation_status: 'CHECKED_OUT',
+        operational_sheet: 'SELESAI' as const
+      }
+    ]
+  }
+};
+
+// Case T2 actual: explicit HOTEL_COLLECT on parent payload must be kept even when child is OTA_COLLECT
+const otaOverrideGroup = groupPenjualanSaleRows([otaHotelOverridePayload]);
+check(
+  otaOverrideGroup.length === 1 && otaOverrideGroup[0].kind === 'bid_group',
+  'T2. explicit HOTEL_COLLECT parent yields one bid_group'
+);
+if (otaOverrideGroup[0].kind === 'bid_group') {
+  check(
+    otaOverrideGroup[0].group.payment_responsibility === 'HOTEL_COLLECT',
+    'T2. parent stays HOTEL_COLLECT when payload explicitly sets it (not overridden by OTA child)'
+  );
+  check(
+    otaOverrideGroup[0].group.children[0].payment_responsibility === 'OTA_COLLECT',
+    'T2. child still shows OTA_COLLECT inside the group'
+  );
+}
+
 console.log(`\n=== ALL TRANSACTION BID GROUPING TESTS PASSED (${assertions} assertions) ===`);

@@ -1,12 +1,26 @@
 'use strict';
 
-require('dotenv').config({ path: 'E:/oak-hotel-hims/backend/.env' });
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
+
+// ─── DB SAFETY GUARD (MUST RUN BEFORE ANY dist/index IMPORT) ────────────────
+// Fail-closed: never connect to or import code that may reach staging/prod DB.
+const currentDb = process.env.DB_NAME || '';
+if (!currentDb || !currentDb.toLowerCase().includes('test')) {
+  console.error(
+    `SAFETY VIOLATION: DB_NAME="${currentDb || '(unset)'}" does not contain 'test'. ` +
+    'Set DB_NAME to a test database before running this regression test.'
+  );
+  process.exit(1);
+}
+console.log(`Using disposable test DB: ${currentDb}`);
+
 const http = require('http');
 const fs = require('fs');
-const path = require('path');
 const { once } = require('events');
 const { app, pool } = require('../dist/index');
 const { initializeDatabase } = require('../dist/db/schema_v3');
+const { generateToken } = require('../dist/domains/auth/authService');
 
 let server;
 let baseUrl;
@@ -27,6 +41,7 @@ async function api(method, path, body, customHeaders = {}) {
   const opts = {
     method,
     headers: {
+      'Authorization': authToken || '',
       ...customHeaders
     }
   };
@@ -60,9 +75,12 @@ let roomIdA;
 let roomIdB;
 let bookingIdA;
 let bookingIdB;
+let bookingIdOta;
 let resIdA;
 let resIdB;
 let resIdCrossRoom;
+let resIdOta;
+let authToken = null;
 
 async function setupFixtures() {
   const client = await pool.connect();
@@ -173,6 +191,34 @@ async function setupFixtures() {
     );
     resIdCrossRoom = resCross.rows[0].id;
 
+    // OTA_COLLECT reservation under Property A:
+    //   ROOM_CHARGE = 392020 (settled by OTA, NOT hotel collectible)
+    //   EXTRA_BED  =  100000 (hotel charge, hotel collectible)
+    //   canonical remaining = 492020
+    //   hotel_collectible_remaining = 100000
+    const otaBid = 'BID-FLA-OTA-' + Date.now();
+    const bOta = await client.query(
+      "INSERT INTO bookings (property_id, bid, guest_name_snapshot, booking_status, payment_responsibility) VALUES ($1, $2, 'Guest Ota Folio', 'ACTIVE', 'OTA_COLLECT') RETURNING id",
+      [propIdA, otaBid]
+    );
+    bookingIdOta = bOta.rows[0].id;
+    const resOta = await client.query(
+      `INSERT INTO reservations (booking_id, room_id, guest_name, check_in, check_out, total_price, amount_paid, applied_deposit, remaining_balance, payment_status, status, stay_sequence)
+       VALUES ($1, $2, 'Guest Ota Folio', '2026-12-01', '2026-12-03', 492020, 0, 0, 492020, 'UNPAID', 'BOOKED', 3) RETURNING id`,
+      [bOta.rows[0].id, roomIdA]
+    );
+    resIdOta = resOta.rows[0].id;
+    await client.query(
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'ROOM_CHARGE', 'Room Charge OTA', 392020, 'DEBIT')`,
+      [resIdOta, propIdA]
+    );
+    await client.query(
+      `INSERT INTO folio_entries (reservation_id, property_id, entry_type, description, amount, direction)
+       VALUES ($1, $2, 'EXTRA_BED', 'Extra Bed Charge', 100000, 'DEBIT')`,
+      [resIdOta, propIdA]
+    );
+
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -190,25 +236,25 @@ async function cleanupFixtures() {
     // 1. Audit logs & Payment Evidences
     if (propIdA || propIdB) {
       await client.query(
-        'DELETE FROM payment_evidences WHERE property_id IN ($1, $2) OR reservation_id IN ($3, $4, $5)',
-        [propIdA || 0, propIdB || 0, resIdA || 0, resIdB || 0, resIdCrossRoom || 0]
+        'DELETE FROM payment_evidences WHERE property_id IN ($1, $2) OR reservation_id IN ($3, $4, $5, $6)',
+        [propIdA || 0, propIdB || 0, resIdA || 0, resIdB || 0, resIdCrossRoom || 0, resIdOta || 0]
       );
       await client.query(
-        'DELETE FROM audit_logs WHERE property_id IN ($1, $2) OR record_id IN ($3, $4, $5)',
-        [propIdA || 0, propIdB || 0, String(resIdA || 0), String(resIdB || 0), String(resIdCrossRoom || 0)]
+        'DELETE FROM audit_logs WHERE property_id IN ($1, $2) OR record_id IN ($3, $4, $5, $6)',
+        [propIdA || 0, propIdB || 0, String(resIdA || 0), String(resIdB || 0), String(resIdCrossRoom || 0), String(resIdOta || 0)]
       );
     }
 
     // 2. Folio & Payment
-    if (resIdA || resIdB || resIdCrossRoom) {
-      await client.query('DELETE FROM payment_transactions WHERE reservation_id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
-      await client.query('DELETE FROM folio_entries WHERE reservation_id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
-      await client.query('DELETE FROM reservations WHERE id IN ($1, $2, $3)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0]);
+    if (resIdA || resIdB || resIdCrossRoom || resIdOta) {
+      await client.query('DELETE FROM payment_transactions WHERE reservation_id IN ($1, $2, $3, $4)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0, resIdOta || 0]);
+      await client.query('DELETE FROM folio_entries WHERE reservation_id IN ($1, $2, $3, $4)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0, resIdOta || 0]);
+      await client.query('DELETE FROM reservations WHERE id IN ($1, $2, $3, $4)', [resIdA || 0, resIdB || 0, resIdCrossRoom || 0, resIdOta || 0]);
     }
 
-    // 3. Bookings
-    if (bookingIdA || bookingIdB || propIdA || propIdB) {
-      await client.query('DELETE FROM bookings WHERE id IN ($1, $2) OR property_id IN ($3, $4)', [bookingIdA || 0, bookingIdB || 0, propIdA || 0, propIdB || 0]);
+    // 3. Bookings — exact IDs only, no property_id sweep
+    if (bookingIdA || bookingIdB || bookingIdOta) {
+      await client.query('DELETE FROM bookings WHERE id IN ($1, $2, $3)', [bookingIdA || 0, bookingIdB || 0, bookingIdOta || 0]);
     }
 
     // 4. Availability dates
@@ -256,6 +302,32 @@ async function runTests() {
   const port = server.address().port;
   baseUrl = 'http://127.0.0.1:' + port;
   console.log('Test server running at ' + baseUrl);
+
+  // Generate auth token AFTER fixtures are created so property_ids match.
+  // Follows the same pattern as payment_evidence_test.js but uses a
+  // deterministic existing-user lookup for the disposable test DB.
+  const userRes = await pool.query(
+    "SELECT id, username, full_name, role_id FROM users ORDER BY id LIMIT 1"
+  );
+  if (userRes.rows.length > 0 && propIdA) {
+    const user = userRes.rows[0];
+    authToken = 'Bearer ' + generateToken({
+      id: user.id,
+      email: '',
+      username: user.username,
+      full_name: user.full_name,
+      role: 'Super Admin',
+      role_id: user.role_id,
+      property_id: propIdA,
+      scope: 'FULL'
+    });
+  }
+  if (!authToken) {
+    throw new Error(
+      'AUTH_FAILURE: no suitable user found or propIdA missing; cannot authenticate test requests.'
+    );
+  }
+  console.log('Auth token generated for user "' + userRes.rows[0]?.username + '" against property ' + propIdA);
 
   try {
     // ==========================================
@@ -420,6 +492,68 @@ async function runTests() {
     expect(Number(resCheckB.rows[0].amount_paid) === 0, 'M: target reservation amount_paid remained 0');
 
     // ==========================================
+    // 1b. OTA_COLLECT OVERPAYMENT REGRESSION
+    // ==========================================
+
+    // N. Verify OTA_COLLECT reservation setup: canonical remaining=492020, hotel_collectible_remaining=100000
+    const folioOta = await api('GET', `/api/reservations/${resIdOta}/folio?property_id=${propIdA}`);
+    expect(folioOta.status === 200, 'N1: GET OTA folio returns 200');
+    expect(Number(folioOta.json?.data?.authoritative_financials?.remaining_balance) === 492020, 'N2: canonical remaining_balance = 492020');
+    expect(Number(folioOta.json?.data?.authoritative_financials?.hotel_collectible_remaining_balance) === 100000, 'N3: hotel_collectible_remaining_balance = 100000');
+    expect(folioOta.json?.data?.authoritative_financials?.payment_responsibility === 'OTA_COLLECT', 'N4: payment_responsibility = OTA_COLLECT');
+
+    // O. Attempt OTA hotel payment larger than hotel collectible (492020 > 100000) -> reject with OVERPAYMENT_NOT_ALLOWED
+    const payOtaOver = await api('POST', `/api/reservations/${resIdOta}/payments`, {
+      property_id: propIdA,
+      amount: 492020,
+      payment_method: 'CASH',
+      reference_code: 'REF-OTA-OVERPAY-ATTEMPT'
+    });
+    expect(payOtaOver.status === 400, 'O1: POST overpayment on OTA_COLLECT reserved with 400');
+    expect(payOtaOver.json?.code === 'OVERPAYMENT_NOT_ALLOWED', 'O2: error code is OVERPAYMENT_NOT_ALLOWED');
+    expect(Number(payOtaOver.json?.details?.remaining_balance) === 100000, 'O3: details.remaining_balance = hotel collectible remaining (100000)');
+    expect(Number(payOtaOver.json?.details?.payment_amount) === 492020, 'O4: details.payment_amount = attempted payment (492020)');
+
+    // P. Atomicity: rejected OTA overpayment created no payment_transactions row
+    const ptOtaGhost = await pool.query(
+      'SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reference_code = $1',
+      ['REF-OTA-OVERPAY-ATTEMPT']
+    );
+    expect(ptOtaGhost.rows[0].count === 0, 'P: rejected OTA overpayment created 0 payment_transactions rows');
+
+    // Q. Atomicity: reservation amount_paid unchanged after rejected OTA overpayment
+    const resOtaAfter = await pool.query('SELECT amount_paid, remaining_balance FROM reservations WHERE id = $1', [resIdOta]);
+    expect(Number(resOtaAfter.rows[0].amount_paid) === 0, 'Q1: OTA reservation amount_paid unchanged at 0 after rejected overpayment');
+    expect(Number(resOtaAfter.rows[0].remaining_balance) === 492020, 'Q2: OTA reservation remaining_balance unchanged at 492020 after rejected overpayment');
+
+    // R. Exact hotel-collectible payment should succeed (100000 <= 100000)
+    const payOtaExact = await api('POST', `/api/reservations/${resIdOta}/payments`, {
+      property_id: propIdA,
+      amount: 100000,
+      payment_method: 'CASH',
+      reference_code: 'REF-OTA-EXACT'
+    });
+    expect(payOtaExact.status === 200, 'R1: POST exact hotel-collectible payment on OTA_COLLECT returns 200');
+    expect(payOtaExact.json?.status === 'SUCCESS', 'R2: response status is SUCCESS');
+
+    // S. DB verification: payment record inserted
+    const ptOtaOk = await pool.query(
+      'SELECT * FROM payment_transactions WHERE reference_code = $1',
+      ['REF-OTA-EXACT']
+    );
+    expect(ptOtaOk.rowCount === 1, 'S1: payment_transactions row inserted for exact OTA payment');
+    expect(ptOtaOk.rows[0] && Number(ptOtaOk.rows[0].amount) === 100000, 'S2: DB payment amount is 100,000');
+
+    // T. Reservation financials updated correctly after exact OTA payment
+    const resOtaFinal = await pool.query(
+      'SELECT amount_paid, applied_deposit, remaining_balance, payment_status FROM reservations WHERE id = $1',
+      [resIdOta]
+    );
+    expect(Number(resOtaFinal.rows[0].amount_paid) === 100000, 'T1: OTA reservation amount_paid updated to 100,000');
+    expect(Number(resOtaFinal.rows[0].remaining_balance) === 392020, 'T2: OTA reservation remaining_balance updated to 392,020 (492020 - 100000)');
+    expect(resOtaFinal.rows[0].payment_status === 'PARTIAL', 'T3: OTA reservation payment_status is PARTIAL');
+
+    // ==========================================
     // 2. FOLIO ENDPOINT HARDENING TESTS
     // ==========================================
 
@@ -490,16 +624,16 @@ async function runTests() {
   const resProp = await pool.query('SELECT COUNT(*)::int AS count FROM properties WHERE id IN ($1, $2)', [propIdA, propIdB]);
   expect(resProp.rows[0].count === 0, 'X1: zero test properties residue');
 
-  const resPay = await pool.query('SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reservation_id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
+  const resPay = await pool.query('SELECT COUNT(*)::int AS count FROM payment_transactions WHERE reservation_id IN ($1, $2, $3, $4)', [resIdA, resIdB, resIdCrossRoom, resIdOta]);
   expect(resPay.rows[0].count === 0, 'X2: zero test payment_transactions residue');
 
-  const resFolio = await pool.query('SELECT COUNT(*)::int AS count FROM folio_entries WHERE reservation_id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
+  const resFolio = await pool.query('SELECT COUNT(*)::int AS count FROM folio_entries WHERE reservation_id IN ($1, $2, $3, $4)', [resIdA, resIdB, resIdCrossRoom, resIdOta]);
   expect(resFolio.rows[0].count === 0, 'X3: zero test folio_entries residue');
 
-  const resRes = await pool.query('SELECT COUNT(*)::int AS count FROM reservations WHERE id IN ($1, $2, $3)', [resIdA, resIdB, resIdCrossRoom]);
+  const resRes = await pool.query('SELECT COUNT(*)::int AS count FROM reservations WHERE id IN ($1, $2, $3, $4)', [resIdA, resIdB, resIdCrossRoom, resIdOta]);
   expect(resRes.rows[0].count === 0, 'X4: zero test reservations residue');
 
-  const resBook = await pool.query('SELECT COUNT(*)::int AS count FROM bookings WHERE id IN ($1, $2) OR property_id IN ($3, $4)', [bookingIdA, bookingIdB, propIdA, propIdB]);
+  const resBook = await pool.query('SELECT COUNT(*)::int AS count FROM bookings WHERE id IN ($1, $2, $3)', [bookingIdA, bookingIdB, bookingIdOta]);
   expect(resBook.rows[0].count === 0, 'X5: zero test bookings residue');
 
   const resAudit = await pool.query('SELECT COUNT(*)::int AS count FROM audit_logs WHERE property_id IN ($1, $2)', [propIdA, propIdB]);

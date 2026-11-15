@@ -5,6 +5,7 @@ import { evaluateRoomReadiness } from '../turnover/turnoverService';
 import { deriveDepositBalance } from '../deposits/depositService';
 import { getEffectivePaymentStateForReservation } from '../payments/paymentAllocationService';
 import { getQualifyingEvidenceForReservation } from '../payments/paymentEvidenceService';
+import { calculateReservationFinancials } from '../stayCharges/stayChargesService';
 import type { MissingRequirement } from './checkinGateTypes';
 
 /**
@@ -34,6 +35,7 @@ const MISSING_LABELS: Record<string, string> = {
   IDENTITY_DOCUMENT_MISSING: 'Dokumen identitas tamu belum tersedia',
   PAYMENT_MISSING: 'Pembayaran belum tercatat',
   PAYMENT_EVIDENCE_MISSING: 'Bukti pembayaran belum tersedia',
+  OTA_VOUCHER_MISSING: 'Voucher / bukti booking OTA belum tersedia',
   GUARANTEE_MISSING: 'Jaminan belum ditambahkan',
   ROOM_NOT_READY: 'Kamar belum siap',
 };
@@ -47,8 +49,9 @@ export async function evaluatePreCheckinEligibility(
 
   // ── Validate reservation belongs to property (canonical: booking→room fallback) ──
   const resCheck = await client.query(
-    `SELECT res.id, res.room_id,
+    `SELECT res.id, res.room_id, res.booking_id,
             b.property_id AS booking_property_id,
+            b.payment_responsibility,
             r.property_id AS room_property_id
      FROM reservations res
      LEFT JOIN bookings b ON b.id = res.booking_id
@@ -73,6 +76,8 @@ export async function evaluatePreCheckinEligibility(
   }
 
   const row = resCheck.rows[0];
+  const paymentResponsibility = String(row.payment_responsibility || 'HOTEL_COLLECT').toUpperCase();
+  const isOtaCollect = paymentResponsibility === 'OTA_COLLECT';
   const effectivePropertyId = row.booking_property_id ?? row.room_property_id;
   if (effectivePropertyId != null && Number(effectivePropertyId) !== propertyId) {
     return {
@@ -145,34 +150,78 @@ export async function evaluatePreCheckinEligibility(
   if (!identityOk) missing.push({ code: 'IDENTITY_DOCUMENT_MISSING', label: MISSING_LABELS.IDENTITY_DOCUMENT_MISSING });
 
   // ── Gate 4: Payment ────────────────────────────────────────────────────
-  // At least one qualifying positive payment exists for this reservation.
-  // Qualifying sources:
-  //   A. Direct ROOM_RESERVATION payment with amount > 0
-  //   B. ACTIVE allocation from a SUCCESS BOOKING_GROUP payment with
-  //      allocated_amount > 0
-  // Partial payment is acceptable. Full settlement is NOT required here.
-  // Gate 5 (evidence) is intentionally unchanged — group evidence is a 1B3+ concern.
+  // Use canonical remaining_balance from calculateReservationFinancials()
+  // as the authoritative payment state.
+  //
+  // Rules:
+  //   - remaining_balance > 0.01 => PAYMENT_REQUIRED (fail-closed)
+  //   - remaining_balance <= 0.01 + qualifying ordinary payment exists => PASS
+  //   - remaining_balance <= 0.01 + Approved Complimentary only (no ordinary) => PASS
+  //   - mixed ordinary + comp with remaining <= 0.01 => PASS
+  //   - pending/rejected/revoked Complimentary => no privilege
+  const financials = await calculateReservationFinancials(client, reservationId, effectivePropertyId);
+  const remainingBalance = Number.isFinite(financials?.remaining_balance)
+    ? Number(financials.remaining_balance)
+    : Number.POSITIVE_INFINITY;
+
+  // Check for approved complimentary with zero ordinary payment
+  const approvedCompOnly = await hasApprovedComplimentarySettled(client, reservationId, effectivePropertyId);
   const payState = await getEffectivePaymentStateForReservation(
     client, reservationId, effectivePropertyId
   );
-  const paymentOk = payState.qualifyingPositivePaymentExists;
+
+  let paymentOk = false;
+  if (isOtaCollect) {
+    // OTA Collect: hotel payment is not expected; settlement is the OTA's responsibility.
+    paymentOk = true;
+  } else if (remainingBalance <= 0.01) {
+    // Zero-balance: check settlement source
+    const hasOrdinaryPayment = payState.qualifyingPositivePaymentExists;
+    if (hasOrdinaryPayment || approvedCompOnly) {
+      paymentOk = true;
+    }
+  }
 
   if (!paymentOk) missing.push({ code: 'PAYMENT_MISSING', label: MISSING_LABELS.PAYMENT_MISSING });
 
-  // ── Gate 5: Payment Evidence ───────────────────────────────────────────
-  // At least one ACTIVE evidence row linked to a qualifying SUCCESS payment_transaction.
-  // If no payment exists: evidence_ok = false (explicitly).
-  // Supports both direct ROOM_RESERVATION payments and BOOKING_GROUP allocations.
-  let evidenceCount = 0;
-  if (paymentOk) {
-    const evidenceRows = await getQualifyingEvidenceForReservation(
-      client, reservationId, effectivePropertyId
-    );
-    evidenceCount = evidenceRows.length;
-  }
-  const paymentEvidenceOk = paymentOk && evidenceCount > 0;
+   // ── Gate 5: Payment Evidence ───────────────────────────────────────────
+   // Evidence REQUIRED when ordinary payment exists; if ordinary payment
+   // exists (even when partial / remaining_balance > 0), check its active
+   // evidence so we do not falsely report PAYMENT_EVIDENCE_MISSING when
+   // valid evidence is already attached.
+   // Complimentary-only (no ordinary payment, zero balance) => evidence WAIVED.
+   let evidenceCount = 0;
+   if (isOtaCollect) {
+     const otaVoucherRes = await client.query(
+       `SELECT 1
+        FROM booking_evidences
+        WHERE booking_id = $1
+          AND property_id = $2
+          AND evidence_type = 'OTA_VOUCHER'
+          AND is_active = TRUE
+        LIMIT 1`,
+       [Number(row.booking_id), effectivePropertyId]
+     );
+     evidenceCount = otaVoucherRes.rowCount ?? 0;
+   } else if (payState.qualifyingPositivePaymentExists) {
+     // Ordinary payment exists (full or partial): verify active evidence
+     const evidenceRows = await getQualifyingEvidenceForReservation(
+       client, reservationId, effectivePropertyId
+     );
+     evidenceCount = evidenceRows.length;
+   } else if (paymentOk && approvedCompOnly) {
+     // Approved complimentary only (zero balance, no ordinary payment): WAIVE evidence
+     evidenceCount = 1; // Waived
+   }
+   const paymentEvidenceOk = evidenceCount > 0;
 
-  if (!paymentEvidenceOk) missing.push({ code: 'PAYMENT_EVIDENCE_MISSING', label: MISSING_LABELS.PAYMENT_EVIDENCE_MISSING });
+   if (!paymentEvidenceOk) {
+     if (isOtaCollect) {
+       missing.push({ code: 'OTA_VOUCHER_MISSING', label: MISSING_LABELS.OTA_VOUCHER_MISSING });
+     } else if (!approvedCompOnly) {
+       missing.push({ code: 'PAYMENT_EVIDENCE_MISSING', label: MISSING_LABELS.PAYMENT_EVIDENCE_MISSING });
+     }
+   }
 
   // ── Gate 6: Guarantee ──────────────────────────────────────────────────
   // TRUE if EITHER:
@@ -292,4 +341,36 @@ export async function evaluatePreCheckinEligibility(
     room_ready_ok: roomReadyOk,
     missing,
   };
+}
+
+/**
+ * hasApprovedComplimentarySettled — Check if reservation has approved
+ * complimentary with zero ordinary payment (evidence-waived scenario).
+ */
+async function hasApprovedComplimentarySettled(
+  client: Pool | PoolClient,
+  reservationId: number,
+  propertyId: number
+): Promise<boolean> {
+  // Check for approved complimentary request with adjustment
+  const compReq = await client.query(
+    `SELECT id, applied_adjustment_amount, status
+     FROM reservation_complimentary_requests
+     WHERE reservation_id = $1
+       AND status = 'APPROVED'
+       AND applied_adjustment_amount > 0
+     LIMIT 1`,
+    [reservationId]
+  );
+
+  if ((compReq.rowCount ?? 0) === 0) {
+    return false;
+  }
+
+  // Verify no ordinary payment exists (complimentary-only scenario)
+  const payState = await getEffectivePaymentStateForReservation(
+    client, reservationId, propertyId
+  );
+
+  return !payState.qualifyingPositivePaymentExists;
 }

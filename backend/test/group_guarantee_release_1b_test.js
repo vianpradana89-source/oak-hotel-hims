@@ -298,17 +298,29 @@ async function run() {
     check(groupDep8.releaseBlockReason !== null, 'T8d: group deposit has block reason');
     await cleanup(client, bookingId, reservationIds);
 
-    // T9: BOOKING_GROUP custody read exposes metadata
+    // T9: BOOKING_GROUP custody read exposes metadata (CHECKED_IN blocked vs pre-check-in BOOKED eligible)
     bookingId = await createBooking(client, propertyId, 'ACTIVE');
-    const r9a = await createReservation(client, bookingId, roomId, roomTypeId, 'BOOKED', 1);
+    const r9a = await createReservation(client, bookingId, roomId, roomTypeId, 'CHECKED_IN', 1);
     const r9b = await createReservation(client, bookingId, rooms[1]?.id || roomId, roomTypeId, 'BOOKED', 2);
     reservationIds = [r9a, r9b];
     const custId9 = await createCustody(client, propertyId, r9a, bookingId, 'BOOKING_GROUP');
     const custody9 = await getIdentityCustodyByReservation(pool, propertyId, r9a);
     const groupCust9 = custody9.find(c => c.scope === 'BOOKING_GROUP');
     check(groupCust9 !== undefined, 'T9a: group custody returned in list');
-    check(groupCust9.releaseEligible === false, 'T9b: group custody metadata shows not eligible');
+    check(groupCust9.releaseEligible === false, 'T9b: group custody metadata shows not eligible when a room is CHECKED_IN');
     check(groupCust9.activeChildCount === 2, 'T9c: group custody metadata shows 2 active children');
+    await cleanup(client, bookingId, reservationIds);
+
+    // T9d: Pre-check-in BOOKED-only group custody read exposes releaseEligible=true (Opsi A)
+    bookingId = await createBooking(client, propertyId, 'ACTIVE');
+    const r9pa = await createReservation(client, bookingId, roomId, roomTypeId, 'BOOKED', 1);
+    const r9pb = await createReservation(client, bookingId, rooms[1]?.id || roomId, roomTypeId, 'BOOKED', 2);
+    reservationIds = [r9pa, r9pb];
+    await createCustody(client, propertyId, r9pa, bookingId, 'BOOKING_GROUP');
+    const custody9p = await getIdentityCustodyByReservation(pool, propertyId, r9pa);
+    const groupCust9p = custody9p.find(c => c.scope === 'BOOKING_GROUP');
+    check(groupCust9p?.releaseEligible === true, 'T9d: pre-check-in BOOKED-only group custody metadata shows releaseEligible=true');
+    check(groupCust9p?.releaseBlockReason === null, 'T9e: pre-check-in BOOKED-only group custody has null releaseBlockReason');
     await cleanup(client, bookingId, reservationIds);
 
     // ── T10: ROOM_RESERVATION rows retain existing behavior ──
@@ -590,18 +602,29 @@ async function runReturnGuardTests(guardPool) {
     const roomId = rooms[0]?.id;
     const roomTypeId = rooms[0]?.typeId;
 
-    // T1: BOOKING_GROUP custody + 2 active children → return rejected 409
+    // T1: BOOKING_GROUP custody + CHECKED_IN active child → return rejected 409
     bookingId = await createBooking(client, propertyId, 'ACTIVE');
-    const r1a = await createReservation(client, bookingId, roomId, roomTypeId, 'BOOKED', 1);
+    const r1a = await createReservation(client, bookingId, roomId, roomTypeId, 'CHECKED_IN', 1);
     const r1b = await createReservation(client, bookingId, rooms[1]?.id || roomId, roomTypeId, 'BOOKED', 2);
     reservationIds = [r1a, r1b];
     const custId1 = await createCustody(client, propertyId, r1a, bookingId, 'BOOKING_GROUP');
     try {
       await returnIdentity(guardPool, { propertyId, custodyId: custId1, actor: { userId: '1', name: 'Tester', role: 'RECEPTIONIST' } });
-      check(false, 'T1a: 2 active children → should reject return');
+      check(false, 'T1a: CHECKED_IN child → should reject return');
     } catch (err) {
-      check(err.code === 'BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE', 'T1b: 2 active children → rejects with BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE');
+      check(err.code === 'BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE', 'T1b: CHECKED_IN child → rejects with BOOKING_GROUP_GUARANTEE_NOT_RELEASE_ELIGIBLE');
     }
+    await cleanup(client, bookingId, reservationIds);
+
+    // T1c: Pre-check-in BOOKED-only group custody → return succeeds (Opsi A — #1403 scenario)
+    bookingId = await createBooking(client, propertyId, 'ACTIVE');
+    const r1pa = await createReservation(client, bookingId, roomId, roomTypeId, 'BOOKED', 1);
+    const r1pb = await createReservation(client, bookingId, rooms[1]?.id || roomId, roomTypeId, 'BOOKED', 2);
+    reservationIds = [r1pa, r1pb];
+    const custId1p = await createCustody(client, propertyId, r1pa, bookingId, 'BOOKING_GROUP');
+    const result1p = await returnIdentity(guardPool, { propertyId, custodyId: custId1p, actor: { userId: '1', name: 'Tester', role: 'RECEPTIONIST' } });
+    check(result1p.status === 'RETURNED', 'T1c: pre-check-in BOOKED-only group custody → returns successfully');
+    check(result1p.returned_by === 'Tester', 'T1d: pre-check-in BOOKED-only group custody → returned_by populated');
     await cleanup(client, bookingId, reservationIds);
 
     // T2: 1 CHECKED_OUT + 1 BOOKED → rejected

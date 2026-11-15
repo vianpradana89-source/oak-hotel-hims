@@ -41,6 +41,9 @@ export const FEATURE_KEYS = {
   MARKETING_ENABLED: 'marketing.enabled',
   PURCHASING_ENABLED: 'purchasing.enabled',
   GENERAL_AFFAIR_ENABLED: 'general_affair.enabled',
+
+  // Document & Print Module
+  DOCUMENTS_ENABLED: 'documents.enabled',
 } as const;
 
 export type FeatureKey = typeof FEATURE_KEYS[keyof typeof FEATURE_KEYS];
@@ -85,6 +88,9 @@ export const DEFAULT_FEATURE_FLAGS: Record<string, boolean> = {
   'marketing.enabled': true,
   'purchasing.enabled': false,
   'general_affair.enabled': false,
+
+  // Document & Print Module (default ON agar tidak breaking change)
+  'documents.enabled': true,
 };
 
 export interface PropertyFeatureRecord {

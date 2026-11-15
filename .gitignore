@@ -39,3 +39,6 @@ __pycache__/
 *.bak
 *.backup
 *.traineddata
+
+# Reviewed booking replay DDL; other SQL files and database dumps remain ignored.
+!backend/ddl/booking_create_requests_draft.sql

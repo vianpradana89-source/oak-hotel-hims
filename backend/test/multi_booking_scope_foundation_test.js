@@ -420,7 +420,8 @@ async function run() {
       amount: 50000,
       paymentMethod: 'CASH',
       idempotencyKey: `IDEMP-DEP-${runId}`,
-      actor: { userId: '1', name: 'Tester', role: 'RECEPTIONIST' }
+      actor: { userId: '1', name: 'Tester', role: 'RECEPTIONIST' },
+      purpose: 'ADVANCE_PAYMENT'
     });
     const createdDeposit = await client.query(
       `SELECT booking_id, scope FROM deposits WHERE id = $1`,

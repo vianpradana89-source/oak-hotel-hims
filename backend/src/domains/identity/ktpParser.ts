@@ -196,6 +196,45 @@ function legacyParseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): I
     .map((l) => (l ? l.trim() : ''))
     .filter((l) => l.length > 0);
 
+  // PRE-SCAN: Detect merged-line OCR (<BIRTH_PLACE><DATE><FULL_NAME>) before any parsing.
+  // Only activate on lines with recognized birth-label structure that occurs BEFORE the date.
+  for (const l of cleanLines) {
+    const dateMatch = l.match(/(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})/) ||
+                      l.match(/(\d{2})(\d{2})[\s\-\/\.]+(\d{4})/);
+    if (dateMatch && hasBirthLabelBeforeDate(l, dateMatch[0])) {
+      const dateStr = dateMatch[0];
+      const dateIdx = l.indexOf(dateStr);
+      if (dateIdx > 0) {
+        let placeStr = l.slice(0, dateIdx).trim();
+        placeStr = placeStr.replace(/^[:;=\-\s,]+/, '').replace(/[,;:\s]+$/, '').trim();
+        placeStr = placeStr.replace(/^(?:Te\s*mpat|Tempat|Tpt|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir)\s*[/\\\.\-]*\s*(?:Tgl|Tanggal|Lahir)?\s*[:;=\-\s]+/i, '').trim();
+        placeStr = placeStr.replace(/^(?:LAHIR|TGL|TGL\.\s*LAHIR|TEMPAT\s*LAHIR|TPT)\s*[:;=\-\s]+/i, '').trim();
+        const bLabelPat = /(?:Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tpt[\s\/\\]*Tgl|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir)/gi;
+        let lblEnd = -1, lblM;
+        while ((lblM = bLabelPat.exec(placeStr)) !== null) lblEnd = lblM.index + lblM[0].length;
+        if (lblEnd >= 0) {
+          placeStr = placeStr.slice(lblEnd).trim();
+          placeStr = placeStr.replace(/\s*(?:Nama|Narna|Name)\s*[:;=\-\s]*/gi, ' ').trim();
+          placeStr = placeStr.replace(/^[,;:\s]+/, '').replace(/[,;:\s]+$/, '').trim();
+          placeStr = placeStr.replace(/[.,;:\-]+\s*$/, '').trim();
+        }
+        if (placeStr.length >= 2 && !isHeaderOrNoise(placeStr)) {
+          result.birth_place = placeStr.toUpperCase();
+        }
+      }
+      const nameStr = l.slice(dateIdx + dateStr.length).trim();
+      const namePart = nameStr.replace(/\s+Gol\.?\s*Darah.*$/i, '').replace(/^[,;:\s]+/, '').trim();
+      if (namePart.length >= 2 && !isHeaderOrNoise(namePart)) {
+        const nameWords = namePart.split(/\s+/);
+        if (nameWords.length >= 2) {
+          result.full_name = namePart.toUpperCase();
+        }
+      }
+      result.birth_date = normalizeDate(dateStr);
+      break;
+    }
+  }
+
   const isLabelHeader = (s: string): boolean => {
     return KTP_LABELS_REGEX.test(s.trim());
   };
@@ -215,24 +254,30 @@ function legacyParseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): I
   // Fallback standalone 16 digit scan
   if (!result.identity_number) {
     for (const l of cleanLines) {
-      const digits = l.replace(/[^0-9]/g, '');
-      if (digits.length === 16) {
-        result.identity_number = digits;
-        break;
+      const digitRuns = l.match(/\d+/g) || [];
+      for (const run of digitRuns) {
+        if (run.length === 16) {
+          result.identity_number = run;
+          break;
+        }
       }
+      if (result.identity_number) break;
     }
   }
 
   // 2. Nama Lengkap (Allow OCR prefix noise like 'ING Nama ...')
-  for (const l of cleanLines) {
-    const m = l.match(/(?:^|.*?\b)(?:N[aA4](?:[mM]|rn|rm|nn)[aA4eE]|Name)\s*[:;=\-\s]+\s*([A-Za-z\s\.\,\'\-]+)/i);
-    if (m) {
-      let val = m[1].trim();
-      const parts = val.split(/\s+(?=(?:Tempat|Tpt|Tgl|TgLahir|Jenis|Kelamin|Alamat|RT|Kel|Kecamatan|Agama|Gol)\b)/i);
-      val = parts[0].trim();
-      if (val.length > 2 && !isLabelHeader(val)) {
-        result.full_name = val.toUpperCase();
-        break;
+  // Skip if already set by merged-line PRE-SCAN above.
+  if (!result.full_name) {
+    for (const l of cleanLines) {
+      const m = l.match(/(?:^|.*?\b)(?:N[aA4](?:[mM]|rn|rm|nn)[aA4eE]|Name)\s*[:;=\-\s]+\s*([A-Za-z\s\.\,\'\-]+)/i);
+      if (m) {
+        let val = m[1].trim();
+        const parts = val.split(/\s+(?=(?:Tempat|Tpt|Tgl|TgLahir|Jenis|Kelamin|Alamat|RT|Kel|Kecamatan|Agama|Gol)\b)/i);
+        val = parts[0].trim();
+        if (val.length > 2 && !isLabelHeader(val)) {
+          result.full_name = val.toUpperCase();
+          break;
+        }
       }
     }
   }
@@ -253,7 +298,9 @@ function legacyParseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): I
   }
 
   // 3. Tempat / Tanggal Lahir
-  for (let i = 0; i < cleanLines.length; i++) {
+  // Skip if already set by merged-line PRE-SCAN above.
+  if (!result.birth_place || !result.birth_date) {
+    for (let i = 0; i < cleanLines.length; i++) {
     const l = cleanLines[i];
     const m = l.match(/(?:Te\s*mpat|Tempat|Tpt|Tgl|TgLahir|TgLahi|Lahir)[A-Za-z0-9\s\/\.\-]*?[:;=\-\s]+([A-Za-z0-9\s\.\,\-\/]+)/i);
     let val: string | null = null;
@@ -282,25 +329,28 @@ function legacyParseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): I
       }
       if (result.birth_date || result.birth_place) break;
     }
+    }
   }
 
   // Fallback standalone date & place if birth_date or birth_place missing
   if (!result.birth_date || !result.birth_place) {
     for (const l of cleanLines) {
-      if (!/Berlaku|16-10|Kewarganegaraan|Kewarganecaran/i.test(l)) {
-        const dateMatch = l.match(/\b(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})\b/) || l.match(/\b(\d{2})(\d{2})[\s\-\/\.]+(\d{4})\b/);
-        if (dateMatch) {
-          if (!result.birth_date) {
-            result.birth_date = normalizeDate(dateMatch[0]);
-          }
-          if (!result.birth_place) {
-            const cityMatch = l.match(/(?:^|.*?)\b([A-Za-z]+)\s*[\.\,\s]\s*\d{1,2}[\s\-\/\.]/);
-            if (cityMatch && cityMatch[1]) {
-              const p = cityMatch[1].toUpperCase();
-              if (p.length >= 3 && !isLabelHeader(p)) {
-                result.birth_place = p;
-              }
-            }
+      const dateMatch = l.match(/\b(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})\b/) || l.match(/\b(\d{2})(\d{2})[\s\-\/\.]+(\d{4})\b/);
+      if (!dateMatch || !hasBirthLabelBeforeDate(l, dateMatch[0])) {
+        continue;
+      }
+      if (/Berlaku|16-10|Kewarganegaraan|Kewarganecaran/i.test(l)) {
+        continue;
+      }
+      if (!result.birth_date) {
+        result.birth_date = normalizeDate(dateMatch[0]);
+      }
+      if (!result.birth_place) {
+        const cityMatch = l.match(/(?:^|.*?)\b([A-Za-z]+)\s*[\.\,\s]\s*\d{1,2}[\s\-\/\.]/);
+        if (cityMatch && cityMatch[1]) {
+          const p = cityMatch[1].toUpperCase();
+          if (p.length >= 3 && !isLabelHeader(p)) {
+            result.birth_place = p;
           }
         }
       }
@@ -571,6 +621,19 @@ export function isHeaderOrNoise(raw: string | null | undefined): boolean {
   return false;
 }
 
+// Checks whether a line contains a recognized birth-label structure AND that the
+// label occurs BEFORE the provided date anchor. Prevents false activation on
+// lines like "08-07-2025 Tempat/Tgl Lahir" or "Tempat Tinggal : MALANG 08-07-2025".
+function hasBirthLabelBeforeDate(line: string, dateStr: string): boolean {
+  if (!line || !dateStr) return false;
+  const dateIdx = line.indexOf(dateStr);
+  if (dateIdx < 0) return false;
+  const beforeDate = line.slice(0, dateIdx);
+  // Do not accept bare "Tempat" or "Tpt" alone — require the full compound label.
+  const pattern = /(?:Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tpt[\s\/\\]*Tgl|Tgl\s*Lahir|Tanggal\s*Lahir)/i;
+  return pattern.test(beforeDate);
+}
+
 export function isLikelyPersonName(raw: string | null | undefined): boolean {
   if (!raw) return false;
   const s = raw.trim();
@@ -684,13 +747,37 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
 
   let nikIdx = -1;
   for (let i = 0; i < valueCandidates.length; i++) {
-    const digits = valueCandidates[i].replace(/[^0-9]/g, '');
+    const raw = valueCandidates[i];
+    // First try: exact 16-digit candidate — but only if the raw string contains a single contiguous 16-digit run.
+    // This prevents false positives when separate digit runs are concatenated (e.g., "12345678 abc 87654321" → "1234567887654321").
+    const digits = raw.replace(/[^0-9]/g, '');
     if (digits.length === 16) {
-      const parsed = normalizeNik(digits);
-      if (parsed) {
-        result.identity_number = parsed;
-        nikIdx = i;
-        break;
+      const digitRuns = raw.match(/\d+/g) || [];
+      if (digitRuns.length === 1) {
+        // Single contiguous run — safe to use directly
+        const parsed = normalizeNik(digits);
+        if (parsed) {
+          result.identity_number = parsed;
+          nikIdx = i;
+          break;
+        }
+      }
+    }
+    // Second try: extract 16-digit NIK from longer noisy digit sequences
+    // (e.g., "nspecificny M13 3303050104860001" → "3303050104860001")
+    if (nikIdx === -1 && digits.length > 16) {
+      // Look for exact 16-digit runs within the original string (preserves OCR boundaries).
+      // This avoids false positives from arbitrary sliding windows over concatenated noise.
+      const digitRuns = raw.match(/\d+/g) || [];
+      for (const run of digitRuns) {
+        if (run.length === 16) {
+          const parsed = normalizeNik(run);
+          if (parsed) {
+            result.identity_number = parsed;
+            nikIdx = i;
+            break;
+          }
+        }
       }
     }
   }
@@ -705,10 +792,67 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
       }
     };
 
-    // 1. Nama
+    // 1. Nama (merged-line aware: may contain birth_place + date before it)
     skipNoise();
-    if (peek() && isLikelyPersonName(peek())) {
-      result.full_name = consume()!.toUpperCase();
+    if (peek()) {
+      let val = peek()!;
+      // Handle merged line where birth info precedes name: "<BIRTH_PLACE><DATE><FULL_NAME> Gol.Darah"
+      // Parse atomically from the same candidate before consuming.
+      // Guard: birth-label must be present AND occur BEFORE the date anchor.
+      const dateAnchor = val.match(/(\d{1,2}[\s\-\/\.]+\d{1,2}[\s\-\/\.]+\d{4})/) || val.match(/(\d{2})(\d{2})[\s\-\/\.]+(\d{4})/);
+      if (dateAnchor && hasBirthLabelBeforeDate(val, dateAnchor[0])) {
+        const dateStr = dateAnchor[0];
+        const dateStartIdx = val.indexOf(dateStr);
+        // Derive birth_date
+        if (result.birth_date === null) {
+          result.birth_date = normalizeDate(dateStr);
+        }
+        // Derive birth_place from text before date
+        if (result.birth_place === null && dateStartIdx > 0) {
+          let placeStr = val.slice(0, dateStartIdx).trim();
+          placeStr = placeStr.replace(/^[:;=\-\s,]+/, '').replace(/[,;:\s]+$/, '').trim();
+          // Strip any leading labels + optional colon/dash (handle OCR typos like "Te mpat")
+          placeStr = placeStr.replace(/^(?:Te\s*mpat|Tempat|Tpt|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir|Te\s*s?at|T\s*pt)\s*[/\\\.\-]*\s*(?:Tgl|Tanggal|Lahir)?\s*[:;=\-\s]+/i, '').trim();
+          placeStr = placeStr.replace(/^(?:LAHIR|TGL|TGL.\s*LAHIR|TEMPAT\s*LAHIR|TPT)\s*[:;=\-\s]+/i, '').trim();
+          // Find last recognized birth label position BEFORE stripping (preserves multi-word support)
+          const birthLabelPattern = /(?:Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tpt[\s\/\\]*Tgl|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir)/gi;
+          let lastLabelEnd = -1;
+          let m;
+          while ((m = birthLabelPattern.exec(placeStr)) !== null) {
+            lastLabelEnd = m.index + m[0].length;
+          }
+          if (lastLabelEnd >= 0) {
+            // Text after last birth label — preserves multi-word places like "JAKARTA SELATAN"
+            placeStr = placeStr.slice(lastLabelEnd).trim();
+            // Remove trailing Nama/Narna/Name labels (part of merged output)
+            placeStr = placeStr.replace(/\s*(?:Nama|Narna|Name)\s*[:;=\-\s]*/gi, ' ').trim();
+          placeStr = placeStr.replace(/^[,;:\s]+/, '').replace(/[,;:\s]+$/, '').trim();
+            // Clean trailing punctuation including periods (OCR artifact before date)
+            placeStr = placeStr.replace(/[.,;:\-]+\s*$/, '').trim();
+          } else {
+            // No birth label found — strip embedded noise labels and clean
+            placeStr = placeStr.replace(/\s*(?:Tempat[\s\/\\]*(?:Tgl|Tanggal)?\s*Lahir|Tpt[\s\/\\]*Tgl|Tgl\s*Lahir|Tanggal\s*Lahir|Lahir|Nama|Narna|Name)\s*[:;=\-\s]*/gi, ' ').trim();
+            placeStr = placeStr.replace(/[.,;:\-]+\s*$/, '').trim();
+            placeStr = placeStr.replace(/^[,;:\s]+/, '').replace(/[,;:\s]+$/, '').trim();
+          }
+          if (placeStr.length >= 2 && !isHeaderOrNoise(placeStr)) {
+            result.birth_place = placeStr.toUpperCase();
+          }
+        }
+        // Derive full_name from text after date
+        const dateEndIdx = dateStartIdx + dateStr.length;
+        const afterDate = val.slice(dateEndIdx).trim();
+        const namePart = afterDate.replace(/\s+Gol\.?\s*Darah.*$/i, '').replace(/^[,;:\s]+/, '').trim();
+        if (namePart.length >= 2 && !isHeaderOrNoise(namePart)) {
+          result.full_name = namePart.toUpperCase();
+        }
+        consume();
+        // Skip the separate birth-place/date step since we already consumed this candidate atomically
+        // The normal step below will only fill fields still null.
+      } else if (isLikelyPersonName(val)) {
+        result.full_name = val.toUpperCase();
+        consume();
+      }
     }
 
     // 2. Tempat/Tgl Lahir
@@ -815,9 +959,8 @@ export function parseKtpRawLines(lines: string[], ocrConfidence: number = 0.9): 
     }
   }
 
-  // PASS 3: Legacy Fallback
+  // PASS 3: Legacy Fallback — always run, only fills fields still null
   const legacyResult = legacyParseKtpRawLines(lines, ocrConfidence);
-  
   for (const key of Object.keys(result) as Array<keyof IdentityCandidateData>) {
     if (key === 'confidence' || key === 'recognized_fields_count' || key === 'total_fields_count') continue;
     if (result[key] === null || result[key] === undefined || result[key] === '') {

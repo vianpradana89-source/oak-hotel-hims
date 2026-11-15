@@ -3,6 +3,11 @@ import sys
 import json
 import logging
 from PIL import Image
+# Set CPU/thread limits BEFORE numpy/paddle imports to cap memory footprint
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('NUMEXPR_NUM_THREADS', '1')
 import numpy as np
 
 # Suppress Paddle and oneDNN logging
@@ -162,17 +167,25 @@ def run_ocr_with_auto_orientation(image_path):
         }
 
     try:
-        ocr = PaddleOCR(use_angle_cls=False, lang='en', show_log=False)
+        ocr = PaddleOCR(
+            use_angle_cls=False,
+            lang='en',
+            show_log=False,
+            enable_mkldnn=False,
+            cpu_threads=1,
+            rec_batch_num=1
+        )
         base_img = Image.open(image_path).convert('RGB')
         w, h = base_img.size
 
         # Determine rotation candidate angles
-        # If portrait (H > W), test [90, 270, 0, 180]
-        # If landscape (W >= H), test [0, 180, 90, 270]
+        # KTP is a landscape card; portrait images are sideways cards needing
+        # only 90/270 tests, landscape images need only upright/upside-down tests.
+        # Limits one OCR process to at most two full Paddle inference passes.
         if h > w:
-            test_angles = [90, 270, 0, 180]
+            test_angles = [90, 270]
         else:
-            test_angles = [0, 180, 90, 270]
+            test_angles = [0, 180]
 
         best_angle = test_angles[0]
         best_score = -999

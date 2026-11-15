@@ -46,11 +46,22 @@ export interface OccupancyReportData {
   end_date: string;
   nights: number;
   totals: OccupancyTotals;
+  financials: OccupancyFinancials;
   daily: DailyOccupancyItem[];
   room_types?: RoomTypeOccupancyItem[];
 }
 
-export type OccupancyPeriodPreset = 'today' | '7days' | 'this_month' | 'custom';
+export interface OccupancyFinancials {
+  room_revenue: number;
+  paid_room_nights: number;
+  complimentary_room_nights: number;
+  adr: number;
+  revpar: number;
+  alos: number;
+  room_revenue_by_type: Record<string, number>;
+}
+
+export type OccupancyPeriodPreset = 'today' | 'yesterday' | '7days' | 'this_month' | 'last_month' | 'custom';
 
 export interface OccupancyErrorPayload {
   code: string;

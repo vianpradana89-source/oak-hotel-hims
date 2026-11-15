@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { createRequire } from 'node:module';
-import pkg from '../dist/index.js';
+// App di-import setelah konfigurasi disposable DB tervalidasi.
 import schemaPkg from '../dist/db/schema_v3.js';
 import {
   projectFolioEntryToTransaction,
@@ -11,7 +11,30 @@ import {
   reconcileHistoricalTransactions
 } from '../dist/domains/transactions/transactionService.js';
 
-const { app, pool } = pkg;
+const testUrl = process.env.TEST_DATABASE_URL;
+if (!testUrl) throw new Error('SAFETY: TEST_DATABASE_URL wajib diisi');
+
+const u = new URL(testUrl);
+if (
+  !['postgres:', 'postgresql:'].includes(u.protocol) ||
+  u.hostname !== '127.0.0.1' ||
+  u.port !== '15434' ||
+  decodeURIComponent(u.username) !== 'minibar_test' ||
+  decodeURIComponent(u.pathname.slice(1)) !== 'oak_minibar_test' ||
+  !u.password ||
+  u.search ||
+  u.hash
+) {
+  throw new Error('SAFETY: Hanya disposable oak_minibar_test:15434 yang diizinkan');
+}
+
+process.env.DB_HOST = u.hostname;
+process.env.DB_PORT = u.port;
+process.env.DB_USER = decodeURIComponent(u.username);
+process.env.DB_PASSWORD = decodeURIComponent(u.password);
+process.env.DB_NAME = decodeURIComponent(u.pathname.slice(1));
+process.env.RUN_SCHEMA_INITIALIZATION = 'false';
+const { app, pool } = await import('../dist/index.js');
 const { initializeDatabase } = schemaPkg;
 const require = createRequire(import.meta.url);
 const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js');
@@ -19,7 +42,25 @@ const { getPlatformSuperAdminToken } = require('./helpers/transactionReadAuth.js
 async function runTests() {
   console.log('=== RUNNING CANONICAL POS & ROOM SALES PROJECTION INTEGRATION SUITE ===');
 
-  await initializeDatabase(pool);
+  // Verify disposable DB target before any fixture mutation.
+  const o = pool.options;
+  if (
+    o.host !== '127.0.0.1' ||
+    Number(o.port) !== 15434 ||
+    o.user !== 'minibar_test' ||
+    o.database !== 'oak_minibar_test' ||
+    o.password !== process.env.DB_PASSWORD
+  ) {
+    throw new Error('SAFETY: App pool target mismatch');
+  }
+
+  const identity = await pool.query('SELECT current_database() AS db, current_user AS db_user');
+  if (
+    identity.rows[0]?.db !== 'oak_minibar_test' ||
+    identity.rows[0]?.db_user !== 'minibar_test'
+  ) {
+    throw new Error('SAFETY: Connected database mismatch');
+  }
 
   const saToken = await getPlatformSuperAdminToken(pool, 1);
   const authJson = { Authorization: `Bearer ${saToken}`, 'Content-Type': 'application/json' };
@@ -38,6 +79,8 @@ async function runTests() {
     menuItems: [],
     posOrders: [],
     posOrderItems: [],
+    posSettlements: [],
+    idempotencyKeys: [],
     transactions: []
   };
 
@@ -159,7 +202,7 @@ async function runTests() {
         reservation_id: reservationId,
         table_number: 'Meja 05',
         guest_name: 'Bpk. Hendra Gunawan',
-        status: 'PAID',
+        // Order created as OPEN; payment occurs through settlement.
         items: [
           { menu_item_id: menu1Id, quantity: 2 },
           { menu_item_id: menu2Id, quantity: 1 }
@@ -172,6 +215,28 @@ async function runTests() {
     const posOrderId = Number(createPosData.data.id);
     tracked.posOrders.push(posOrderId);
     assert.equal(Number(createPosData.data.total_amount), 115000, 'POS order total must be 115,000 IDR');
+
+    // OPEN order must not create a SALE before settlement.
+    const beforePay = await pool.query(
+      "SELECT COUNT(*) AS cnt FROM transactions WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2",
+      [propAId, String(posOrderId)]
+    );
+    assert.equal(Number(beforePay.rows[0].cnt), 0, 'OPEN POS order must not create SALE');
+
+    // Official CASH settlement creates the canonical POS SALE.
+    const posPayKey = `canonical_pos_pay_${posOrderId}_${Date.now()}`;
+    tracked.idempotencyKeys.push(posPayKey);
+    const posPayBody = { property_id: propAId, payment_method: 'CASH' };
+    const payPosRes = await fetch(`${baseUrl}/api/pos/orders/${posOrderId}/pay`, {
+      method: 'POST',
+      headers: { ...authJson, 'Idempotency-Key': posPayKey },
+      body: JSON.stringify(posPayBody)
+    });
+    const payPosData = await payPosRes.json();
+    assert.equal(
+      payPosRes.status, 201,
+      `POS settlement must return 201: ${JSON.stringify(payPosData)}`
+    );
 
     // Verify transaction created for POS order
     const posTxRes = await pool.query(
@@ -192,17 +257,18 @@ async function runTests() {
     // TEST D: POS payment -> no duplicate SALE
     // ──────────────────────────────────────────────────────────────────────────
     console.log('Test D: POS payment -> no duplicate SALE');
-    // Calling status update with PAID again
-    const patchPosRes = await fetch(`${baseUrl}/api/pos/orders/${posOrderId}/status`, {
-      method: 'PATCH',
-      headers: authJson,
-      body: JSON.stringify({
-        property_id: propAId,
-        status: 'PAID'
-      })
+    // Replay settlement menggunakan key dan body yang identik.
+    const replayPayRes = await fetch(`${baseUrl}/api/pos/orders/${posOrderId}/pay`, {
+      method: 'POST',
+      headers: { ...authJson, 'Idempotency-Key': posPayKey },
+      body: JSON.stringify(posPayBody)
     });
-    assert.equal(patchPosRes.status, 200, 'POS status patch should succeed');
-
+    const replayPayData = await replayPayRes.json();
+    assert.equal(
+      replayPayRes.status, 200,
+      `Settlement replay must return 200: ${JSON.stringify(replayPayData)}`
+    );
+    assert.equal(replayPayData.data?.replayed, true, 'Settlement must be replayed');
     const posTxCount = await pool.query(
       "SELECT COUNT(*) as cnt FROM transactions WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2",
       [propAId, String(posOrderId)]
@@ -230,7 +296,7 @@ async function runTests() {
         property_id: propAId,
         table_number: 'Meja 10',
         guest_name: 'Tamu Void Test',
-        status: 'PAID',
+        // Order starts OPEN.
         items: [{ menu_item_id: menu2Id, quantity: 2 }] // 2x 25,000 = 50,000 IDR
       })
     });
@@ -254,15 +320,12 @@ async function runTests() {
       "SELECT * FROM transactions WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2 ORDER BY id ASC",
       [propAId, String(voidOrderId)]
     );
-    assert.equal(voidedTxs.rowCount, 2, 'Should have 2 transaction records: Original + Reversal');
-    const [origVoidTx, revVoidTx] = voidedTxs.rows;
-    assert.equal(origVoidTx.transaction_status, 'VOIDED', 'Original transaction status must be VOIDED');
-    assert.equal(revVoidTx.transaction_status, 'REVERSED', 'Reversal transaction status must be REVERSED');
-    assert.equal(Number(revVoidTx.net_amount), -50000, 'Reversal net amount must be -50,000 IDR');
-    assert.equal(Number(origVoidTx.net_amount) + Number(revVoidTx.net_amount), 0, 'Net total of original + reversal must equal 0');
-    tracked.transactions.push(origVoidTx.id, revVoidTx.id);
+    assert.equal(
+      voidedTxs.rowCount,
+      0,
+      'VOID of unpaid OPEN order must not create SALE or reversal'
+    );
 
-    // ──────────────────────────────────────────────────────────────────────────
     // TEST G: Room + POS combined sales summary correct
     // ──────────────────────────────────────────────────────────────────────────
     console.log('Test G: Room + POS combined sales summary correct');
@@ -352,7 +415,7 @@ async function runTests() {
         property_id: propAId,
         table_number: 'VIP Ballroom',
         guest_name: 'Event Mega Banquet',
-        status: 'PAID',
+        // Order starts OPEN.
         items: [{ menu_item_id: menu1Id, quantity: 1000 }] // 1,000 * 45,000 = 45,000,000 IDR
       })
     });
@@ -360,6 +423,19 @@ async function runTests() {
     const largeOrderId = Number(largePosData.data.id);
     tracked.posOrders.push(largeOrderId);
 
+    const largePayKey = `canonical_large_pay_${largeOrderId}_${Date.now()}`;
+    tracked.idempotencyKeys.push(largePayKey);
+    const largePayRes = await fetch(`${baseUrl}/api/pos/orders/${largeOrderId}/pay`, {
+      method: 'POST',
+      headers: { ...authJson, 'Idempotency-Key': largePayKey },
+      body: JSON.stringify({ property_id: propAId, payment_method: 'CASH' })
+    });
+    const largePayData = await largePayRes.json();
+    assert.equal(
+      largePayRes.status,
+      201,
+      `Large POS settlement must return 201: ${JSON.stringify(largePayData)}`
+    );
     const largeTxRes = await pool.query(
       "SELECT * FROM transactions WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2",
       [propAId, String(largeOrderId)]
@@ -381,62 +457,122 @@ async function runTests() {
     console.error('Test Suite Failed:', err);
     throw err;
   } finally {
+    // B3_ATOMIC_CLEANUP_V1
     // Deterministic Cleanup
     console.log('Cleaning up test fixtures...');
+    let cleanupClient;
     try {
-      if (tracked.transactions.length > 0) {
-        await pool.query('DELETE FROM transactions WHERE id = ANY($1)', [tracked.transactions]);
+      cleanupClient = await pool.connect();
+      await cleanupClient.query('BEGIN');
+      // Bersihkan hanya artefak pembayaran milik order fixture.
+      if (tracked.posOrders.length > 0) {
+        const settlements = await cleanupClient.query(
+          `SELECT id FROM pos_settlements
+           WHERE pos_order_id = ANY($1)`,
+          [tracked.posOrders]
+        );
+
+        const settlementIds = settlements.rows.map(r => Number(r.id));
+
+        if (settlementIds.length > 0) {
+          await cleanupClient.query(
+            `DELETE FROM audit_logs
+             WHERE module = 'POS'
+               AND action = 'SETTLEMENT_CASH'
+               AND record_id = ANY($1)`,
+            [settlementIds.map(String)]
+          );
+
+          await cleanupClient.query(
+            'DELETE FROM pos_settlements WHERE id = ANY($1)',
+            [settlementIds]
+          );
+        }
+      }
+
+      if (tracked.idempotencyKeys.length > 0) {
+        await cleanupClient.query(
+          'DELETE FROM idempotency_keys WHERE key = ANY($1)',
+          [tracked.idempotencyKeys]
+        );
       }
       if (tracked.posOrders.length > 0) {
-        await pool.query('DELETE FROM pos_order_items WHERE order_id = ANY($1)', [tracked.posOrders]);
-        await pool.query('DELETE FROM pos_orders WHERE id = ANY($1)', [tracked.posOrders]);
+        await cleanupClient.query(
+          `DELETE FROM transactions
+           WHERE source_type = 'POS_ORDER'
+             AND source_id = ANY($1)
+             AND property_id = ANY($2)`,
+          [tracked.posOrders.map(String), tracked.properties]
+        );
+      }
+      if (tracked.transactions.length > 0) {
+        await cleanupClient.query('DELETE FROM transactions WHERE id = ANY($1)', [tracked.transactions]);
+      }
+      if (tracked.posOrders.length > 0) {
+        await cleanupClient.query('DELETE FROM pos_order_items WHERE order_id = ANY($1)', [tracked.posOrders]);
+        await cleanupClient.query('DELETE FROM pos_orders WHERE id = ANY($1)', [tracked.posOrders]);
       }
       if (tracked.menuItems.length > 0) {
-        await pool.query('DELETE FROM pos_menu_items WHERE id = ANY($1)', [tracked.menuItems]);
+        await cleanupClient.query('DELETE FROM pos_menu_items WHERE id = ANY($1)', [tracked.menuItems]);
       }
       if (tracked.categories.length > 0) {
-        await pool.query('DELETE FROM pos_menu_categories WHERE id = ANY($1)', [tracked.categories]);
+        await cleanupClient.query('DELETE FROM pos_menu_categories WHERE id = ANY($1)', [tracked.categories]);
       }
       if (tracked.folioEntries.length > 0) {
-        await pool.query('DELETE FROM folio_entries WHERE id = ANY($1)', [tracked.folioEntries]);
+        await cleanupClient.query('DELETE FROM folio_entries WHERE id = ANY($1)', [tracked.folioEntries]);
       }
       if (tracked.reservations.length > 0) {
-        await pool.query('DELETE FROM reservations WHERE id = ANY($1)', [tracked.reservations]);
+        await cleanupClient.query('DELETE FROM reservations WHERE id = ANY($1)', [tracked.reservations]);
       }
       if (tracked.bookings.length > 0) {
-        await pool.query('DELETE FROM bookings WHERE id = ANY($1)', [tracked.bookings]);
+        await cleanupClient.query('DELETE FROM bookings WHERE id = ANY($1)', [tracked.bookings]);
       }
       if (tracked.properties.length > 0) {
-        await pool.query('DELETE FROM transaction_attachments WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM transactions WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM transaction_daily_sequences WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM audit_logs WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM rooms WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id = ANY($1))', [tracked.properties]);
-        await pool.query('DELETE FROM rate_plans WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM meal_plans WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM room_types WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM room_categories WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_features WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_brandings WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_pricing_settings WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_quick_booking_rules WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM property_day_use_durations WHERE property_id = ANY($1)', [tracked.properties]);
-        await pool.query('DELETE FROM properties WHERE id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM transaction_attachments WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM transactions WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM transaction_daily_sequences WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM audit_logs WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM rooms WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id = ANY($1))', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM rate_plans WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM meal_plans WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM room_types WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM room_categories WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_features WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_brandings WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_pricing_settings WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_housekeeping_settings WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_attendance_settings WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_quick_booking_rules WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query('DELETE FROM property_day_use_durations WHERE property_id = ANY($1)', [tracked.properties]);
+        await cleanupClient.query(
+          'DELETE FROM property_pos_pricing_settings WHERE property_id = ANY($1)',
+          [tracked.properties]
+        );
+        await cleanupClient.query('DELETE FROM properties WHERE id = ANY($1)', [tracked.properties]);
       }
+      await cleanupClient.query('COMMIT');
     } catch (cleanupErr) {
+      if (cleanupClient) {
+        try {
+          await cleanupClient.query('ROLLBACK');
+        } catch (rollbackErr) {
+          console.error('Cleanup rollback error:', rollbackErr);
+        }
+      }
       console.error('Cleanup error:', cleanupErr);
+      process.exitCode = 1;
+    } finally {
+      if (cleanupClient) cleanupClient.release();
+      server.close();
     }
-    server.close();
   }
 }
 
 runTests()
   .then(() => {
     console.log('Canonical POS Sales Projection Test: ALL PASS');
-    process.exit(0);
+    process.exit(process.exitCode || 0);
   })
   .catch((err) => {
     console.error('Canonical POS Sales Projection Test: FAILED', err);

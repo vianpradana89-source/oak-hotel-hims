@@ -47,6 +47,12 @@ async function drilldown(propertyId, type, date, token) {
   return api('GET', qs, token);
 }
 
+async function history(propertyId, days, date, token) {
+  let qs = `/api/reports/daily-kpis/history?property_id=${propertyId}&days=${days}`;
+  if (date) qs += `&date=${date}`;
+  return api('GET', qs, token);
+}
+
 async function assertReconcile(propertyId, date, label) {
   const kpiRes = await kpis(propertyId, date);
   assert(kpiRes.status === 200, `${label} kpi 200`);
@@ -258,6 +264,128 @@ async function main() {
     reservationIds.push(rA);
     const aRes = await kpis(propA, D);
     assert(aRes.body.data.occupancy.occupied_rooms === 1, 'A. CHECKED_IN occupying D => occupancy +1');
+
+    // ---- Regression: daily-kpi-history parameter binding and parity ----
+    console.log('--- Regression: daily-kpi-history parameter binding and parity ---');
+    {
+      const regCode = `KR${stamp.slice(0, 3)}`;
+      const propRegRes = await pool.query(
+        "INSERT INTO properties (property_code, name, address, is_active, timezone) VALUES ($1, 'Regression A', 'X', TRUE, 'Asia/Jakarta') RETURNING id",
+        [regCode]
+      );
+      const propRegId = Number(propRegRes.rows[0].id);
+      await pool.query(
+        "INSERT INTO room_types (property_id, code, name, description, is_active, base_rate) VALUES ($1, 'RT', 'RegType', '', TRUE, 0) RETURNING id",
+        [propRegId]
+      );
+      const rtRes = await pool.query("SELECT id FROM room_types WHERE property_id = $1", [propRegId]);
+      const rtId = Number(rtRes.rows[0].id);
+      const roomsRes = await pool.query(
+        "INSERT INTO rooms (property_id, room_number, room_type_id, status, is_active) VALUES ($1, 'R1', $2, 'VACANT_CLEAN', TRUE), ($1, 'R2', $2, 'OUT_OF_ORDER', TRUE), ($1, 'R3', $2, 'VACANT_CLEAN', TRUE) RETURNING id, room_number",
+        [propRegId, rtId]
+      );
+      const roomIds = roomsRes.rows.map(r => Number(r.id));
+      const bk1 = await insertBooking(propRegId, `BK${stamp}1`, 'Reg Guest', '2026-09-05T10:00:00Z');
+      await insertReservation({ bookingId: bk1, roomId: roomIds[0], guest: 'Reg Guest', checkIn: '2026-09-05', checkOut: '2026-09-08', status: 'CHECKED_IN', checkedInAt: '2026-09-05T12:00:00Z' });
+      const bk2 = await insertBooking(propRegId, `BK${stamp}2`, 'Reg Guest 2', '2026-09-04T08:00:00Z');
+      await insertReservation({ bookingId: bk2, roomId: roomIds[1], guest: 'Reg Guest 2', checkIn: '2026-09-06', checkOut: '2026-09-09', status: 'BOOKED', checkedInAt: null, checkedOutAt: null });
+
+      // days=1
+      const h1 = await history(propRegId, 1, '2026-09-07', authToken);
+      assert(h1.status === 200, 'history days=1 returns 200');
+      assert(h1.body.data.points.length === 1, 'history days=1 returns 1 point');
+      assert(h1.body.data.anchor_date === '2026-09-07', 'history days=1 anchor_date correct');
+
+      // days=7
+      const h7 = await history(propRegId, 7, '2026-09-07', authToken);
+      assert(h7.status === 200, 'history days=7 returns 200');
+      assert(h7.body.data.points.length === 7, `history days=7 returns 7 points, got ${h7.body.data.points.length}`);
+      assert(h7.body.data.anchor_date === '2026-09-07', 'history days=7 anchor_date correct');
+
+      // days=30
+      const h30 = await history(propRegId, 30, '2026-09-07', authToken);
+      assert(h30.status === 200, 'history days=30 returns 200');
+      assert(h30.body.data.points.length === 30, 'history days=30 returns 30 points');
+
+      // days=0 rejected
+      const h0 = await history(propRegId, 0, null, authToken);
+      assert(h0.status === 400, 'history days=0 rejected');
+
+      // days=91 rejected
+      const h91 = await history(propRegId, 91, null, authToken);
+      assert(h91.status === 400, 'history days=91 rejected');
+
+      // historical_metrics whitelist
+      const metrics = h7.body.data.historical_metrics;
+      assert(!metrics.includes('maintenance_ooo_oos'), 'historical_metrics excludes maintenance_ooo_oos');
+      assert(!metrics.includes('sellable_rooms'), 'historical_metrics excludes sellable_rooms');
+      assert(!metrics.includes('occupancy_pct'), 'historical_metrics excludes occupancy_pct');
+      assert(metrics.includes('occupied_rooms'), 'historical_metrics includes occupied_rooms');
+      assert(metrics.includes('booked_rooms'), 'historical_metrics includes booked_rooms');
+      assert(metrics.includes('check_in_rooms'), 'historical_metrics includes check_in_rooms');
+      assert(metrics.includes('check_out_rooms'), 'historical_metrics includes check_out_rooms');
+
+      // Canonical parity: compare history point for 2026-09-07 with GET /daily-kpis
+      const kpiRes = await kpis(propRegId, '2026-09-07');
+      const hPoint07 = h7.body.data.points.find(p => p.business_date === '2026-09-07');
+      assert(hPoint07 !== undefined, 'parity: point for 2026-09-07 exists');
+      assert(hPoint07.occupied_rooms === kpiRes.body.data.occupancy.occupied_rooms, 'parity: occupied_rooms matches daily-kpis');
+      assert(hPoint07.booked_bookings === kpiRes.body.data.booked_today.bookings, 'parity: booked_bookings matches daily-kpis');
+      assert(hPoint07.booked_rooms === kpiRes.body.data.booked_today.rooms, 'parity: booked_rooms matches daily-kpis');
+      assert(hPoint07.check_in_rooms === kpiRes.body.data.check_in_today.rooms, 'parity: check_in_rooms matches daily-kpis');
+      assert(hPoint07.check_out_rooms === kpiRes.body.data.check_out_today.rooms, 'parity: check_out_rooms matches daily-kpis');
+
+      // Zero-data date: 2026-09-03 should have all zeros
+      const point03 = h7.body.data.points.find(p => p.business_date === '2026-09-03');
+      assert(point03 !== undefined, 'zero-data: point for 2026-09-03 exists');
+      assert(point03.occupied_rooms === 0, 'zero-data: occupied_rooms=0');
+      assert(point03.booked_bookings === 0, 'zero-data: booked_bookings=0');
+      assert(point03.booked_rooms === 0, 'zero-data: booked_rooms=0');
+      assert(point03.check_in_rooms === 0, 'zero-data: check_in_rooms=0');
+      assert(point03.check_out_rooms === 0, 'zero-data: check_out_rooms=0');
+
+      // Property isolation: create property B with overlapping reservation
+      const propBRes = await pool.query(
+        "INSERT INTO properties (property_code, name, address, is_active, timezone) VALUES ($1, 'Regression B', 'Y', TRUE, 'Asia/Jakarta') RETURNING id",
+        ['KRPROP']
+      );
+      const propBId = Number(propBRes.rows[0].id);
+      await pool.query(
+        "INSERT INTO room_types (property_id, code, name, description, is_active, base_rate) VALUES ($1, 'RT', 'RegType', '', TRUE, 0) RETURNING id",
+        [propBId]
+      );
+      const rtBRes = await pool.query("SELECT id FROM room_types WHERE property_id = $1", [propBId]);
+      const rtBId = Number(rtBRes.rows[0].id);
+      const roomsBRes = await pool.query(
+        "INSERT INTO rooms (property_id, room_number, room_type_id, status, is_active) VALUES ($1, 'R1', $2, 'VACANT_CLEAN', TRUE) RETURNING id",
+        [propBId, rtBId]
+      );
+      const roomBId = Number(roomsBRes.rows[0].id);
+      const bkB = await insertBooking(propBId, `BK${stamp}B`, 'PropB Guest', '2026-09-05T10:00:00Z');
+      await insertReservation({ bookingId: bkB, roomId: roomBId, guest: 'PropB Guest', checkIn: '2026-09-05', checkOut: '2026-09-08', status: 'CHECKED_IN', checkedInAt: '2026-09-05T12:00:00Z' });
+
+      // Request history for property A; property B data must not leak in
+      const h7AfterPropB = await history(propRegId, 7, '2026-09-07', authToken);
+      const point05After = h7AfterPropB.body.data.points.find(p => p.business_date === '2026-09-05');
+      assert(point05After.occupied_rooms === 1, 'isolation: propA occupied=1 on Sep 5 (no propB leak)');
+      assert(point05After.check_in_rooms === 1, 'isolation: propA check_in=1 on Sep 5 (no propB leak)');
+      assert(point05After.booked_rooms === 1, 'isolation: propA booked_rooms=1 on Sep 5 (no propB leak)');
+      assert(point05After.booked_bookings === 1, 'isolation: propA booked_bookings=1 on Sep 5 (no propB leak)');
+      assert(point05After.check_out_rooms === 0, 'isolation: propA check_out_rooms=0 on Sep 5 (no propB leak)');
+
+      // Cleanup
+      await pool.query('DELETE FROM reservations WHERE booking_id IN ($1, $2)', [bk1, bk2]);
+      await pool.query('DELETE FROM bookings WHERE id IN ($1, $2)', [bk1, bk2]);
+      await pool.query('DELETE FROM rooms WHERE property_id = $1', [propRegId]);
+      await pool.query('DELETE FROM room_types WHERE property_id = $1', [propRegId]);
+      await pool.query('DELETE FROM properties WHERE id = $1', [propRegId]);
+      await pool.query('DELETE FROM reservations WHERE booking_id = $1', [bkB]);
+      await pool.query('DELETE FROM bookings WHERE id = $1', [bkB]);
+      await pool.query('DELETE FROM rooms WHERE property_id = $1', [propBId]);
+      await pool.query('DELETE FROM room_types WHERE property_id = $1', [propBId]);
+      await pool.query('DELETE FROM properties WHERE id = $1', [propBId]);
+    }
+    console.log('');
     const occA = await drilldown(propA, 'occupancy', D);
     assert(occA.body.data.items.length === 1, 'A. occupancy drilldown 1 child');
     assert(Number(occA.body.data.items[0].reservation_id) === rA, 'A. occupancy row is the CHECKED_IN child');
@@ -581,6 +709,26 @@ async function main() {
     assert(badType.status === 400, 'invalid drilldown type returns 400');
     const mapped = matchOperationalAccessRule('/api/reports/daily-kpis/drilldown', 'GET');
     assert(mapped && mapped.resources.includes('Kalender') && mapped.resources.includes('Laporan') && mapped.action === 'view', 'U. drilldown maps to Kalender or Laporan view');
+    // HEAD method should also match the same rule (readonly pattern)
+    const mappedHead = matchOperationalAccessRule('/api/reports/daily-kpis/drilldown', 'HEAD');
+    assert(mappedHead && mappedHead.resources.includes('Kalender') && mappedHead.action === 'view', 'U. drilldown HEAD also matches Kalender/Laporan');
+    // Base path (no suffix) must match the same rule.
+    const baseMapped = matchOperationalAccessRule('/api/reports/daily-kpis', 'GET');
+    assert(baseMapped && baseMapped.resources.includes('Kalender') && baseMapped.resources.includes('Laporan') && baseMapped.action === 'view', 'U. base daily-kpis maps to Kalender/Laporan view');
+    const baseMappedHead = matchOperationalAccessRule('/api/reports/daily-kpis', 'HEAD');
+    assert(baseMappedHead && baseMappedHead.resources.includes('Kalender') && baseMappedHead.action === 'view', 'U. base daily-kpis HEAD matches Kalender/Laporan');
+    // History path must match the same rule (the new Model C endpoint).
+    const historyMapped = matchOperationalAccessRule('/api/reports/daily-kpis/history', 'GET');
+    assert(historyMapped && historyMapped.resources.includes('Kalender') && historyMapped.resources.includes('Laporan') && historyMapped.action === 'view', 'V. history maps to Kalender/Laporan view');
+    const historyMappedHead = matchOperationalAccessRule('/api/reports/daily-kpis/history', 'HEAD');
+    assert(historyMappedHead && historyMappedHead.resources.includes('Kalender') && historyMappedHead.action === 'view', 'V. history HEAD matches Kalender/Laporan');
+    // Unrelated /api/reports endpoints must NOT match the Kalender resource via this rule.
+    const unrelated1 = matchOperationalAccessRule('/api/reports/occupancy', 'GET');
+    assert(unrelated1 && !unrelated1.resources.includes('Kalender') && unrelated1.resources.length === 1 && unrelated1.resources[0] === 'Laporan', 'W. occupancy stays Laporan-only, no Kalender leakage');
+    const unrelated2 = matchOperationalAccessRule('/api/reports/daily-operations', 'GET');
+    assert(unrelated2 && !unrelated2.resources.includes('Kalender') && unrelated2.resources[0] === 'Laporan', 'W. daily-operations stays Laporan-only, no Kalender leakage');
+    const unrelated3 = matchOperationalAccessRule('/api/reports/audit-log', 'GET');
+    assert(unrelated3 && !unrelated3.resources.includes('Kalender'), 'W. arbitrary /api/reports/* does not get Kalender');
     const occupancyMapped = matchOperationalAccessRule('/api/reports/occupancy', 'GET');
     assert(occupancyMapped && occupancyMapped.resources.length === 1 && occupancyMapped.resources[0] === 'Laporan', 'U. occupancy remains Laporan-only');
     const operationsMapped = matchOperationalAccessRule('/api/reports/daily-operations', 'GET');

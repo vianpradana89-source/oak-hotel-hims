@@ -80,6 +80,11 @@ const RESOURCE_PERMISSION_KEYS: Record<string, Record<AccessAction, string[]>> =
     edit: ['settings.create', 'settings.edit'],
     delete: ['settings.delete'],
   },
+  'Dokumen & Print': {
+    view: ['documents.view'],
+    edit: ['documents.create', 'documents.edit'],
+    delete: ['documents.delete'],
+  },
 };
 
 export interface AccessResourceDefinition extends MenuDefinition {

@@ -31,14 +31,16 @@ async function runTests() {
   const port = server.address().port;
   const baseUrl = `http://127.0.0.1:${port}`;
 
-  const randNum = Math.floor(1000 + Math.random() * 8999);
-  const propCode = `E${randNum}`; // max 6 chars
+    const randNum = Math.floor(1000 + Math.random() * 8999);
+    const propCode = `E${randNum}`; // max 6 chars
 
   const tracked = {
     properties: [],
     suppliers: [],
     transactions: [],
-    payments: []
+    payments: [],
+    bookings: [],
+    reservations: []
   };
 
   try {
@@ -739,22 +741,305 @@ async function runTests() {
 
     console.log('[PASS] Scenario 29: Sheet counts, filters, and financial summary exclusion verified perfectly');
 
+    // ==========================================
+    // DOMAIN 7: AUDIT OVERLAY REGRESSION (UI-1)
+    // ==========================================
+    console.log('\n--- 7. Testing Audit Overlay Regression via getTransactions() ---');
+
+    // Create separate bookings/fixtures for each test scenario
+    const trackedAudit = {
+      bookings: [],
+      reservations: [],
+      transactions: []
+    };
+
+    // Scenario 30: CHECKED_OUT + UNVERIFIED => SELESAI
+    // Create independent booking and reservation
+    const auditBooking30Res = await pool.query(`
+      INSERT INTO bookings (property_id, bid, payment_responsibility, booking_status, guest_name_snapshot)
+      VALUES ($1, 'AUDIT-30-UNVERIFIED', 'HOTEL_COLLECT', 'COMPLETED', 'Guest AO30')
+      RETURNING id
+    `, [propertyId]);
+    const auditBooking30Id = Number(auditBooking30Res.rows[0].id);
+    trackedAudit.bookings.push(auditBooking30Id);
+
+    const auditRes30Res = await pool.query(`
+      INSERT INTO reservations (booking_id, guest_name, check_in, check_out, status, stay_status, total_price, stay_sequence)
+      VALUES ($1, 'Guest AO30', CURRENT_DATE - INTERVAL '1 day', CURRENT_DATE, 'CHECKED_OUT', 'CHECKED_OUT', 500000, 1)
+      RETURNING id
+    `, [auditBooking30Id]);
+    const auditReservationId30 = Number(auditRes30Res.rows[0].id);
+    trackedAudit.reservations.push(auditReservationId30);
+
+    const s30Res = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-30', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO30', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Checked Out Unverified',
+        500000, 0, 0, 0, 500000,
+        'PAID', 'POSTED', 'UNVERIFIED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId30, auditBooking30Id]);
+    trackedAudit.transactions.push(Number(s30Res.rows[0].id));
+
+    // Scenario 31: CHECKED_OUT + VERIFIED => SELESAI
+    const auditBooking31Res = await pool.query(`
+      INSERT INTO bookings (property_id, bid, payment_responsibility, booking_status, guest_name_snapshot)
+      VALUES ($1, 'AUDIT-31-VERIFIED', 'HOTEL_COLLECT', 'COMPLETED', 'Guest AO31')
+      RETURNING id
+    `, [propertyId]);
+    const auditBooking31Id = Number(auditBooking31Res.rows[0].id);
+    trackedAudit.bookings.push(auditBooking31Id);
+
+    const auditRes31Res = await pool.query(`
+      INSERT INTO reservations (booking_id, guest_name, check_in, check_out, status, stay_status, total_price, stay_sequence)
+      VALUES ($1, 'Guest AO31', CURRENT_DATE - INTERVAL '1 day', CURRENT_DATE, 'CHECKED_OUT', 'CHECKED_OUT', 600000, 1)
+      RETURNING id
+    `, [auditBooking31Id]);
+    const auditReservationId31 = Number(auditRes31Res.rows[0].id);
+    trackedAudit.reservations.push(auditReservationId31);
+
+    const s31Res = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-31', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO31', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Checked Out Verified',
+        600000, 0, 0, 0, 600000,
+        'PAID', 'POSTED', 'VERIFIED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId31, auditBooking31Id]);
+    trackedAudit.transactions.push(Number(s31Res.rows[0].id));
+
+    // Scenario 32: CHECKED_OUT + REJECTED => PROSES (audit overlay)
+    const auditBooking32Res = await pool.query(`
+      INSERT INTO bookings (property_id, bid, payment_responsibility, booking_status, guest_name_snapshot)
+      VALUES ($1, 'AUDIT-32-REJECTED', 'HOTEL_COLLECT', 'COMPLETED', 'Guest AO32')
+      RETURNING id
+    `, [propertyId]);
+    const auditBooking32Id = Number(auditBooking32Res.rows[0].id);
+    trackedAudit.bookings.push(auditBooking32Id);
+
+    const auditRes32Res = await pool.query(`
+      INSERT INTO reservations (booking_id, guest_name, check_in, check_out, status, stay_status, total_price, stay_sequence)
+      VALUES ($1, 'Guest AO32', CURRENT_DATE - INTERVAL '1 day', CURRENT_DATE, 'CHECKED_OUT', 'CHECKED_OUT', 700000, 1)
+      RETURNING id
+    `, [auditBooking32Id]);
+    const auditReservationId32 = Number(auditRes32Res.rows[0].id);
+    trackedAudit.reservations.push(auditReservationId32);
+
+    const s32Res = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-32', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO32', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Checked Out Rejected',
+        700000, 0, 0, 0, 700000,
+        'PAID', 'POSTED', 'REJECTED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId32, auditBooking32Id]);
+    trackedAudit.transactions.push(Number(s32Res.rows[0].id));
+
+    // Verify standalone transaction operational_sheet
+    const txAO30 = await getTransactionById(pool, propertyId, Number(s30Res.rows[0].id));
+    assert.strictEqual(txAO30.operational_sheet, 'SELESAI', 'Scenario 30: CHECKED_OUT + UNVERIFIED must be SELESAI');
+    const txAO31 = await getTransactionById(pool, propertyId, Number(s31Res.rows[0].id));
+    assert.strictEqual(txAO31.operational_sheet, 'SELESAI', 'Scenario 31: CHECKED_OUT + VERIFIED must be SELESAI');
+    const txAO32 = await getTransactionById(pool, propertyId, Number(s32Res.rows[0].id));
+    assert.strictEqual(txAO32.operational_sheet, 'PROSES', 'Scenario 32: CHECKED_OUT + REJECTED must be PROSES');
+
+    // Scenario 33: Query planner — presented semantics via booking_bid
+    // getTransactions returns grouped BID parents, so assertions must be
+    // based on booking_bid occurrence counts, not raw transaction IDs.
+    const countByBid = (result, bid) =>
+      result.transactions.filter((t) => t.booking_bid && String(t.booking_bid) === bid).length;
+
+    const prosesQueryRes = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'PROSES' });
+    assert.strictEqual(countByBid(prosesQueryRes, 'AUDIT-32-REJECTED'), 1, 'Scenario 32/33a: AUDIT-32-REJECTED must appear EXACTLY ONCE in PROSES query');
+    assert.strictEqual(countByBid(prosesQueryRes, 'AUDIT-30-UNVERIFIED'), 0, 'Scenario 30/33b: AUDIT-30-UNVERIFIED must NOT appear in PROSES query');
+    assert.strictEqual(countByBid(prosesQueryRes, 'AUDIT-31-VERIFIED'), 0, 'Scenario 31/33c: AUDIT-31-VERIFIED must NOT appear in PROSES query');
+
+    const selesaiQueryRes = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'SELESAI' });
+    assert.strictEqual(countByBid(selesaiQueryRes, 'AUDIT-30-UNVERIFIED'), 1, 'Scenario 30/33d: AUDIT-30-UNVERIFIED must appear EXACTLY ONCE in SELESAI query');
+    assert.strictEqual(countByBid(selesaiQueryRes, 'AUDIT-31-VERIFIED'), 1, 'Scenario 31/33e: AUDIT-31-VERIFIED must appear EXACTLY ONCE in SELESAI query');
+    assert.strictEqual(countByBid(selesaiQueryRes, 'AUDIT-32-REJECTED'), 0, 'Scenario 32/33f: AUDIT-32-REJECTED must NOT appear in SELESAI query');
+
+    // Scenario 34: sheet_counts consistency after audit overlay
+    const allQueryRes2 = await getTransactions(pool, { property_id: propertyId });
+    assert.strictEqual(allQueryRes2.sheet_counts.proses, prosesQueryRes.total_count, 'Scenario 34a: sheet_counts.proses must match PROSES query count');
+    assert.strictEqual(allQueryRes2.sheet_counts.selesai, selesaiQueryRes.total_count, 'Scenario 34b: sheet_counts.selesai must match SELESAI query count');
+
+    // Scenario 35: POS/non-reservation SALE + REJECTED => lifecycle unchanged (stays SELESAI for POSTED)
+    const s35Res = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status
+      ) VALUES (
+        $1, 'TX-AO-35', CURRENT_DATE, NOW(), 'SALE',
+        'POS_ORDER', 'Walk-in AO35', 'FNB_SALES', 'F&B Sales', 'FNB', 'POS Rejected',
+        100000, 0, 0, 0, 100000,
+        'PAID', 'POSTED', 'REJECTED'
+      ) RETURNING id
+    `, [propertyId]);
+    trackedAudit.transactions.push(Number(s35Res.rows[0].id));
+    const txAO35 = await getTransactionById(pool, propertyId, Number(s35Res.rows[0].id));
+    assert.strictEqual(txAO35.operational_sheet, 'SELESAI', 'Scenario 35: POS + REJECTED must stay SELESAI (no audit overlay)');
+
+    // Verify POS doesn't appear in PROSES
+    const prosesQueryRes2 = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'PROSES' });
+    const prosesIds2 = prosesQueryRes2.transactions.map((t) => t.id);
+    assert.ok(!prosesIds2.includes(Number(s35Res.rows[0].id)), 'Scenario 35b: POS + REJECTED must NOT appear in PROSES query');
+
+    // Scenario 36: BID multi-member — one REJECTED makes parent PROSES
+    // Create separate BID with multiple members
+    const auditBooking36Res = await pool.query(`
+      INSERT INTO bookings (property_id, bid, payment_responsibility, booking_status, guest_name_snapshot)
+      VALUES ($1, 'AUDIT-36-MULTI', 'HOTEL_COLLECT', 'COMPLETED', 'Guest AO36')
+      RETURNING id
+    `, [propertyId]);
+    const auditBooking36Id = Number(auditBooking36Res.rows[0].id);
+    trackedAudit.bookings.push(auditBooking36Id);
+
+    const auditRes36Res = await pool.query(`
+      INSERT INTO reservations (booking_id, guest_name, check_in, check_out, status, stay_status, total_price, stay_sequence)
+      VALUES ($1, 'Guest AO36', CURRENT_DATE - INTERVAL '1 day', CURRENT_DATE, 'CHECKED_OUT', 'CHECKED_OUT', 800000, 1)
+      RETURNING id
+    `, [auditBooking36Id]);
+    const auditReservationId36 = Number(auditRes36Res.rows[0].id);
+    trackedAudit.reservations.push(auditReservationId36);
+
+    // Add first member (UNVERIFIED)
+    const s36aRes = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-36A', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO36', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Checked Out Unverified Member',
+        400000, 0, 0, 0, 400000,
+        'PAID', 'POSTED', 'UNVERIFIED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId36, auditBooking36Id]);
+    trackedAudit.transactions.push(Number(s36aRes.rows[0].id));
+
+    // Add second member (REJECTED) - this should make the whole BID PROSES
+    const s36bRes = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-36B', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO36', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Checked Out Rejected Member',
+        400000, 0, 0, 0, 400000,
+        'PAID', 'POSTED', 'REJECTED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId36, auditBooking36Id]);
+    trackedAudit.transactions.push(Number(s36bRes.rows[0].id));
+
+    // Query PROSES must include the BID group parent exactly once (grouped presentation)
+    const prosesQueryRes3 = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'PROSES' });
+    assert.strictEqual(countByBid(prosesQueryRes3, 'AUDIT-36-MULTI'), 1, 'Scenario 36: BID with REJECTED member must appear EXACTLY ONCE in PROSES query');
+
+    // Query SELESAI must NOT include the BID group
+    const selesaiQueryRes2 = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'SELESAI' });
+    assert.strictEqual(countByBid(selesaiQueryRes2, 'AUDIT-36-MULTI'), 0, 'Scenario 36: BID with REJECTED member must NOT appear in SELESAI query');
+
+    // Scenario 37: Terminal regression — fully cancelled BID + REJECTED => BATAL
+    const auditBooking37Res = await pool.query(`
+      INSERT INTO bookings (property_id, bid, payment_responsibility, booking_status, guest_name_snapshot)
+      VALUES ($1, 'AUDIT-37-CANCELLED', 'HOTEL_COLLECT', 'CANCELLED', 'Guest AO37')
+      RETURNING id
+    `, [propertyId]);
+    const auditBooking37Id = Number(auditBooking37Res.rows[0].id);
+    trackedAudit.bookings.push(auditBooking37Id);
+
+    const auditRes37Res = await pool.query(`
+      INSERT INTO reservations (booking_id, guest_name, check_in, check_out, status, stay_status, total_price, stay_sequence)
+      VALUES ($1, 'Guest AO37', CURRENT_DATE - INTERVAL '2 day', CURRENT_DATE - INTERVAL '1 day', 'CANCELLED', 'CANCELLED', 500000, 1)
+      RETURNING id
+    `, [auditBooking37Id]);
+    const auditReservationId37 = Number(auditRes37Res.rows[0].id);
+    trackedAudit.reservations.push(auditReservationId37);
+
+    const s37Res = await pool.query(`
+      INSERT INTO transactions (
+        property_id, transaction_no, transaction_date, transaction_time, transaction_type,
+        source_type, party_name, category_code, category_name, department_code, description,
+        amount, discount_amount, service_amount, tax_amount, net_amount,
+        payment_status, transaction_status, verification_status,
+        reservation_id, booking_id
+      ) VALUES (
+        $1, 'TX-AO-37', CURRENT_DATE, NOW(), 'SALE',
+        'ROOM_CHARGE', 'Guest AO37', 'ROOM_CHARGE', 'Room Charge', 'FRONT_OFFICE', 'Cancelled Rejected',
+        500000, 0, 0, 0, 500000,
+        'UNPAID', 'POSTED', 'REJECTED',
+        $2, $3
+      ) RETURNING id
+    `, [propertyId, auditReservationId37, auditBooking37Id]);
+    trackedAudit.transactions.push(Number(s37Res.rows[0].id));
+
+    const txAO37 = await getTransactionById(pool, propertyId, Number(s37Res.rows[0].id));
+    assert.strictEqual(txAO37.operational_sheet, 'BATAL', 'Scenario 37: Cancelled + REJECTED must stay BATAL (terminal wins)');
+
+    // Verify cancelled BID doesn't appear in PROSES despite REJECTED (exactly zero occurrences)
+    const prosesQueryRes4 = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'PROSES' });
+    assert.strictEqual(countByBid(prosesQueryRes4, 'AUDIT-37-CANCELLED'), 0, 'Scenario 37: Cancelled BID + REJECTED must NOT appear in PROSES query');
+
+    const batalQueryRes2 = await getTransactions(pool, { property_id: propertyId, operational_sheet: 'BATAL' });
+    assert.strictEqual(countByBid(batalQueryRes2, 'AUDIT-37-CANCELLED'), 1, 'Scenario 37: Cancelled BID + REJECTED must appear EXACTLY ONCE in BATAL query');
+
+    // Merge audit tracking into main tracked arrays for unified cleanup
+    tracked.bookings = [...(tracked.bookings || []), ...trackedAudit.bookings];
+    tracked.reservations = [...(tracked.reservations || []), ...trackedAudit.reservations];
+    tracked.transactions = [...(tracked.transactions || []), ...trackedAudit.transactions];
+
+    console.log('[PASS] Scenario 30-37: Audit overlay regression tests passed');
+
     console.log('\n================================================================');
-    console.log('=== ALL 29 TRANSACTION-2E LIFECYCLE SCENARIOS PASSED WITH 100% SUCCESS ===');
+    console.log('=== ALL 37 TRANSACTION-2E LIFECYCLE SCENARIOS PASSED WITH 100% SUCCESS ===');
     console.log('================================================================\n');
 
-  } finally {
-    console.log('--- Cleaning Up Test Fixtures ---');
-    for (const propId of tracked.properties) {
-      await pool.query('DELETE FROM transaction_attachments WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM payment_transactions WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM transaction_lines WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM transactions WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM transaction_custom_categories WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM suppliers WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM audit_logs WHERE property_id = $1', [propId]);
-      await pool.query('DELETE FROM properties WHERE id = $1', [propId]);
-    }
+} finally {
+  console.log('--- Cleaning Up Test Fixtures ---');
+  for (const propId of tracked.properties) {
+    // Dependency-safe cleanup order for property test
+    await pool.query('DELETE FROM transaction_attachments WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM payment_transactions WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM transaction_lines WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM transactions WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id = $1)', [propId]);
+    await pool.query('DELETE FROM bookings WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM transaction_custom_categories WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM suppliers WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM audit_logs WHERE property_id = $1', [propId]);
+    await pool.query('DELETE FROM properties WHERE id = $1', [propId]);
+  }
     server.close();
     console.log('[CLEANUP] Zero session residue confirmed.');
   }

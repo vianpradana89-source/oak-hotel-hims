@@ -124,18 +124,28 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
             // calculateReservationFinancials() (read-only). POST /checkout calls
             // recalculateReservationFinancials() (mutation path) separately.
             const fin = folioResp.data.data.authoritative_financials;
-            if (!fin || fin.remaining_balance === null || fin.remaining_balance === undefined) {
+            if (
+              !fin
+              || fin.hotel_collectible_remaining_balance === null
+              || fin.hotel_collectible_remaining_balance === undefined
+              || fin.hotel_collectible_total === null
+              || fin.hotel_collectible_total === undefined
+            ) {
               folioError = true;
             } else {
-              const remainingBalance = Number(fin.remaining_balance);
-              const totalPrice = Number(fin.total_price);
+              const collectibleRemainingBalance = Number(fin.hotel_collectible_remaining_balance);
+              const collectibleTotal = Number(fin.hotel_collectible_total);
               const appliedDepositValue = Number(fin.applied_deposit);
-              if (!Number.isFinite(remainingBalance) || !Number.isFinite(totalPrice) || !Number.isFinite(appliedDepositValue)) {
+              if (
+                !Number.isFinite(collectibleRemainingBalance)
+                || !Number.isFinite(collectibleTotal)
+                || !Number.isFinite(appliedDepositValue)
+              ) {
                 folioError = true;
               } else {
-                totalCharges = totalPrice;
+                totalCharges = collectibleTotal;
                 appliedDeposit = appliedDepositValue;
-                folioBalance = Math.max(0, remainingBalance);
+                folioBalance = Math.max(0, collectibleRemainingBalance);
               }
             }
           }

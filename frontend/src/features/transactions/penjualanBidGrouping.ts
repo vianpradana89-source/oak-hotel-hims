@@ -1,5 +1,5 @@
-import type { OperationalSheet, TransactionRecord } from './transactionDomainTypes.ts';
-import { formatReservationStayType, mapToOperationalStatus } from './transactionDomainTypes.ts';
+import type { OperationalSheet, TransactionRecord, VerificationStatus } from './transactionDomainTypes.ts';
+import { formatReservationStayType, mapToOperationalStatus, applyAuditOverlay } from './transactionDomainTypes.ts';
 
 export type PenjualanPaymentStatus = 'PAID' | 'PARTIAL' | 'UNPAID';
 export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
@@ -19,8 +19,20 @@ export interface PenjualanBidChild {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+  payment_responsibility?: string;
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
+  /** UI-1 audit overlay: canonical sheet before audit overlay applied */
+  canonical_operational_sheet?: OperationalSheet;
+  /** 'UNVERIFIED' | 'VERIFIED' | 'REJECTED' — worst member verification for audit display */
+  audit_verification_status?: VerificationStatus;
+  /** POS: jumlah order status OPEN atau PAID (hanya ada bila user punya pos.view) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN (hanya ada bila user punya pos.view) */
+  pos_open_count?: number;
+  unapplied_advance_deposit?: number;
+  active_advance_deposit_id?: number | null;
 }
 
 export interface PenjualanBidGroup {
@@ -37,7 +49,14 @@ export interface PenjualanBidGroup {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — derived from children */
+  payment_responsibility?: string;
+  unapplied_advance_deposit?: number;
   operational_sheet: OperationalSheet;
+  /** UI-1 audit overlay: canonical sheet before audit overlay applied */
+  canonical_operational_sheet?: OperationalSheet;
+  /** 'UNVERIFIED' | 'VERIFIED' | 'REJECTED' — worst member verification for audit display */
+  audit_verification_status?: VerificationStatus;
   children: PenjualanBidChild[];
   primary: TransactionRecord;
   members: TransactionRecord[];
@@ -92,11 +111,25 @@ export function deriveBookingPaymentStatus(paid: number, remaining: number): Pen
   return 'UNPAID';
 }
 
+/**
+ * Derive group-level payment responsibility from children.
+ * If ANY child is OTA_COLLECT, the group is OTA_COLLECT.
+ * Otherwise defaults to HOTEL_COLLECT.
+ */
+export function deriveGroupPaymentResponsibility(children: PenjualanBidChild[]): string {
+  const hasOta = children.some((c) => String(c.payment_responsibility || '').toUpperCase() === 'OTA_COLLECT');
+  return hasOta ? 'OTA_COLLECT' : 'HOTEL_COLLECT';
+}
+
 export function isPeriodActivityGroup(group: Pick<PenjualanBidGroup, 'totals_scope'>): boolean {
   return group.totals_scope === 'PERIOD_ACTIVITY';
 }
 
-export function shouldShowListSettlementAmounts(item: Pick<PenjualanListItem, 'kind'>): boolean {
+export function shouldShowListSettlementAmounts(
+  item: Pick<PenjualanListItem, 'kind'>,
+  operationalSheet?: string
+): boolean {
+  if (operationalSheet === 'PIUTANG') return true;
   return item.kind === 'standalone';
 }
 
@@ -249,6 +282,22 @@ function operationalSheetOf(tx: TransactionRecord): OperationalSheet {
   return mapToOperationalStatus(tx).group;
 }
 
+/** UI-1: worst verification status among a set of members.
+ * Correct semantic priority: REJECTED > UNVERIFIED > VERIFIED.
+ * REJECTED = needs correction; UNVERIFIED = not yet inspected (wins over VERIFIED to avoid false-positive); VERIFIED = confirmed.
+ */
+export function worstVerificationStatus(
+  statuses: Array<VerificationStatus | string | null | undefined>
+): VerificationStatus | undefined {
+  const normalized = statuses
+    .map((s) => String(s || '').toUpperCase() as VerificationStatus)
+    .filter(Boolean);
+  if (normalized.some((s) => s === 'REJECTED')) return 'REJECTED';
+  if (normalized.some((s) => s === 'UNVERIFIED')) return 'UNVERIFIED';
+  if (normalized.some((s) => s === 'VERIFIED')) return 'VERIFIED';
+  return undefined;
+}
+
 function buildChild(reservationId: number | null, members: TransactionRecord[]): PenjualanBidChild {
   const primary = members[0];
   const gross = members.reduce((sum, tx) => sum + roundIdr(tx.amount), 0);
@@ -256,6 +305,14 @@ function buildChild(reservationId: number | null, members: TransactionRecord[]):
   const net = members.reduce((sum, tx) => sum + saleNet(tx), 0);
   const paid = reservationPaid(primary);
   const remaining = reservationRemaining(primary, net, paid);
+  const canonicalSheet = operationalSheetOf(primary);
+  // DEFECT 2 FIX: use worst verification status across ALL members, not just primary
+  const aggregatedVerification = worstVerificationStatus(members.map((tx) => tx.verification_status));
+  // BUG 1 FIX: overlay must read aggregatedVerification, not primary.verification_status
+  const appliedSheet = applyAuditOverlay(
+    { ...primary, verification_status: aggregatedVerification },
+    canonicalSheet
+  );
   return {
     reservation_id: reservationId,
     primary_transaction_id: primary.id,
@@ -271,9 +328,12 @@ function buildChild(reservationId: number | null, members: TransactionRecord[]):
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    reservation_status: primary.reservation_status || null,
-    operational_sheet: operationalSheetOf(primary)
-  };
+      payment_responsibility: String(primary.payment_responsibility || 'HOTEL_COLLECT').toUpperCase(),
+      reservation_status: primary.reservation_status || null,
+      operational_sheet: appliedSheet,
+      canonical_operational_sheet: canonicalSheet,
+      audit_verification_status: aggregatedVerification,
+    };
 }
 
 function unattachedFinancial(rows: TransactionRecord[]): { gross: number; discount: number; net: number; paid: number; remaining: number } {
@@ -343,6 +403,23 @@ function buildGroup(
     ? lifetimeSheets
     : (periodSheets.length > 0 ? periodSheets : members.map((tx) => operationalSheetOf(tx)));
 
+  // UI-1: Apply audit overlay to parent BID.
+  // Must re-evaluate after lifetimeSheets to prevent them from masking REJECTED overlay.
+  const parentCanonicalSheet = deriveGroupOperationalSheet(statusSheets);
+  const parentVerification = worstVerificationStatus(
+    members.map((tx) => tx.verification_status)
+  );
+  // BUG 2 FIX: use actual member/child reservation data so isSaleReservationLinked is true.
+  const parentOverlayTx = reservationMembers.length > 0
+    ? reservationMembers[0]
+    : members.find((tx) => Number(tx.reservation_id) > 0);
+  const parentAppliedSheet = applyAuditOverlay(
+    parentOverlayTx
+      ? { ...parentOverlayTx, verification_status: parentVerification }
+      : { transaction_type: 'SALE', verification_status: parentVerification },
+    parentCanonicalSheet
+  );
+
   return {
     bid,
     booking_id: bookingId,
@@ -356,12 +433,15 @@ function buildGroup(
     net,
     paid,
     remaining,
-    payment_status: deriveBookingPaymentStatus(paid, remaining),
-    operational_sheet: deriveGroupOperationalSheet(statusSheets),
-    children,
-    primary: members[0],
-    members
-  };
+      payment_status: deriveBookingPaymentStatus(paid, remaining),
+      payment_responsibility: deriveGroupPaymentResponsibility(children),
+      operational_sheet: parentAppliedSheet,
+      canonical_operational_sheet: parentCanonicalSheet,
+      audit_verification_status: parentVerification,
+      children,
+      primary: members[0],
+      members
+    };
 }
 
 export function groupPenjualanSaleRows(
@@ -386,6 +466,20 @@ export function groupPenjualanSaleRows(
       const payload = row.booking_bid_group;
       const paid = roundIdr(payload.paid);
       const remaining = roundIdr(payload.remaining);
+      const normalizedChildren = (payload.children || []).map((child) => ({
+        ...child,
+        payment_status:
+          normalizePaymentStatus(child.payment_status)
+          || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
+        stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence),
+      }));
+      const parentPaymentResponsibility = payload.payment_responsibility
+        ? String(payload.payment_responsibility).toUpperCase()
+        : deriveGroupPaymentResponsibility(normalizedChildren);
+      // DEFECT 1 FIX: preserve audit metadata from backend payload
+      const groupOperationalSheet = payload.operational_sheet as OperationalSheet;
+      const groupCanonicalSheet = (payload as any).canonical_operational_sheet as OperationalSheet | undefined;
+      const groupAuditStatus = (payload as any).audit_verification_status as VerificationStatus | undefined;
       items.push({
         kind: 'bid_group',
         group: {
@@ -405,14 +499,14 @@ export function groupPenjualanSaleRows(
           remaining,
           payment_status:
             normalizePaymentStatus(payload.payment_status) || deriveBookingPaymentStatus(paid, remaining),
-          operational_sheet: payload.operational_sheet,
-          children: (payload.children || []).map((child) => ({
-            ...child,
-            payment_status:
-              normalizePaymentStatus(child.payment_status)
-              || deriveBookingPaymentStatus(roundIdr(child.paid), roundIdr(child.remaining)),
-            stay_sequence: child.stay_sequence == null ? null : Number(child.stay_sequence)
-          })),
+          payment_responsibility: parentPaymentResponsibility,
+          ...(roundIdr((payload as any).unapplied_advance_deposit) > 0
+            ? { unapplied_advance_deposit: roundIdr((payload as any).unapplied_advance_deposit) }
+            : {}),
+          operational_sheet: groupOperationalSheet,
+          canonical_operational_sheet: groupCanonicalSheet,
+          audit_verification_status: groupAuditStatus,
+          children: normalizedChildren,
           primary: row,
           members: [row]
         }
@@ -509,6 +603,7 @@ export function flattenAllTabRows(items: AllTabListItem[]): TransactionRecord[] 
         paid: group.paid,
         remaining: group.remaining,
         payment_status: group.payment_status,
+        payment_responsibility: group.payment_responsibility,
         operational_sheet: group.operational_sheet,
         children: group.children
       }

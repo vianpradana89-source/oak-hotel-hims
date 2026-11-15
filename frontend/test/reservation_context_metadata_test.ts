@@ -109,7 +109,15 @@ check(drawerSrc.includes('formatReservationSourceLabel'), 'drawer uses shared so
 check(drawerSrc.includes('formatReservationRatePlanLabel'), 'drawer uses shared rate plan helper');
 check(!drawerSrc.includes('OTA: '), 'drawer does not keep OTA: variant');
 check(drawerSrc.includes('OTA —') === false || helperSrc.includes('OTA —'), 'canonical em dash lives in the shared helper');
-check(!drawerSrc.includes('isOtaReservation'), 'drawer no longer treats OTA name as Rate Plan');
+check(
+  !drawerSrc.includes('isOtaReservation') || drawerSrc.includes('hideRatePlan'),
+  'F. drawer hides Rate Plan label for OTA (isOtaReservation + hideRatePlan)'
+);
+check(drawerSrc.includes('isOtaReservation'), 'F. drawer imports isOtaReservation to gate Rate Plan visibility');
+check(drawerSrc.includes('hideRatePlan'), 'F. drawer uses hideRatePlan to conditionally render the Rate Plan row');
+check(quickSrc.includes('hideRatePlan'), 'G. quick detail uses hideRatePlan to conditionally render the Rate Plan cell');
+check(quickSrc.includes('grid-cols-1'), 'G. quick detail reflows to 1 column when Rate Plan hidden (no empty gap)');
+check(helperSrc.includes('export function isOtaReservation'), 'H. isOtaReservation is exported from the shared helper');
 check(drawerSrc.includes('whitespace-pre-wrap'), 'J. Reservation Detail shows full Catatan');
 check(drawerSrc.includes('Edit Catatan'), 'drawer has Edit Catatan');
 check(drawerSrc.includes('Tambah Catatan'), 'empty editable reservation can add notes');

@@ -8,6 +8,8 @@ import {
   toBackendDiscountType
 } from '../src/features/booking/quickBookingBilling.ts';
 
+import { buildQuickBookingPaymentPayload } from '../src/features/booking/quickBookingPayment.ts';
+
 const here = dirname(fileURLToPath(import.meta.url));
 const modalSrc = readFileSync(join(here, '../src/features/booking/QuickBookingModal.tsx'), 'utf8');
 
@@ -99,11 +101,13 @@ check(modalSrc.includes("Alasan diskon wajib diisi"), 'H: non-zero discount requ
 check(!modalSrc.includes('Diskon Kamar'), 'Quick Booking has no per-room Diskon Kamar controls');
 check(modalSrc.includes('Diskon Keseluruhan'), 'Ringkasan has Diskon Keseluruhan');
 check(modalSrc.includes('DISKON KESELURUHAN') || modalSrc.includes('Diskon Keseluruhan'), 'label is Diskon Keseluruhan');
-check(modalSrc.includes('Bayar Pas / Lunas (Rp {grandTotal.toLocaleString'), 'Bayar Pas uses net grandTotal');
-check(modalSrc.includes('min="0"'), '100% / complimentary allows amount paid 0');
+check(modalSrc.includes('Bayar Penuh (Rp {grandTotal.toLocaleString') && modalSrc.includes('setAmountPaid(grandTotal)'), 'Bayar Penuh uses net grandTotal for PAY_BILL');
+const zeroPayload = buildQuickBookingPaymentPayload({ reservations: [{}] }, { mode: 'PAY_BILL', amountPaid: 0, advanceAmount: 0, paymentMethod: 'CASH', otaCollect: false });
+check(zeroPayload.amount_paid === 0, '100% / complimentary allows amount paid 0 under optional rules');
 check(!modalSrc.includes('Net Kamar'), 'Net Kamar per-room summary line removed');
 check(!modalSrc.includes('amount_paid: idx === 0 ? amountPaid'), 'children do not copy booking cash onto reservations[0]');
-check(modalSrc.includes('amount_paid: amountPaid'), 'payload keeps one booking-level amount_paid');
+const paidPayload = buildQuickBookingPaymentPayload({ reservations: [{}, {}] }, { mode: 'PAY_BILL', amountPaid: 250000, advanceAmount: 0, paymentMethod: 'CASH', otaCollect: false });
+check(paidPayload.amount_paid === 250000 && (paidPayload.reservations as Array<{ amount_paid: number }>).every(row => row.amount_paid === 0), 'payload keeps one booking-level amount_paid without double-count');
 check(modalSrc.includes('amount_paid: 0'), 'children send amount_paid 0 for compatibility');
 check(!modalSrc.includes("payment_status: amountPaid >= grandTotal"), 'children do not copy booking payment_status');
 

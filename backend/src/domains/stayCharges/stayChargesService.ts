@@ -16,6 +16,12 @@ import {
   getEffectivePaymentStateForReservation,
   type EffectivePaymentState
 } from '../payments/paymentAllocationService';
+import {
+  calculateReservationFinancials,
+  calculateHotelCollectibleBalance,
+  type ReservationPaymentSource
+} from '../reservations/reservationFinancialCalculator';
+import { lockReservationFinancialState } from '../reservations/reservationLockService';
 
 const VALID_CHARGE_TYPES = new Set<StayChargeType>([
   'EXTRA_BED',
@@ -411,204 +417,18 @@ export async function deleteStayChargeRule(
 // ============================================================================
 // CENTRALIZED FINANCIAL RECALCULATION ENGINE
 // ============================================================================
-
-/**
- * Read-only canonical financial calculator.
- *
- * Computes total_price, amount_paid, applied_deposit, remaining_balance,
- * and payment_status from folio_entries + payment_transactions without
- * mutating any rows. Used by GET /api/reservations/:id/folio.
- *
- * Same canonical rules as recalculateReservationFinancials but NO FOR UPDATE,
- * NO UPDATE/INSERT/DELETE.
- */
-export async function calculateReservationFinancials(
-  client: PoolClient | Pool,
-  reservationId: number,
-  propertyId: number,
-  ordinaryFallbackOverride?: number
-): Promise<{
-  total_price: number;
-  amount_paid: number;
-  applied_deposit: number;
-  remaining_balance: number;
-  payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
-  reservation: any;
-}> {
-  // 1. Fetch current reservation details (read-only, no lock)
-  const resCheck = await client.query(
-    `SELECT r.*, b.property_id AS booking_property_id
-     FROM reservations r
-     LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1`,
-    [reservationId]
-  );
-  if ((resCheck.rowCount ?? 0) === 0) {
-    const err: any = new Error(`Reservasi #${reservationId} tidak ditemukan`);
-    err.statusCode = 404;
-    throw err;
-  }
-  const resRow = resCheck.rows[0];
-  const bookingPropId = Number(resRow.booking_property_id || resRow.property_id || propertyId);
-  if (propertyId && bookingPropId && bookingPropId !== propertyId) {
-    const err: any = new Error('Reservasi milik properti yang berbeda');
-    err.statusCode = 403;
-    err.code = 'CROSS_PROPERTY_ACCESS';
-    throw err;
-  }
-
-  // 2. Calculate Total Charges (Debits) from folio_entries:
-  // Charges = Sum of DEBIT entries that are NOT payment voids/reversals
-  // Reversals = Sum of CREDIT entries that are reversals of charges (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL')
-  // Net Charges = Charges - Reversals
-  const folioDebitsRes = await client.query(
-    `SELECT
-       COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN amount
-         ELSE 0
-       END), 0) AS gross_charges,
-       COALESCE(SUM(CASE
-         WHEN direction = 'CREDIT' AND (reversal_of_entry_id IS NOT NULL OR entry_type = 'REVERSAL' OR entry_type LIKE '%_REVERSAL') THEN amount
-         ELSE 0
-       END), 0) AS charge_reversals,
-       COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type = 'ROOM_CHARGE' AND COALESCE(is_voided, FALSE) = FALSE THEN amount
-         ELSE 0
-       END), 0) AS room_charge_posted,
-       COALESCE(SUM(CASE
-         WHEN direction = 'CREDIT'
-          AND entry_type = 'DISCOUNT'
-          AND COALESCE(is_voided, FALSE) = FALSE
-          AND reversal_of_entry_id IS NULL
-         THEN amount
-         ELSE 0
-       END), 0) AS commercial_discounts,
-       COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT') THEN 1 END)::int as charge_count
-     FROM folio_entries
-     WHERE reservation_id = $1`,
-    [reservationId]
-  );
-
-  const grossCharges = Math.round(Number(folioDebitsRes.rows[0]?.gross_charges || 0));
-  const chargeReversals = Math.round(Number(folioDebitsRes.rows[0]?.charge_reversals || 0));
-  const roomChargePosted = Math.round(Number(folioDebitsRes.rows[0]?.room_charge_posted || 0));
-  const commercialDiscounts = Math.round(Number(folioDebitsRes.rows[0]?.commercial_discounts || 0));
-  const chargeCount = Number(folioDebitsRes.rows[0]?.charge_count || 0);
-
-  let netTotalCharges: number;
-  if (chargeCount > 0) {
-    netTotalCharges = Math.max(0, grossCharges - chargeReversals);
-    if (
-      commercialDiscounts > 0
-      && shouldApplyPostedCommercialDiscount({
-        roomChargePosted,
-        persistedSubtotal: resRow.subtotal_amount
-      })
-    ) {
-      netTotalCharges = Math.max(0, netTotalCharges - commercialDiscounts);
-    }
-  } else {
-    // Fallback for legacy reservations where folio charges haven't been backfilled
-    const nightlySumRes = await client.query(
-      `SELECT COALESCE(SUM(total_amount), 0) as nightly_sum FROM reservation_nightly_rates WHERE reservation_id = $1`,
-      [reservationId]
-    );
-    const nightlySum = Math.round(Number(nightlySumRes.rows[0]?.nightly_sum || 0));
-    netTotalCharges = nightlySum > 0 ? nightlySum : Math.round(Number(resRow.total_price || 0));
-  }
-
-  // 3. Calculate Total Payments from canonical dual-source engine:
-  //    A. Direct ROOM_RESERVATION payment_transactions
-  //    B. Allocated BOOKING_GROUP payments via payment_allocations
-  //
-  // NOTE: legacy fallback (folio/persisted) runs ONLY when no canonical source
-  // row exists at all (canonicalSourceExists === false). We do NOT use
-  // totalEffectivePaid === 0 as the fallback trigger — a zero-amount SUCCESS
-  // direct payment is still a canonical source that must not be overridden.
-  const payState = await getEffectivePaymentStateForReservation(
-    client, reservationId, propertyId
-  );
-  let ordinaryAmountPaid = payState.totalEffectivePaid;
-
-  const depositApplyRes = await client.query(
-    `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
-     FROM folio_entries
-     WHERE reservation_id = $1
-       AND property_id = $2
-       AND entry_type = 'DEPOSIT_APPLY'
-       AND direction = 'CREDIT'
-       AND status = 'POSTED'
-       AND is_voided = FALSE
-       AND reversal_of_entry_id IS NULL`,
-    [reservationId, propertyId]
-  );
-  const appliedDeposit = Math.round(Number(depositApplyRes.rows[0]?.applied_deposit || 0));
-
-  // Deposit cash movements are liabilities, not reservation settlement. Only
-  // ordinary settlement transaction types participate in this legacy fallback.
-  //
-  // CRITICAL: We use canonicalPaymentHistoryExists (broad: any status), NOT
-  // canonicalSourceExists (narrow: SUCCESS only). This preserves the pre-1B2
-  // invariant: a reservation whose canonical payment was later VOIDED/CORRECTED/
-  // REVERSED still has canonical history and must NOT fall back to stale folio
-  // or persisted amount_paid. Using the narrow check would re-activate the
-  // legacy fallback and resurrect obsolete payment amounts.
-  if (!payState.canonicalPaymentHistoryExists) {
-    const folioPmtRes = await client.query(
-      `SELECT
-         COALESCE(SUM(CASE WHEN direction = 'CREDIT'
-           AND entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-           AND reversal_of_entry_id IS NULL THEN amount ELSE 0 END), 0) -
-         COALESCE(SUM(CASE WHEN direction = 'DEBIT'
-           AND entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL') THEN amount ELSE 0 END), 0)
-           AS folio_paid
-       FROM folio_entries
-       WHERE reservation_id = $1`,
-      [reservationId]
-    );
-    const folioPaid = Math.round(Number(folioPmtRes.rows[0]?.folio_paid || 0));
-    if (folioPaid > 0) {
-      ordinaryAmountPaid = folioPaid;
-    } else {
-      ordinaryAmountPaid = ordinaryFallbackOverride === undefined
-        ? Math.max(0, Math.round(Number(resRow.amount_paid || 0)))
-        : Math.max(0, Math.round(ordinaryFallbackOverride));
-    }
-  }
-
-  // A deposit affects reservation settlement only when explicitly applied.
-  // Do not generically sum folio credits: ordinary payments already have folio
-  // projections and would otherwise be counted twice.
-  const effectiveSettlement = ordinaryAmountPaid + appliedDeposit;
-
-  // 4. Calculate Remaining Balance & Payment Status
-  const remainingBalance = Math.max(0, netTotalCharges - effectiveSettlement);
-
-  let newPaymentStatus: 'UNPAID' | 'PARTIAL' | 'PAID' = 'UNPAID';
-  if (effectiveSettlement <= 0) {
-    newPaymentStatus = 'UNPAID';
-  } else if (remainingBalance === 0) {
-    newPaymentStatus = 'PAID';
-  } else {
-    newPaymentStatus = 'PARTIAL';
-  }
-
-  return {
-    total_price: netTotalCharges,
-    amount_paid: ordinaryAmountPaid,
-    applied_deposit: appliedDeposit,
-    remaining_balance: remainingBalance,
-    payment_status: newPaymentStatus,
-    reservation: resRow
-  };
-}
+//
+// The read-only calculators have been extracted to the neutral module
+// reservationFinancialCalculator.ts to avoid circular imports with transactionService.
+// stayChargesService re-exports them for backward compatibility.
+//
 
 /**
  * Write variant: acquires FOR UPDATE lock, persists canonical financials
  * into the reservations row, then returns the result.
  *
  * Delegates the read-only calculation to calculateReservationFinancials
- * and only adds the persistence step.
+ * (imported from reservationFinancialCalculator) and only adds the persistence step.
  */
 export async function recalculateReservationFinancials(
   client: PoolClient | Pool,
@@ -621,6 +441,8 @@ export async function recalculateReservationFinancials(
   applied_deposit: number;
   remaining_balance: number;
   payment_status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  payment_source: ReservationPaymentSource;
+  legacy_unreconciled_payment_exists: boolean;
   reservation: any;
 }> {
   // 1. Fetch and lock the reservation row
@@ -671,39 +493,30 @@ export async function recalculateReservationFinancials(
   };
 }
 
+// Re-export from neutral module for backward compat with external callers.
+export {
+  calculateReservationFinancials,
+  calculateHotelCollectibleBalance,
+  type ReservationPaymentSource
+} from '../reservations/reservationFinancialCalculator';
+
 // ============================================================================
 // FOLIO POSTING, VOID & CORRECTION ENGINE
 // ============================================================================
 
 export async function postStayChargeToFolio(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   dto: PostStayChargeDto
 ): Promise<{ folio_entry_id: number; reservation: any; folio_entry: any }> {
-  const reservationRes = await client.query(
-    `SELECT r.*, b.property_id as booking_property_id
-     FROM reservations r
-     LEFT JOIN bookings b ON b.id = r.booking_id
-     WHERE r.id = $1`,
-    [dto.reservation_id]
+  // PARENT LOCK FIRST: acquire authoritative reservation lock before any mutations
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    dto.reservation_id,
+    propertyId
   );
 
-  if ((reservationRes.rowCount ?? 0) === 0) {
-    const err: any = new Error(`Reservasi #${dto.reservation_id} tidak ditemukan`);
-    err.statusCode = 404;
-    throw err;
-  }
-
-  const reservation = reservationRes.rows[0];
-  const resPropId = reservation.booking_property_id ?? reservation.property_id ?? propertyId;
-  if (Number(resPropId) !== propertyId) {
-    const err: any = new Error('Reservasi tidak berada pada properti yang aktif');
-    err.statusCode = 403;
-    err.code = 'CROSS_PROPERTY_ACCESS';
-    throw err;
-  }
-
-  if (String(reservation.status).toUpperCase() === 'CANCELLED') {
+  if (String(lockedReservation.status).toUpperCase() === 'CANCELLED') {
     const err: any = new Error('Tidak dapat menambahkan biaya pada reservasi yang telah dibatalkan');
     err.statusCode = 400;
     throw err;
@@ -801,7 +614,7 @@ export async function postStayChargeToFolio(
           applicableNightlyRate = sum / ratesRes.rowCount!;
         }
       } else {
-        applicableNightlyRate = Number(reservation.total_price || 0);
+        applicableNightlyRate = Number(lockedReservation.total_price || 0);
       }
 
       if (rule.charge_method === 'FULL_NIGHT') {
@@ -967,7 +780,7 @@ export async function postStayChargeToFolio(
 }
 
 export async function voidFolioEntry(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   reservationId: number,
   folioEntryId: number,
@@ -980,9 +793,9 @@ export async function voidFolioEntry(
     throw err;
   }
 
-  // 1. Lock target entry
+  // 1. PLAIN READ to discover reservation_id from folio entry (no lock yet)
   const entryRes = await client.query(
-    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    'SELECT * FROM folio_entries WHERE id = $1',
     [folioEntryId]
   );
 
@@ -992,24 +805,53 @@ export async function voidFolioEntry(
     throw err;
   }
 
-  const entry = entryRes.rows[0];
-  const targetReservationId = Number(entry.reservation_id);
+  const discoveredEntry = entryRes.rows[0];
+  const targetReservationId = Number(discoveredEntry.reservation_id);
 
-  // 2. Property isolation and reservation validation
-  if (entry.property_id && Number(entry.property_id) !== propertyId) {
+  // 2. PARENT LOCK FIRST: lock reservation before child folio_entry
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    targetReservationId,
+    propertyId
+  );
+
+  // 3. Now lock the child folio_entry (after parent is secured)
+  const lockEntryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    [folioEntryId]
+  );
+
+  if ((lockEntryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // 4. Revalidate after locks
+  const revalidatedEntry = lockEntryRes.rows[0];
+  // A. TOCTOU revalidation: locked child reservation_id === discovered parent
+  if (Number(revalidatedEntry.reservation_id) !== targetReservationId) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  // B. Caller-scope validation: locked child reservation_id === caller's reservationId
+  if (reservationId && Number(revalidatedEntry.reservation_id) !== Number(reservationId)) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (revalidatedEntry.property_id && Number(revalidatedEntry.property_id) !== propertyId) {
     const err: any = new Error('Item folio tidak berada pada properti yang aktif');
     err.statusCode = 403;
     err.code = 'CROSS_PROPERTY_ACCESS';
     throw err;
   }
-  if (reservationId && targetReservationId !== Number(reservationId)) {
-    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
-    err.statusCode = 400;
-    throw err;
-  }
 
-  // 3. Prevent duplicate void / reversal
-  if (entry.is_voided || entry.status === 'VOIDED' || entry.status === 'REVERSED' || entry.status === 'CORRECTED') {
+  // 5. Prevent duplicate void / reversal
+  if (revalidatedEntry.is_voided || revalidatedEntry.status === 'VOIDED' || revalidatedEntry.status === 'REVERSED' || revalidatedEntry.status === 'CORRECTED') {
     const err: any = new Error(`Item folio #${folioEntryId} sudah dibatalkan atau dibalikkan sebelumnya`);
     err.statusCode = 409;
     err.code = 'ALREADY_VOIDED';
@@ -1028,22 +870,25 @@ export async function voidFolioEntry(
   }
 
   // 4. Validate entry kind (cannot void payment or reversal rows directly through this endpoint)
-  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.entry_type === 'DEPOSIT_UNAPPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dibalik melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
     throw err;
   }
-  if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {
+  if (revalidatedEntry.direction === 'CREDIT' && revalidatedEntry.entry_type === 'PAYMENT') {
     const err: any = new Error('Pembayaran harus dibatalkan melalui fitur pembatalan pembayaran');
     err.statusCode = 400;
     throw err;
   }
-  if (entry.entry_type === 'REVERSAL' || entry.reversal_of_entry_id !== null) {
+  if (revalidatedEntry.entry_type === 'REVERSAL' || revalidatedEntry.reversal_of_entry_id !== null) {
     const err: any = new Error('Transaksi pembalik (reversal) tidak dapat dibatalkan kembali');
     err.statusCode = 400;
     throw err;
   }
+
+  // Use locked row as canonical source for all business logic
+  const entry = revalidatedEntry;
 
   const correlationId = `corr_rev_${entry.id}_${Date.now()}`;
   const reversalDirection = entry.direction === 'DEBIT' ? 'CREDIT' : 'DEBIT';
@@ -1136,7 +981,7 @@ export async function voidFolioEntry(
 }
 
 export async function correctFolioEntry(
-  client: PoolClient | Pool,
+  client: PoolClient,
   propertyId: number,
   reservationId: number,
   folioEntryId: number,
@@ -1155,9 +1000,9 @@ export async function correctFolioEntry(
     throw err;
   }
 
-  // 1. Lock target entry
+  // 1. PLAIN READ to discover reservation_id from folio entry (no lock yet)
   const entryRes = await client.query(
-    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    'SELECT * FROM folio_entries WHERE id = $1',
     [folioEntryId]
   );
 
@@ -1167,43 +1012,75 @@ export async function correctFolioEntry(
     throw err;
   }
 
-  const entry = entryRes.rows[0];
-  const targetReservationId = Number(entry.reservation_id);
+  const discoveredEntry = entryRes.rows[0];
+  const targetReservationId = Number(discoveredEntry.reservation_id);
 
-  // 2. Validation
-  if (entry.property_id && Number(entry.property_id) !== propertyId) {
+  // 2. PARENT LOCK FIRST: lock reservation before child folio_entry
+  const lockedReservation = await lockReservationFinancialState(
+    client,
+    targetReservationId,
+    propertyId
+  );
+
+  // 3. Now lock the child folio_entry (after parent is secured)
+  const lockEntryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    [folioEntryId]
+  );
+
+  if ((lockEntryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  // 4. Revalidate after locks
+  const revalidatedEntry = lockEntryRes.rows[0];
+  // A. TOCTOU revalidation: locked child reservation_id === discovered parent
+  if (Number(revalidatedEntry.reservation_id) !== targetReservationId) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  // B. Caller-scope validation: locked child reservation_id === caller's reservationId
+  if (reservationId && Number(revalidatedEntry.reservation_id) !== Number(reservationId)) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (revalidatedEntry.property_id && Number(revalidatedEntry.property_id) !== propertyId) {
     const err: any = new Error('Item folio tidak berada pada properti yang aktif');
     err.statusCode = 403;
     err.code = 'CROSS_PROPERTY_ACCESS';
     throw err;
   }
-  if (reservationId && targetReservationId !== Number(reservationId)) {
-    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
-    err.statusCode = 400;
-    throw err;
-  }
-  if (entry.is_voided || entry.status === 'VOIDED' || entry.status === 'REVERSED' || entry.status === 'CORRECTED') {
+  if (revalidatedEntry.is_voided || revalidatedEntry.status === 'VOIDED' || revalidatedEntry.status === 'REVERSED' || revalidatedEntry.status === 'CORRECTED') {
     const err: any = new Error(`Item folio #${folioEntryId} sudah dibatalkan atau dikoreksi sebelumnya`);
     err.statusCode = 409;
     err.code = 'ALREADY_MODIFIED';
     throw err;
   }
-  if (entry.entry_type === 'DEPOSIT_APPLY' || entry.source_type === 'DEPOSIT') {
+  if (revalidatedEntry.entry_type === 'DEPOSIT_APPLY' || revalidatedEntry.entry_type === 'DEPOSIT_UNAPPLY' || revalidatedEntry.source_type === 'DEPOSIT') {
     const err: any = new Error('Aplikasi deposit hanya dapat dikoreksi melalui lifecycle deposit canonical');
     err.statusCode = 400;
     err.code = 'DEPOSIT_APPLY_CANONICAL_OPERATION_REQUIRED';
     throw err;
   }
-  if (entry.direction === 'CREDIT' && entry.entry_type === 'PAYMENT') {
+  if (revalidatedEntry.direction === 'CREDIT' && revalidatedEntry.entry_type === 'PAYMENT') {
     const err: any = new Error('Pembayaran harus dikoreksi melalui fitur koreksi pembayaran');
     err.statusCode = 400;
     throw err;
   }
-  if (entry.entry_type === 'REVERSAL' || entry.reversal_of_entry_id !== null) {
+  if (revalidatedEntry.entry_type === 'REVERSAL' || revalidatedEntry.reversal_of_entry_id !== null) {
     const err: any = new Error('Transaksi pembalik (reversal) tidak dapat dikoreksi');
     err.statusCode = 400;
     throw err;
   }
+
+  // Use locked row as canonical source for all business logic
+  const entry = revalidatedEntry;
 
   const correctionGroupId = `corr_grp_${entry.id}_${Date.now()}`;
 

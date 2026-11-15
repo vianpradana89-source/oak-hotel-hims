@@ -26,6 +26,9 @@ interface AuthContextType {
   updateSessionToken: (newToken: string, updatedUserPartial?: Partial<AuthUser>) => void;
   effectiveAccess: EffectiveAccessResponse | null;
   refreshEffectiveAccess: () => Promise<void>;
+  granularPermissions: string[];
+  refreshGranularPermissions: () => Promise<void>;
+  hasGranularPermission: (key: string) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -37,6 +40,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<AuthUser | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [effectiveAccess, setEffectiveAccess] = useState<EffectiveAccessResponse | null>(null);
+  const [granularPermissions, setGranularPermissions] = useState<string[]>([]);
 
   // Authenticated fetch helper that injects Authorization header
   const authFetch = useCallback(
@@ -75,13 +79,56 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   }, [token]);
 
+  const refreshGranularPermissions = useCallback(async () => {
+    const currentToken = token || localStorage.getItem(TOKEN_KEY);
+    if (!currentToken) {
+      setGranularPermissions([]);
+      return;
+    }
+    try {
+      const res = await fetch('/api/auth/permissions', {
+        headers: { Authorization: `Bearer ${currentToken}` },
+      });
+      const data = await res.json().catch(() => null);
+      if (
+        res.ok &&
+        data?.status === 'OK' &&
+        Array.isArray(data.data?.permissions)
+      ) {
+        // Defensive normalization: only accept string permission keys
+        const keys: string[] = [];
+        for (const item of data.data.permissions) {
+          if (typeof item === 'string' && item.length > 0) {
+            keys.push(item);
+          }
+        }
+        setGranularPermissions(keys);
+        return;
+      }
+      // 401, 403, network failure, or invalid response body -> clear
+      setGranularPermissions([]);
+    } catch {
+      setGranularPermissions([]);
+    }
+  }, [token]);
+
+  const hasGranularPermission = useCallback(
+    (key: string): boolean => {
+      if (!key || typeof key !== 'string' || key.length === 0) return false;
+      return granularPermissions.includes(key);
+    },
+    [granularPermissions]
+  );
+
   useEffect(() => {
     if (!user || !token) {
       setEffectiveAccess(null);
+      setGranularPermissions([]);
       return;
     }
     void refreshEffectiveAccess();
-  }, [user, token, refreshEffectiveAccess]);
+    void refreshGranularPermissions();
+  }, [user, token, refreshEffectiveAccess, refreshGranularPermissions]);
 
   // Validate session on mount or token change
   useEffect(() => {
@@ -182,6 +229,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setToken(null);
     setUser(null);
     setEffectiveAccess(null);
+    setGranularPermissions([]);
   };
 
   const updateSessionToken = (newToken: string, updatedUserPartial?: Partial<AuthUser>) => {
@@ -190,6 +238,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     if (updatedUserPartial) {
       setUser((prev) => (prev ? { ...prev, ...updatedUserPartial } : null));
     }
+    // Do not manually trust new permissions; the useEffect below will refresh
+    // from /api/auth/permissions using the new token once the state settles.
   };
 
   return (
@@ -205,6 +255,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         updateSessionToken,
         effectiveAccess,
         refreshEffectiveAccess,
+        granularPermissions,
+        refreshGranularPermissions,
+        hasGranularPermission,
       }}
     >
       {children}

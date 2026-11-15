@@ -1,0 +1,12 @@
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - Dockerfile.ota-payment-permission-check
+      - -t
+      - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-ota-payment-permission-check:ota-payment-v1
+      - .
+
+images:
+  - asia-southeast2-docker.pkg.dev/oak-lawang-pms/cloud-run-source-deploy/oak-hims-ota-payment-permission-check:ota-payment-v1

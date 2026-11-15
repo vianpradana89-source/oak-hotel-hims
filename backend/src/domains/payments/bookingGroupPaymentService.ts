@@ -267,12 +267,17 @@ export async function createBookingGroupPaymentWithAllocations(
 
     // Applied deposit (same semantics as recalculateReservationFinancials)
     const depositRes = await client.query(
-      `SELECT COALESCE(SUM(amount), 0) AS applied_deposit
+      `SELECT COALESCE(SUM(
+        CASE
+          WHEN entry_type = 'DEPOSIT_APPLY' AND direction = 'CREDIT' THEN amount
+          WHEN entry_type = 'DEPOSIT_UNAPPLY' AND direction = 'DEBIT' THEN -amount
+          ELSE 0
+        END
+      ), 0) AS applied_deposit
        FROM folio_entries
        WHERE reservation_id = $1
          AND property_id = $2
-         AND entry_type = 'DEPOSIT_APPLY'
-         AND direction = 'CREDIT'
+         AND entry_type IN ('DEPOSIT_APPLY', 'DEPOSIT_UNAPPLY')
          AND status = 'POSTED'
          AND is_voided = FALSE
          AND reversal_of_entry_id IS NULL`,

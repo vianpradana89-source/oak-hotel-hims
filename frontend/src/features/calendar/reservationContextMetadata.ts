@@ -22,7 +22,7 @@ function upper(value: unknown): string {
   return text(value).toUpperCase();
 }
 
-function isOtaReservation(reservation: ReservationContextRecord): boolean {
+export function isOtaReservation(reservation: ReservationContextRecord): boolean {
   if (!reservation) return false;
   if (reservation.ota_source_id != null && reservation.ota_source_id !== '') return true;
   if (text(reservation.ota_source_name)) return true;

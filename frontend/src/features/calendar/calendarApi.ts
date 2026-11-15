@@ -328,6 +328,7 @@ export interface DailyKpiBookedGroup {
   guest_name: string | null;
   booking_status: string | null;
   booking_source: string | null;
+  created_by: string | null;
   created_at: string | null;
   room_count: number;
   children: DailyKpiBookedChild[];
@@ -388,6 +389,49 @@ export type DailyKpiDrilldownData =
 export interface DailyKpiDrilldownResponse {
   status: string;
   data: DailyKpiDrilldownData;
+}
+
+export interface DailyKpiHistoryPoint {
+  business_date: string;
+  occupied_rooms: number;
+  booked_rooms: number;
+  booked_bookings: number;
+  check_in_rooms: number;
+  check_out_rooms: number;
+}
+
+export interface DailyKpiHistoryData {
+  property_id: number;
+  timezone: string;
+  anchor_date: string;
+  points: DailyKpiHistoryPoint[];
+  /** Metrics whose sparkline is valid (historical-reconstructable). Others are current-only snapshots. */
+  historical_metrics: string[];
+}
+
+export interface DailyKpiHistoryResponse {
+  status: string;
+  data: DailyKpiHistoryData;
+}
+
+export async function fetchDailyKpiHistory(
+  propertyId: number,
+  days: number = 7,
+  fetchImpl: FetchLike = fetch,
+  date?: string
+): Promise<DailyKpiHistoryData> {
+  const params = new URLSearchParams({ property_id: String(propertyId), days: String(days) });
+  if (date) params.set('date', date);
+  const result = await safeFetchJson<DailyKpiHistoryResponse>(
+    `/api/reports/daily-kpis/history?${params.toString()}`,
+    undefined,
+    'Trend data could not be loaded. Please try again.',
+    fetchImpl
+  );
+  if (!result.ok || !result.data?.data) {
+    throw new Error(result.errorMessage || `Daily KPI history request failed (${result.status})`);
+  }
+  return result.data.data;
 }
 
 export async function fetchDailyKpiDrilldown(

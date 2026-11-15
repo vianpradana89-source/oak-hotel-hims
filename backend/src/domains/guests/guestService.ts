@@ -1063,9 +1063,41 @@ export async function updateGuest(
     const ktpOcrConfidence = input.ktp_ocr_confidence !== undefined ? input.ktp_ocr_confidence : existing.ktp_ocr_confidence;
     const ktpOcrProvider = input.ktp_ocr_provider !== undefined ? (input.ktp_ocr_provider ? String(input.ktp_ocr_provider).trim() : null) : existing.ktp_ocr_provider;
 
+    // ktp_regency_id: preserve existing when input is undefined/null; validate only when a number is provided.
+    let ktpRegencyId: number | null = existing.ktp_regency_id ?? null;
+    if (input.ktp_regency_id !== undefined && input.ktp_regency_id !== null) {
+      const parsed = Number(input.ktp_regency_id);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw httpError(400, 'INVALID_KTP_REGENCY_ID', 'ID kabupaten/kota KTP tidak valid.');
+      }
+      const regCheck = await client.query('SELECT 1 FROM regencies WHERE id = $1 LIMIT 1', [parsed]);
+      if ((regCheck.rowCount ?? 0) === 0) {
+        throw httpError(400, 'INVALID_KTP_REGENCY_ID', 'Kota/Kabupaten KTP tidak ditemukan.');
+      }
+      ktpRegencyId = parsed;
+    }
+
     const notes = input.notes !== undefined ? (input.notes ? String(input.notes).trim() : null) : existing.notes;
     const isArchived = input.is_archived !== undefined ? Boolean(input.is_archived) : existing.is_archived;
     const isActive = input.is_active !== undefined ? Boolean(input.is_active) : existing.is_active;
+
+    if (normalizedIdentity && normalizedIdentity !== existing.normalized_identity_number) {
+      const dupNikRes = await client.query(
+        `SELECT id, full_name FROM guests
+         WHERE created_property_id = $1
+           AND normalized_identity_number = $2
+           AND id <> $3
+         LIMIT 1`,
+        [propertyId, normalizedIdentity, guestId]
+      );
+      if ((dupNikRes.rowCount ?? 0) > 0) {
+        throw httpError(
+          409,
+          'DUPLICATE_IDENTITY_NUMBER',
+          `Nomor identitas sudah terdaftar pada profil tamu lain (#${dupNikRes.rows[0].id}).`
+        );
+      }
+    }
 
     const normalizedName = fullName.toLowerCase();
     const res = await client.query(
@@ -1076,9 +1108,10 @@ export async function updateGuest(
            blacklist_reason = $21, notes = $22, identity_type = $23, identity_number = $24, normalized_identity_number = $25,
            identity_path = $26, has_valid_identity = $27, rt_rw = $28, village_kelurahan = $29, district_kecamatan = $30,
            religion = $31, marital_status = $32, occupation = $33, citizenship = $34, valid_until = $35,
-           ktp_ocr_confidence = $36, ktp_ocr_provider = $37,
-           is_archived = $38, is_active = $39, updated_at = NOW()
-       WHERE id = $40
+            ktp_ocr_confidence = $36, ktp_ocr_provider = $37,
+            ktp_regency_id = $38,
+            is_archived = $39, is_active = $40, updated_at = NOW()
+        WHERE id = $41
        RETURNING *`,
       [
         fullName,
@@ -1118,6 +1151,7 @@ export async function updateGuest(
         validUntil,
         ktpOcrConfidence,
         ktpOcrProvider,
+        ktpRegencyId,
         isArchived,
         isActive,
         guestId
@@ -1129,7 +1163,11 @@ export async function updateGuest(
       action: 'GUEST_UPDATE',
       entity: 'GUEST',
       recordId: guestId,
-      newValue: updated,
+      newValue: {
+        ...updated,
+        before: existing,
+        after: updated
+      },
       propertyId,
       correlationId
     });
@@ -1673,7 +1711,8 @@ export async function syncPrimaryGuestFromReservation(
 
   // 1. Lock and check if PRIMARY_GUEST is already linked in reservation_guests
   const pgLinkRes = await client.query(
-    `SELECT rg.id AS link_id, rg.guest_id, g.phone, g.normalized_phone, g.full_name
+    `SELECT rg.id AS link_id, rg.guest_id, g.phone, g.normalized_phone, g.full_name,
+            g.normalized_name, g.has_valid_identity, g.created_property_id
      FROM reservation_guests rg
      JOIN guests g ON g.id = rg.guest_id
      WHERE rg.reservation_id = $1 AND rg.role = 'PRIMARY_GUEST'
@@ -1691,10 +1730,56 @@ export async function syncPrimaryGuestFromReservation(
     throw err;
   }
 
-  const guestId = Number(pgLinkRes.rows[0].guest_id);
+  const existingGuest = pgLinkRes.rows[0];
+  const guestId = Number(existingGuest.guest_id);
+  const currentNormName = String(existingGuest.full_name || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const targetNormName = rawName
+    ? rawName.replace(/\s+/g, ' ').toLowerCase()
+    : null;
+  const existingNormPhone =
+    existingGuest.normalized_phone || normalizeDigitsOnly(existingGuest.phone);
+  const nameChanged = Boolean(
+    targetNormName && currentNormName && targetNormName !== currentNormName
+  );
+  const phoneChanged = Boolean(normPhone && normPhone !== existingNormPhone);
 
-  // 2. Authoritatively synchronize phone (and name if explicitly supplied).
-  await client.query(
+  if (nameChanged || phoneChanged) {
+    const sharedRes = await client.query(
+      `SELECT COUNT(*)::int AS other_count
+       FROM reservation_guests
+       WHERE guest_id = $1 AND reservation_id <> $2`,
+      [guestId, reservationId]
+    );
+    const isSharedAcrossReservations = Number(sharedRes.rows[0]?.other_count || 0) > 0;
+
+    if (nameChanged) {
+      const err: any = new Error(
+        isSharedAcrossReservations
+          ? 'SHARED_PRIMARY_GUEST_CONFLICT: Tamu utama pada reservasi ini terhubung ke profil bersama. Pilih atau buat profil tamu menginap yang sesuai tanpa menimpa profil bersama.'
+          : 'GUEST_IDENTITY_TARGET_MISMATCH: Nama tamu menginap berbeda dari profil tamu yang terhubung. Pilih profil tamu yang sesuai atau lengkapi KTP tamu baru.'
+      );
+      err.statusCode = 409;
+      err.code = isSharedAcrossReservations
+        ? 'SHARED_PRIMARY_GUEST_CONFLICT'
+        : 'GUEST_IDENTITY_TARGET_MISMATCH';
+      throw err;
+    }
+
+    if (isSharedAcrossReservations && phoneChanged && !existingGuest.has_valid_identity) {
+      const err: any = new Error(
+        'SHARED_PRIMARY_GUEST_CONFLICT: Tamu utama pada reservasi ini masih menggunakan profil grup bersama dan belum memiliki identitas terverifikasi. Lengkapi identitas tamu kamar ini terlebih dahulu sebelum mengubah nomor telepon master.'
+      );
+      err.statusCode = 409;
+      err.code = 'SHARED_PRIMARY_GUEST_CONFLICT';
+      throw err;
+    }
+  }
+
+  // 2. Authoritatively synchronize phone (and name if explicitly supplied for same person).
+  const updatedGuestRes = await client.query(
     `UPDATE guests
      SET phone = CASE
            WHEN $1::VARCHAR IS NOT NULL AND TRIM($1::VARCHAR) <> '' THEN $1::VARCHAR
@@ -1708,8 +1793,13 @@ export async function syncPrimaryGuestFromReservation(
            WHEN $3::VARCHAR IS NOT NULL AND TRIM($3::VARCHAR) <> '' THEN $3::VARCHAR
            ELSE full_name
          END,
+         normalized_name = CASE
+           WHEN $3::VARCHAR IS NOT NULL AND TRIM($3::VARCHAR) <> '' THEN LOWER($3::VARCHAR)
+           ELSE normalized_name
+         END,
          updated_at = NOW()
-     WHERE id = $4`,
+     WHERE id = $4
+     RETURNING id, full_name, phone, normalized_phone, created_property_id`,
     [
       rawPhone || null,
       normPhone || null,
@@ -1717,6 +1807,33 @@ export async function syncPrimaryGuestFromReservation(
       guestId
     ]
   );
+
+  const auditPropertyId = Number(
+    input.propertyId || existingGuest.created_property_id || 0
+  );
+  if ((nameChanged || phoneChanged) && Number.isInteger(auditPropertyId) && auditPropertyId > 0) {
+    const afterGuest = updatedGuestRes.rows[0] || {};
+    await writeGuestAudit(client, {
+      action: 'GUEST_UPDATE',
+      entity: 'GUEST',
+      recordId: guestId,
+      newValue: {
+        reservation_id: reservationId,
+        relation_source: input.relationSource || 'RESERVATION_SYNC',
+        before: {
+          full_name: existingGuest.full_name,
+          phone: existingGuest.phone,
+          normalized_phone: existingGuest.normalized_phone
+        },
+        after: {
+          full_name: afterGuest.full_name,
+          phone: afterGuest.phone,
+          normalized_phone: afterGuest.normalized_phone
+        }
+      },
+      propertyId: auditPropertyId
+    });
+  }
 
   return guestId;
 }

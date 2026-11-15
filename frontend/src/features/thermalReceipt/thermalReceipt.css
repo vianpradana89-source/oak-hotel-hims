@@ -1,0 +1,724 @@
+/**
+ * Thermal Receipt — Print CSS
+ *
+ * Fully isolated from Document & Print (A4/PDF) CSS.
+ * Uses .thermal-* class prefix for receipt rendering (print isolation)
+ * and .three-* class prefix for modal UI components (screen only).
+ *
+ * Width variants:
+ *   .thermal-receipt--58  → 58mm paper
+ *   .thermal-receipt--80  → 80mm paper
+ */
+
+/* ──────────────────────────────────────────────────────────
+   RECEIPT RENDERING (screen preview + print)
+    Receipt CSS tuned for high-contrast thermal printing:
+    - full black / near-black colors for readability
+    - strong font-weight on labels and values
+    - solid separators, bold status box
+    - proportionally larger logo and header
+   ────────────────────────────────────────────────────────── */
+
+.thermal-receipt {
+  width: 80mm;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #000;
+  background: #fff;
+  padding: 6px 4px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+
+.thermal-receipt--58 {
+  width: 58mm;
+  font-size: 10px;
+}
+
+.thermal-receipt--80 {
+  width: 80mm;
+  font-size: 11px;
+}
+
+/* Header */
+.thermal-header {
+  text-align: center;
+  margin-bottom: 5px;
+}
+
+.thermal-logo {
+  max-width: 64px;
+  max-height: 44px;
+  object-fit: contain;
+  display: block;
+  margin: 0 auto 4px;
+}
+
+.thermal-hotel-name {
+  font-size: 14px;
+  font-weight: 800;
+  color: #000;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  line-height: 1.2;
+}
+
+.thermal-receipt--58 .thermal-hotel-name {
+  font-size: 12px;
+}
+
+.thermal-hotel-tagline {
+  font-size: 9px;
+  color: #000;
+  margin-top: 1px;
+  font-weight: 600;
+}
+
+.thermal-hotel-address {
+  font-size: 9.5px;
+  color: #000;
+  margin-top: 2px;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+.thermal-hotel-phone {
+  font-size: 9.5px;
+  color: #000;
+  margin-top: 1px;
+  font-weight: 600;
+}
+
+/* Divider — solid dark line, not dashed gray */
+.thermal-divider {
+  border: none;
+  border-top: 1.5px solid #000;
+  margin: 6px 0;
+}
+
+/* Title */
+.thermal-title {
+  text-align: center;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin: 5px 0 7px;
+  color: #000;
+}
+
+.thermal-receipt--58 .thermal-title {
+  font-size: 10px;
+}
+
+/* Section */
+.thermal-section {
+  margin-bottom: 5px;
+}
+
+/* Row */
+.thermal-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 4px;
+  padding: 2px 0;
+}
+
+.thermal-row--mono .thermal-value {
+  font-family: 'Courier New', Courier, monospace;
+  font-weight: 800;
+}
+
+.thermal-row--bold .thermal-label {
+  font-weight: 800;
+}
+
+.thermal-row--bold .thermal-value {
+  font-weight: 800;
+}
+
+.thermal-row--total {
+  border-top: 2.5px solid #000;
+  margin-top: 5px;
+  padding-top: 5px;
+}
+
+/* Label — bold, black, clear */
+.thermal-label {
+  color: #000;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  flex-shrink: 0;
+}
+
+.thermal-receipt--58 .thermal-label {
+  font-size: 9px;
+}
+
+/* Value — bold, black, right-aligned */
+.thermal-value {
+  font-size: 11px;
+  font-weight: 700;
+  color: #000;
+  text-align: right;
+  word-break: break-all;
+}
+
+.thermal-receipt--58 .thermal-value {
+  font-size: 10px;
+}
+
+/* Total / balance value — largest, boldest */
+.thermal-value--total {
+  font-size: 14px;
+  font-weight: 900;
+  color: #000;
+}
+
+.thermal-receipt--58 .thermal-value--total {
+  font-size: 12px;
+}
+
+/* Status badge — DOMINAN: font besar, tebal, border hitam tegas */
+.thermal-status {
+  text-align: center;
+  font-size: 18px;
+  font-weight: 900;
+  padding: 6px 8px;
+  margin-top: 6px;
+  border: 2.5px solid #000;
+  border-radius: 3px;
+  color: #000;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  background: #fff;
+  line-height: 1.3;
+}
+
+.thermal-receipt--58 .thermal-status {
+  font-size: 14px;
+  border-width: 2px;
+  padding: 4px 6px;
+  letter-spacing: 0.08em;
+}
+
+/* Note — readable but secondary */
+.thermal-note {
+  font-size: 9px;
+  color: #000;
+  text-align: center;
+  margin: 5px 0;
+  line-height: 1.4;
+  font-weight: 600;
+}
+
+/* Signatures */
+.thermal-signatures {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 10px;
+  gap: 8px;
+}
+
+.thermal-signature-block {
+  flex: 1;
+  text-align: center;
+}
+
+.thermal-signature-line {
+  border-top: 1.5px solid #000;
+  margin-bottom: 3px;
+}
+
+.thermal-signature-label {
+  font-size: 9px;
+  color: #000;
+  text-transform: uppercase;
+  font-weight: 700;
+}
+
+/* Footer — clear and legible */
+.thermal-footer {
+  margin-top: 8px;
+  padding-top: 5px;
+  border-top: 1.5px solid #000;
+  text-align: center;
+  font-size: 9.5px;
+  color: #000;
+  line-height: 1.6;
+}
+
+.thermal-footer-text {
+  font-size: 9.5px;
+  color: #000;
+  font-weight: 600;
+}
+
+.thermal-footer-text strong {
+  color: #000;
+  font-weight: 800;
+}
+
+.thermal-footer-note {
+  font-size: 9px;
+  color: #000;
+  margin-top: 3px;
+  font-weight: 600;
+}
+
+/* ──────────────────────────────────────────────────────────
+   MODAL UI COMPONENTS (screen only, hidden in print)
+   Using .three-* prefix to avoid conflicts with receipt CSS
+   ────────────────────────────────────────────────────────── */
+
+/* Selection cards (Step 1 & 2) */
+.three-selector {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.three-selector-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.three-selector-btn {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 16px;
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.three-selector-btn:hover {
+  border-color: #1b4332;
+  background: #f8faf9;
+  box-shadow: 0 4px 12px rgba(27, 67, 50, 0.1);
+  transform: translateY(-1px);
+}
+
+.three-selector-btn:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 4px rgba(27, 67, 50, 0.08);
+}
+
+.three-selector-icon {
+  font-size: 28px;
+  line-height: 1;
+  flex-shrink: 0;
+  width: 40px;
+  text-align: center;
+}
+
+.three-selector-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.three-selector-label {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  color: #1a1a1a;
+  margin-bottom: 4px;
+  line-height: 1.3;
+}
+
+.three-selector-desc {
+  display: block;
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.4;
+}
+
+.three-hint {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 8px 0;
+  line-height: 1.5;
+}
+
+/* Record list (Step 3) */
+.three-record-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.three-record-btn {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 14px;
+  background: #fff;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  transition: all 0.15s ease;
+}
+
+.three-record-btn:hover {
+  border-color: #1b4332;
+  background: #f8faf9;
+}
+
+.three-record-number {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1a1a1a;
+}
+
+.three-record-meta {
+  font-size: 12px;
+  color: #64748b;
+  white-space: nowrap;
+  margin-left: 12px;
+}
+
+/* Width selector - segmented control */
+.three-width-selector {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0;
+  border-bottom: 1px solid #f1f5f9;
+  margin-bottom: 16px;
+}
+
+.three-width-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #475569;
+  white-space: nowrap;
+}
+
+.three-width-segment {
+  display: inline-flex;
+  background: #f1f5f9;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+
+.three-width-btn {
+  padding: 6px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  border: none;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  border-radius: 6px;
+  transition: all 0.15s ease;
+}
+
+.three-width-btn:hover {
+  color: #1b4332;
+}
+
+.three-width-btn--active {
+  background: #fff;
+  color: #1b4332;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+/* Preview area */
+.three-preview-container {
+  margin-bottom: 16px;
+}
+
+.three-preview-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.three-preview-label::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  background: #1b4332;
+  border-radius: 50%;
+}
+
+.three-preview-wrap {
+  background: #fafafa;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  justify-content: center;
+}
+
+/* Action buttons */
+.three-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-top: 16px;
+  border-top: 1px solid #f1f5f9;
+  margin-top: 8px;
+}
+
+.three-btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: #1b4332;
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  box-shadow: 0 2px 4px rgba(27, 67, 50, 0.2);
+}
+
+.three-btn-primary:hover:not(:disabled) {
+  background: #153628;
+  transform: translateY(-1px);
+  box-shadow: 0 4px 8px rgba(27, 67, 50, 0.25);
+}
+
+.three-btn-primary:disabled {
+  background: #94a3b8;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.three-btn-secondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 20px;
+  background: #fff;
+  color: #475569;
+  border: 1.5px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.three-btn-secondary:hover {
+  border-color: #cbd5e1;
+  background: #f8fafc;
+  color: #334155;
+}
+
+/* Loading state */
+.three-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 32px;
+  color: #64748b;
+  font-size: 14px;
+}
+
+.three-loading::before {
+  content: '';
+  width: 20px;
+  height: 20px;
+  border: 2px solid #e2e8f0;
+  border-top-color: #1b4332;
+  border-radius: 50%;
+  animation: thermal-spin 0.8s linear infinite;
+}
+
+@keyframes thermal-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Error state */
+.three-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 16px;
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+  color: #991b1b;
+  font-size: 14px;
+}
+
+.three-error .three-btn-secondary {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+/* Empty state */
+.three-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 32px 20px;
+  text-align: center;
+  background: #fafafa;
+  border: 1px dashed #e2e8f0;
+  border-radius: 8px;
+}
+
+.three-empty-icon {
+  font-size: 32px;
+  margin-bottom: 12px;
+  opacity: 0.6;
+}
+
+.three-empty-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #334155;
+  margin-bottom: 6px;
+}
+
+.three-empty-desc {
+  font-size: 13px;
+  color: #64748b;
+  line-height: 1.5;
+  max-width: 280px;
+}
+
+/* Step indicator */
+.three-step-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: #f8fafc;
+  border-radius: 8px;
+  border: 1px solid #f1f5f9;
+}
+
+.three-step-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #cbd5e1;
+}
+
+.three-step-dot--active {
+  background: #1b4332;
+}
+
+.three-step-dot--completed {
+  background: #1b4332;
+  opacity: 0.5;
+}
+
+.three-step-label {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+}
+
+/* ──────────────────────────────────────────────────────────
+   PRINT PORTAL ROOT (attached to document.body via createPortal)
+   Hidden on screen, visible only during @media print.
+   Completely isolated from modal layout/positioning.
+   ────────────────────────────────────────────────────────── */
+
+.thermal-print-root {
+  display: none !important;
+}
+
+/* ──────────────────────────────────────────────────────────
+   PRINT ISOLATION
+    * Print portal root is visible only via @media print rules below.
+   ────────────────────────────────────────────────────────── */
+@media print {
+  /* Hide entire app */
+  body * {
+    visibility: hidden;
+  }
+
+  /* Show only thermal print target and its children */
+  #thermal-print-target,
+  #thermal-print-target * {
+    visibility: visible;
+  }
+
+  #thermal-print-target {
+    display: block !important;
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: var(--thermal-width, 80mm) !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+  }
+
+  /* Suppress all modal UI components */
+  .three-selector,
+  .three-actions,
+  .three-loading,
+  .three-error,
+  .three-hint,
+  .three-step-indicator,
+  .three-preview-label,
+  .three-width-selector,
+  .three-empty-state,
+  .three-preview-wrap {
+    display: none !important;
+  }
+
+  /* Page setup — use auto size; printer driver / browser dialog handles paper */
+  @page {
+    size: auto;
+    margin: 0;
+  }
+
+  /* Force receipt width during print */
+  .thermal-receipt {
+    width: var(--thermal-width, 80mm) !important;
+    margin: 0 !important;
+    padding: 4px !important;
+    font-size: inherit !important;
+  }
+
+  /* Ensure all receipt text renders at full black during print */
+  #thermal-print-target .thermal-label,
+  #thermal-print-target .thermal-value,
+  #thermal-print-target .thermal-hotel-name,
+  #thermal-print-target .thermal-hotel-address,
+  #thermal-print-target .thermal-hotel-phone,
+  #thermal-print-target .thermal-hotel-tagline,
+  #thermal-print-target .thermal-title,
+  #thermal-print-target .thermal-footer-text,
+  #thermal-print-target .thermal-footer-note,
+  #thermal-print-target .thermal-status,
+  #thermal-print-target .thermal-note,
+  #thermal-print-target .thermal-signature-label {
+    color: #000 !important;
+  }
+}

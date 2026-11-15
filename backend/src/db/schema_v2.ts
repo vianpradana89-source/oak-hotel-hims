@@ -427,16 +427,15 @@ export async function seedAvailabilityDates(pool: Pool) {
     ORDER BY rt.id
   `);
 
-  const horizonDays = 180;
+  const horizonDays = 730;
   for (const rt of canonicalTypes.rows) {
     const totalRooms = Number(rt.active_rooms || 0);
-    for (let i = 0; i < horizonDays; i += 1) {
-      await pool.query(
-        `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
-         VALUES ($1, $2, ($3::date + ($4 || ' days')::interval), $5, 0)
-         ON CONFLICT (room_type_id, date) WHERE room_type_id IS NOT NULL DO NOTHING`,
-        [rt.room_type_id, rt.room_type, todayKey, String(i), totalRooms]
-      );
-    }
+    await pool.query(
+      `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+       SELECT $1, $2, d::date, $3, 0
+       FROM generate_series($4::date, $4::date + ($5::int - 1) * interval '1 day', interval '1 day') AS d
+       ON CONFLICT (room_type_id, date) WHERE room_type_id IS NOT NULL DO NOTHING`,
+      [rt.room_type_id, rt.room_type, totalRooms, todayKey, horizonDays]
+    );
   }
 }

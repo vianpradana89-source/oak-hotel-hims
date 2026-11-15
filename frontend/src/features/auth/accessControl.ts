@@ -130,6 +130,16 @@ export function getVisibleNavKeys(effective: EffectiveAccessGrid): MainNavKey[] 
 
 export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, menuKey: MainNavKey): boolean {
   if (!effective) return false;
+  if (
+    menuKey === 'Produk & Inventori' ||
+    menuKey === 'Penerimaan Barang' ||
+    menuKey === 'Analisis Food Cost'
+  ) {
+    return (
+      effective['Master Produk']?.view?.allowed === true ||
+      effective['Produk & Inventori']?.view?.allowed === true
+    );
+  }
   return effective[menuKey]?.view?.allowed === true;
 }
 

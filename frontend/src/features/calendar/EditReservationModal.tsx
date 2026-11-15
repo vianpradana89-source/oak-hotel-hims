@@ -2,6 +2,9 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import ReactDOM from 'react-dom';
 import { safeFetchJson } from './calendarApi';
 import { useAuth } from '../auth/AuthContext';
+import GuestSearchAutocomplete from '../booking/GuestSearchAutocomplete';
+import IdentityExtractionModal from '../booking/IdentityExtractionModal';
+import type { Guest } from '../guests/guestTypes';
 
 interface EditReservationModalProps {
   isOpen: boolean;
@@ -26,9 +29,17 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   // Form Fields
   const [guestName, setGuestName] = useState<string>('');
   const [guestPhone, setGuestPhone] = useState<string>('');
+  const [selectedGuest, setSelectedGuest] = useState<Guest | null>(null);
+  // RE-F02: true once the operator has typed a free-text guest name in this
+  // session (i.e. the current guestName value was NOT chosen from the CRM
+  // autocomplete).  While true, effectiveGuestId does NOT fall back to the
+  // original primary_guest_id; a newly-typed name requires its own KTP
+  // before the save can proceed.
+  const [guestNameTouched, setGuestNameTouched] = useState<boolean>(false);
   const [guestSegment, setGuestSegment] = useState<string>('Reguler');
   const [bookerName, setBookerName] = useState<string>('');
   const [bookerPhone, setBookerPhone] = useState<string>('');
+  const [selectedBookerGuest, setSelectedBookerGuest] = useState<Guest | null>(null);
   const [referral, setReferral] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
   const [adults, setAdults] = useState<number>(1);
@@ -52,15 +63,21 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
   // Preview State
   const [previewData, setPreviewData] = useState<any>(null);
 
-  // Difference Payment Modal State
-  const [showPaymentModal, setShowPaymentModal] = useState<boolean>(false);
-  const [paymentMethod, setPaymentMethod] = useState<string>('CASH');
-  const [cashTenderedInput, setCashTenderedInput] = useState<string>('');
-  const [paymentFile, setPaymentFile] = useState<File | null>(null);
-  const [paymentNote, setPaymentNote] = useState<string>('');
-  const [paymentSubmitting, setPaymentSubmitting] = useState<boolean>(false);
-  const [paymentError, setPaymentError] = useState<string | null>(null);
+  // Identity (Lengkapi KTP) State
+  const [showIdentityModal, setShowIdentityModal] = useState<boolean>(false);
+  // Guest id whose identity document was confirmed in this edit session.
+  // Scoped to that guest so a different selection cannot inherit it.
+  const [identityConfirmedGuestId, setIdentityConfirmedGuestId] = useState<number | null>(null);
+
+  // Price Decision Modal State (lower price confirmation only — payment is
+  // handled from Detail Reservasi → Pembayaran, never by Save).
   const [showDecreaseModal, setShowDecreaseModal] = useState<boolean>(false);
+  // RE-F01: true once the operator explicitly changed the rate plan selector
+  // in this session (or after a room-type change that triggers auto-select).
+  // When false, the preserved plan value in ratePlanId is just the
+  // reservation's original plan echoed back by the form — the server
+  // resolves it to the current plan, so no hidden reprice can occur.
+  const [ratePlanTouched, setRatePlanTouched] = useState<boolean>(false);
   const previewRequestRef = useRef(0);
   const availabilityRequestRef = useRef(0);
   const saveRequestKeyRef = useRef<string | null>(null);
@@ -77,17 +94,100 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     && selectedRatePlan.is_archived !== true
     && (stayType === 'DAY_USE' ? selectedRatePlan.rate_type === 'DAY_USE' : selectedRatePlan.rate_type !== 'DAY_USE')
   );
-  const paymentRequired = Math.max(0, Number(previewData?.payment_required || 0));
-  const cashTendered = Number(cashTenderedInput || 0);
-  const cashShortage = paymentMethod === 'CASH' ? Math.max(0, paymentRequired - cashTendered) : 0;
-  const changeAmount = paymentMethod === 'CASH' ? Math.max(0, cashTendered - paymentRequired) : 0;
-  const formatRupiah = (amount: number) => `Rp${Math.max(0, Math.round(amount || 0)).toLocaleString('id-ID')}`;
+  // Identity document status. The authoritative check mirrors checkinGate
+  // Gate 3 (stored document + validation flag) for the effective staying
+  // guest: the guest selected in this form, or the linked PRIMARY_GUEST.
+  // A guest whose KTP was just confirmed is tracked by id, so switching to a
+  // different guest never inherits the previous guest's identity status.
+  const primaryGuestId: number | null = reservation?.primary_guest?.primary_guest_id ?? null;
+  // RE-F02: when the operator typed a free-text name (guestNameTouched=true)
+  // and no CRM guest is selected, do NOT inherit the old primary guest ID.
+  // effectiveGuestId=null forces the "Lengkapi KTP" flow for the new target.
+  const effectiveGuestId: number | null =
+    selectedGuest?.id
+    ?? (guestNameTouched ? null : primaryGuestId);
+  const primaryIdentityOk = reservation?.precheckin_eligibility?.identity_ok === true;
+  // Canonical: for a NEW guest target (different from current primary), the
+  // storage key is the authoritative document presence signal. The legacy
+  // identity_path alone (or has_valid_identity flag alone) is insufficient.
+  // For the SAME primary guest, primaryIdentityOk (backend precheckin) already
+  // encodes the full gate; use it directly without re-checking the flag.
+  const selectedGuestIdentityOk = selectedGuest
+    ? (Number(selectedGuest.id) === Number(primaryGuestId)
+        ? primaryIdentityOk
+        : (Boolean(selectedGuest.identity_storage_key?.trim())
+           && selectedGuest.has_valid_identity === true))
+    : primaryIdentityOk;
+  const effectiveTargetName = String(
+    selectedGuest?.full_name || reservation?.primary_guest?.primary_guest_name || ''
+  )
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const normalizedDraftGuestName = String(guestName || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+  const targetNameAligned =
+    !normalizedDraftGuestName ||
+    !effectiveTargetName ||
+    normalizedDraftGuestName === effectiveTargetName;
+  const identitySatisfied = effectiveGuestId != null
+    && targetNameAligned
+    && (identityConfirmedGuestId === effectiveGuestId || selectedGuestIdentityOk);
+  const identityBlocked = !identitySatisfied;
+  const identityBlockReason = !effectiveGuestId || !targetNameAligned
+    ? 'Tamu menginap belum terhubung atau berbeda dari profil saat ini. Pilih tamu yang sesuai atau lengkapi KTP sebelum menyimpan.'
+    : 'Simpan dinonaktifkan — dokumen identitas tamu menginap wajib dilengkapi terlebih dahulu.';
 
   // Initialize form
   useEffect(() => {
     if (!reservation || !isOpen) return;
     setGuestName(reservation.guest_name || '');
     setGuestPhone(reservation.guest_phone || '');
+    if (reservation.primary_guest) {
+      setSelectedGuest({
+        id: reservation.primary_guest.primary_guest_id,
+        full_name: reservation.primary_guest.primary_guest_name || reservation.guest_name,
+        phone: reservation.primary_guest.primary_guest_phone || reservation.guest_phone,
+        guest_code: null,
+        preferred_name: null,
+        gender: null,
+        birth_place: null,
+        birth_date: null,
+        nationality: null,
+        email: null,
+        address: null,
+        city: null,
+        province: null,
+        country: null,
+        guest_segment: reservation.guest_segment || 'Reguler',
+        vip_status: 'STANDARD' as const,
+        preferences: null,
+        identity_type: null,
+        identity_number: reservation.primary_guest.primary_guest_identity_number || null,
+        identity_path: reservation.primary_guest.primary_guest_identity_path || null,
+        has_valid_identity: reservation.primary_guest.primary_guest_identity_verified || false,
+        rt_rw: null,
+        village_kelurahan: null,
+        district_kecamatan: null,
+        religion: null,
+        marital_status: null,
+        occupation: null,
+        citizenship: null,
+        valid_until: null,
+        ktp_ocr_confidence: null,
+        ktp_ocr_provider: null,
+        ktp_extracted_at: null,
+        ktp_regency_id: null,
+        notes: null,
+        is_archived: false,
+        is_active: true,
+        created_property_id: propertyId,
+        created_at: '',
+        updated_at: ''
+      });
+    }
     setGuestSegment(reservation.guest_segment || 'Reguler');
     setBookerName(reservation.booker_name || reservation.guest_name || '');
     setBookerPhone(reservation.booker_phone || reservation.guest_phone || '');
@@ -105,14 +205,12 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     setRoomTypeId(reservation.room_type_id || reservation.booked_room_type_id_snapshot || null);
     setRoomId(reservation.room_id || null);
     setRatePlanId(reservation.rate_plan_id || null);
+    setRatePlanTouched(false);
+    setGuestNameTouched(false);
     setError(null);
     setPreviewData(null);
-    setShowPaymentModal(false);
     setShowDecreaseModal(false);
-    setPaymentFile(null);
-    setPaymentNote('');
-    setCashTenderedInput('');
-    setPaymentError(null);
+    setIdentityConfirmedGuestId(null);
     saveRequestKeyRef.current = null;
   }, [reservation, isOpen]);
 
@@ -232,6 +330,9 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
             room_type_id: roomTypeId,
             room_id: roomId,
             rate_plan_id: ratePlanId,
+            // RE-F01: pass the preserve flag so the preview path can
+            // return preserve_price_context when no price dimension moved.
+            preserve_rate_plan: !ratePlanTouched,
             check_in: checkIn,
             check_out: stayType === 'DAY_USE' ? checkIn : checkOut,
             stay_type: stayType,
@@ -253,7 +354,7 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     } finally {
       if (requestId === previewRequestRef.current) setPreviewLoading(false);
     }
-  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, availabilityLoading, hasAssignableRoom, isOta, hasCompatibleRatePlan, authFetch]);
+  }, [reservation, roomTypeId, roomId, ratePlanId, checkIn, checkOut, stayType, adults, children, availabilityLoading, hasAssignableRoom, isOta, hasCompatibleRatePlan, authFetch, ratePlanTouched]);
 
   useEffect(() => {
     if (isOpen && checkIn && roomTypeId && roomId && hasAssignableRoom && !availabilityLoading && (isOta || hasCompatibleRatePlan)) {
@@ -267,6 +368,9 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
 
   useEffect(() => {
     if (!roomTypeId || ratePlans.length === 0) return;
+    // RE-F01: if the operator has NOT touched the rate plan selector, the
+    // compatibility auto-select is still allowed to fix a stale id, but it
+    // must not mark the plan as "touched" — the preserve flag stays true.
     const compatible = ratePlans.filter((rp) =>
       Number(rp.room_type_id) === Number(roomTypeId)
       && rp.is_active !== false
@@ -284,6 +388,8 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     guest_segment: guestSegment,
     booker_name: bookerName.trim() || guestName.trim(),
     booker_phone: bookerPhone.trim() || guestPhone.trim(),
+    guest_id: selectedGuest?.id ?? undefined,
+    booker_guest_id: selectedBookerGuest?.id ?? undefined,
     referral: referral.trim(),
     notes: notes.trim(),
     adults: Number(adults),
@@ -291,6 +397,11 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
     room_type_id: roomTypeId,
     room_id: roomId,
     rate_plan_id: ratePlanId,
+    // RE-F01: tell the server the operator did NOT explicitly pick a rate
+    // plan in this session — the plan value is just the reservation's
+    // original plan echoed back. The server resolves it to the current
+    // plan so a catalog quote cannot trigger a hidden reprice.
+    preserve_rate_plan: !ratePlanTouched,
     check_in: checkIn,
     check_out: stayType === 'DAY_USE' ? checkIn : checkOut,
     stay_type: stayType,
@@ -317,13 +428,16 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       return;
     }
 
-    if (previewData && paymentRequired > 0) {
-      getSaveRequestKey();
-      setCashTenderedInput(paymentMethod === 'CASH' ? String(paymentRequired) : '');
-      setShowPaymentModal(true);
+    if (identityBlocked) {
+      setError(identityBlockReason);
       return;
     }
-    if (previewData && previewData.price_difference < 0) {
+
+    // Save never posts a payment. A price increase is stored as an updated
+    // remaining_balance; settlement happens from Detail Reservasi → Pembayaran.
+    // RE-F01: when preserve_price_context is set (metadata-only), the price
+    // difference is guaranteed to be 0, so the decrease modal is never needed.
+    if (previewData && !previewData.preserve_price_context && previewData.price_difference < 0) {
       getSaveRequestKey();
       setShowDecreaseModal(true);
       return;
@@ -363,74 +477,6 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
       setLoading(false);
     }
   }
-
-  // Submit Edit + Difference Payment (atomic)
-  const handleSubmitWithPayment = async () => {
-    if (!reservation?.id || paymentSubmitting) return;
-    if (!paymentFile) {
-      setPaymentError('Bukti pembayaran selisih wajib dilampirkan.');
-      return;
-    }
-    if (paymentMethod === 'CASH' && cashShortage > 0) {
-      setPaymentError(`Uang diterima kurang ${formatRupiah(cashShortage)}.`);
-      return;
-    }
-    try {
-      setPaymentSubmitting(true);
-      setPaymentError(null);
-
-      const formData = new FormData();
-      formData.append('file', paymentFile);
-      const payload = buildEditPayload();
-      formData.append('property_id', String(payload.property_id));
-      formData.append('payment_method', paymentMethod);
-      if (paymentMethod === 'CASH') {
-        formData.append('amount_tendered', String(cashTendered));
-      } else {
-        formData.append('payment_amount', String(paymentRequired));
-      }
-      formData.append('evidence_note', paymentNote.trim());
-      formData.append('guest_name', payload.guest_name);
-      formData.append('guest_phone', payload.guest_phone);
-      formData.append('guest_segment', payload.guest_segment);
-      formData.append('booker_name', payload.booker_name);
-      formData.append('booker_phone', payload.booker_phone);
-      formData.append('referral', payload.referral);
-      formData.append('notes', payload.notes);
-      formData.append('adults', String(payload.adults));
-      formData.append('children', String(payload.children));
-      formData.append('room_type_id', payload.room_type_id ? String(payload.room_type_id) : '');
-      formData.append('room_id', payload.room_id ? String(payload.room_id) : '');
-      formData.append('rate_plan_id', payload.rate_plan_id ? String(payload.rate_plan_id) : '');
-      formData.append('check_in', payload.check_in);
-      formData.append('check_out', payload.check_out);
-      formData.append('stay_type', payload.stay_type);
-      formData.append('check_in_time', payload.check_in_time);
-      formData.append('check_out_time', payload.check_out_time);
-      formData.append('keep_current_price', 'false');
-      formData.append('expected_new_total', String(Number(previewData?.quote?.grand_total || 0)));
-
-      const response = await authFetch(`/api/reservations/${reservation.id}/edit-with-payment`, {
-        method: 'POST',
-        headers: { 'Idempotency-Key': getSaveRequestKey() },
-        body: formData
-      });
-
-      const data = await response.json();
-      if (!response.ok || data.status === 'ERROR') {
-        saveRequestKeyRef.current = null;
-        throw new Error(data.message || 'Gagal menyimpan perubahan dan pembayaran');
-      }
-
-      setShowPaymentModal(false);
-      onSuccess();
-      onClose();
-    } catch (err: any) {
-      setPaymentError(err.message || 'Terjadi kesalahan saat menyimpan');
-    } finally {
-      setPaymentSubmitting(false);
-    }
-  };
 
   if (!isOpen) return null;
 
@@ -486,12 +532,26 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 <label className="block font-semibold text-stone-700 mb-1">
                   Nama Tamu Menginap <span className="text-rose-500">*</span>
                 </label>
-                <input
-                  type="text"
-                  required
+                <GuestSearchAutocomplete
+                  propertyId={propertyId}
                   value={guestName}
-                  onChange={(e) => setGuestName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  onChange={(name) => {
+                    setGuestName(name);
+                    setGuestNameTouched(true);
+                    setIdentityConfirmedGuestId(null);
+                    if (selectedGuest) setSelectedGuest(null);
+                  }}
+                  onSelectGuest={(guest) => {
+                    setSelectedGuest(guest);
+                    setGuestNameTouched(false);
+                    setGuestName(guest.full_name);
+                    setGuestPhone(guest.phone || '');
+                    setIdentityConfirmedGuestId(null);
+                  }}
+                  onClearGuest={() => { setSelectedGuest(null); setGuestNameTouched(true); setIdentityConfirmedGuestId(null); }}
+                  selectedGuest={selectedGuest}
+                  required
+                  label=""
                 />
               </div>
 
@@ -512,11 +572,14 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 <label className="block font-semibold text-stone-700 mb-1">
                   Nama Pemesan (Booker)
                 </label>
-                <input
-                  type="text"
+                <GuestSearchAutocomplete
+                  propertyId={propertyId}
                   value={bookerName}
-                  onChange={(e) => setBookerName(e.target.value)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-500 focus:outline-none"
+                  onChange={(name) => { setBookerName(name); if (!selectedBookerGuest) return; setSelectedBookerGuest(null); }}
+                  onSelectGuest={(guest) => { setSelectedBookerGuest(guest); setBookerName(guest.full_name); setBookerPhone(guest.phone || ''); }}
+                  onClearGuest={() => { setSelectedBookerGuest(null); }}
+                  selectedGuest={selectedBookerGuest}
+                  label=""
                 />
               </div>
 
@@ -656,6 +719,10 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                   onChange={(e) => {
                     const newTypeId = Number(e.target.value) || null;
                     setRoomTypeId(newTypeId);
+                    // Room type change is a price-affecting dimension — the
+                    // operator is making a deliberate choice, so mark the
+                    // rate plan as touched to allow auto-select + reprice.
+                    setRatePlanTouched(true);
                     const nextType = availableRoomTypes?.find((type) => Number(type.id) === Number(newTypeId));
                     setRoomId(nextType?.rooms?.length === 1 ? Number(nextType.rooms[0].id) : null);
                     // Clear incompatible rate plan and auto-select first compatible
@@ -711,7 +778,10 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
                 </label>
                 <select
                   value={ratePlanId || ''}
-                  onChange={(e) => setRatePlanId(Number(e.target.value) || null)}
+                  onChange={(e) => {
+                    setRatePlanId(Number(e.target.value) || null);
+                    setRatePlanTouched(true);
+                  }}
                   className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg"
                 >
                   {filteredRatePlans.length === 0 && (
@@ -832,18 +902,37 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
             >
               Batal
             </button>
+
+            {identityBlocked && (
+              <button
+                type="button"
+                onClick={() => setShowIdentityModal(true)}
+                className="px-4 py-2 border border-amber-400 bg-amber-50 text-amber-900 font-bold rounded-xl hover:bg-amber-100 transition-colors cursor-pointer"
+              >
+                🪪 Lengkapi KTP / Identitas
+              </button>
+            )}
+
             <button
               type="submit"
-              disabled={loading || previewLoading || !previewData || (previewData && previewData.room_overlap_conflict)}
-              className={`px-5 py-2 font-bold rounded-xl shadow-xs transition-colors cursor-pointer ${
-                paymentRequired > 0
-                  ? 'bg-amber-600 hover:bg-amber-500 text-white'
-                  : 'bg-emerald-800 hover:bg-emerald-700 text-white'
-              } disabled:opacity-50`}
+              disabled={
+                loading || previewLoading || !previewData
+                || (previewData && previewData.room_overlap_conflict)
+                || identityBlocked
+              }
+              className="px-5 py-2 font-bold rounded-xl shadow-xs transition-colors cursor-pointer bg-emerald-800 hover:bg-emerald-700 text-white disabled:opacity-50"
             >
-              {loading ? 'Menyimpan...' : paymentRequired > 0 ? 'Bayar Selisih & Simpan' : 'Simpan Perubahan'}
+              {loading ? 'Menyimpan...' : 'Simpan Perubahan'}
             </button>
           </div>
+          <p className="text-[11px] text-stone-500 font-semibold text-right -mt-1">
+            Simpan tidak membuat pembayaran. Pelunasan/selisih dilakukan di Detail Reservasi → Pembayaran.
+          </p>
+          {identityBlocked && (
+            <p className="text-[11px] text-amber-700 font-semibold text-right -mt-1">
+              {identityBlockReason}
+            </p>
+          )}
         </form>
       </div>
 
@@ -923,183 +1012,58 @@ export const EditReservationModal: React.FC<EditReservationModalProps> = ({
         </div>
       )}
 
-      {/* Payment Difference Modal */}
-      {showPaymentModal && previewData && (
-        <div className="fixed inset-0 z-[80] bg-black/60 flex items-center justify-center p-4">
-          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4" onClick={(e) => e.stopPropagation()}>
-            <div className="flex items-center justify-between pb-3 border-b border-stone-200">
-              <h3 className="text-base font-bold text-stone-900">Konfirmasi Pembayaran Perubahan</h3>
-              <button
-                type="button"
-                onClick={() => { setShowPaymentModal(false); setPaymentError(null); }}
-                className="text-stone-400 hover:text-stone-600 text-lg font-bold cursor-pointer"
-              >
-                ✕
-              </button>
-            </div>
-
-            {paymentError && (
-              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs font-semibold">
-                {paymentError}
-              </div>
-            )}
-
-            {/* Price Summary */}
-            <div className="p-4 bg-stone-50 rounded-xl border border-stone-200 space-y-2">
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Kamar / Paket Baru</span>
-                <span className="font-semibold text-stone-800">{previewData.quote?.rate_plan_name}</span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Harga Lama</span>
-                <span className="font-mono font-semibold text-stone-800">
-                  Rp {Number(previewData.current?.total_price || 0).toLocaleString('id-ID')}
-                </span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Harga Baru</span>
-                <span className="font-mono font-semibold text-emerald-800">
-                  Rp {Number(previewData.quote?.grand_total || 0).toLocaleString('id-ID')}
-                </span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Selisih Perubahan Harga</span>
-                <span className="font-mono font-semibold text-stone-800">
-                  {formatRupiah(Number(previewData.price_difference || 0))}
-                </span>
-              </div>
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Sudah Dibayar</span>
-                <span className="font-mono font-semibold text-stone-800">
-                  {formatRupiah(Number(previewData.amount_paid || 0))}
-                </span>
-              </div>
-              {Number(previewData.applied_deposit || 0) > 0 && (
-                <div className="flex justify-between text-xs">
-                  <span className="text-stone-600">Deposit Terpakai</span>
-                  <span className="font-mono font-semibold text-stone-800">
-                    {formatRupiah(Number(previewData.applied_deposit || 0))}
-                  </span>
-                </div>
-              )}
-              <div className="flex justify-between text-xs">
-                <span className="text-stone-600">Sisa Tagihan Setelah Perubahan</span>
-                <span className="font-mono font-semibold text-stone-800">
-                  {formatRupiah(Number(previewData.new_remaining_before_payment || 0))}
-                </span>
-              </div>
-              <div className="border-t border-stone-200 pt-2 flex justify-between text-sm">
-                <span className="font-bold text-stone-800">Wajib Dibayar Sekarang</span>
-                <span className="font-mono font-bold text-rose-700">
-                  {formatRupiah(paymentRequired)}
-                </span>
-              </div>
-            </div>
-
-            {/* Payment Form */}
-            <div className="space-y-3">
-              <div>
-                <label className="block font-semibold text-stone-700 mb-1 text-xs">
-                  Metode Pembayaran <span className="text-rose-500">*</span>
-                </label>
-                <select
-                  value={paymentMethod}
-                  onChange={(e) => {
-                    const nextMethod = e.target.value;
-                    setPaymentMethod(nextMethod);
-                    setCashTenderedInput(nextMethod === 'CASH' ? String(paymentRequired) : '');
-                    setPaymentError(null);
-                  }}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs"
-                >
-                  <option value="CASH">CASH</option>
-                  <option value="TRANSFER">TRANSFER</option>
-                  <option value="QRIS">QRIS</option>
-                  <option value="DEBIT_CARD">DEBIT CARD</option>
-                  <option value="CREDIT_CARD">CREDIT CARD</option>
-                </select>
-              </div>
-
-              {paymentMethod === 'CASH' ? (
-                <div className="space-y-2">
-                  <div>
-                    <label className="block font-semibold text-stone-700 mb-1 text-xs">
-                      Uang Diterima <span className="text-rose-500">*</span>
-                    </label>
-                    <input
-                      inputMode="numeric"
-                      value={cashTenderedInput ? formatRupiah(cashTendered) : ''}
-                      onChange={(e) => {
-                        setCashTenderedInput(e.target.value.replace(/\D/g, ''));
-                        setPaymentError(null);
-                      }}
-                      placeholder="Rp0"
-                      className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs font-mono"
-                    />
-                  </div>
-                  {cashShortage > 0 ? (
-                    <p className="text-xs font-semibold text-rose-700">Uang diterima kurang {formatRupiah(cashShortage)}.</p>
-                  ) : (
-                    <div className="flex justify-between rounded-lg bg-emerald-50 px-3 py-2 text-xs">
-                      <span className="font-semibold text-emerald-900">Kembalian</span>
-                      <span className="font-mono font-bold text-emerald-900">{formatRupiah(changeAmount)}</span>
-                    </div>
-                  )}
-                </div>
-              ) : (
-                <div>
-                  <label className="block font-semibold text-stone-700 mb-1 text-xs">Nominal Pembayaran</label>
-                  <div className="w-full px-3 py-2 bg-stone-100 border border-stone-200 rounded-lg text-xs font-mono font-bold text-stone-800">
-                    {formatRupiah(paymentRequired)}
-                  </div>
-                </div>
-              )}
-
-              <div>
-                <label className="block font-semibold text-stone-700 mb-1 text-xs">
-                  Bukti Pembayaran <span className="text-rose-500">*</span>
-                </label>
-                <input
-                  type="file"
-                  accept="image/jpeg,image/png,image/webp,application/pdf"
-                  onChange={(e) => setPaymentFile(e.target.files?.[0] || null)}
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs file:mr-2 file:py-1 file:px-2 file:rounded-lg file:border-0 file:bg-emerald-50 file:text-emerald-700 file:font-semibold file:text-[11px] cursor-pointer"
-                />
-              </div>
-
-              <div>
-                <label className="block font-semibold text-stone-700 mb-1 text-xs">Catatan (Opsional)</label>
-                <input
-                  type="text"
-                  value={paymentNote}
-                  onChange={(e) => setPaymentNote(e.target.value)}
-                  placeholder="Catatan pembayaran..."
-                  className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg text-xs"
-                />
-              </div>
-            </div>
-
-            {/* Actions */}
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-stone-200">
-              <button
-                type="button"
-                onClick={() => { setShowPaymentModal(false); setPaymentError(null); }}
-                className="px-4 py-2 border border-stone-300 text-stone-700 font-bold rounded-xl hover:bg-stone-100 transition-colors cursor-pointer text-xs"
-              >
-                Batal
-              </button>
-              <button
-                type="button"
-                onClick={handleSubmitWithPayment}
-                disabled={paymentSubmitting || !paymentFile || (paymentMethod === 'CASH' && cashShortage > 0)}
-                className="px-5 py-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold rounded-xl shadow-xs transition-colors cursor-pointer text-xs"
-              >
-                {paymentSubmitting ? 'Menyimpan...' : 'Konfirmasi Pembayaran & Simpan'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Lengkapi KTP / Identitas — reuses the shared extraction modal.
+          Draft state (guest name, dates, room, etc.) is preserved because
+          the modal is a sibling overlay on top of the form. On confirm, only
+          the confirmed guest id is unblocked; this never saves the
+          reservation, and cancelling/failing the upload leaves the draft
+          untouched (and creates no duplicate guest). */}
+      <IdentityExtractionModal
+        isOpen={showIdentityModal}
+        onClose={() => setShowIdentityModal(false)}
+        guestId={
+          selectedGuest && !guestNameTouched && Number(selectedGuest.id) !== Number(primaryGuestId)
+            ? selectedGuest.id
+            : null
+        }
+        reservationId={reservation?.id ?? null}
+        expectedPrimaryGuestId={primaryGuestId}
+        relinkReservationPrimaryGuest={false}
+        guestName={guestName || selectedGuest?.full_name || reservation?.primary_guest?.primary_guest_name || ''}
+        guestPhone={guestPhone || selectedGuest?.phone || reservation?.primary_guest?.primary_guest_phone || undefined}
+        propertyId={propertyId}
+        context="RESERVATION_EDIT_IDENTITY"
+        mode="UPLOAD"
+        onIdentityConfirmed={(_data, savedGuest) => {
+          const confirmedId = Number(savedGuest?.id ?? effectiveGuestId);
+          if (!Number.isInteger(confirmedId) || confirmedId <= 0) return;
+          const confirmedName = String(savedGuest?.full_name || guestName || '').trim();
+          // Bind the confirmed identity to this exact guest id and make the
+          // payload carry that guest, so the server re-validates the same row.
+          setSelectedGuest((prev) => {
+            const base: Guest = prev ?? {
+              id: confirmedId,
+              full_name: confirmedName || 'Tamu',
+              phone: guestPhone || null,
+              vip_status: 'STANDARD',
+              has_valid_identity: false
+            };
+            return {
+              ...base,
+              id: confirmedId,
+              full_name: confirmedName || base.full_name,
+              has_valid_identity: true,
+              identity_path: savedGuest?.identity_path ?? base.identity_path ?? null
+            };
+          });
+          // RE-F02: a confirmed KTP means the target guest is now explicitly
+          // selected — free-text flag no longer blocks the save.
+          setGuestNameTouched(false);
+          if (confirmedName) setGuestName(confirmedName);
+          setIdentityConfirmedGuestId(confirmedId);
+          setShowIdentityModal(false);
+        }}
+      />
     </div>,
     document.body
   );

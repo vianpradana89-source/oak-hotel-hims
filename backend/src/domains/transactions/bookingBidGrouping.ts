@@ -18,8 +18,22 @@ export interface PenjualanBidChild {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+  payment_responsibility?: string;
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
+  /** UI-1: canonical sheet before audit overlay (preserved for frontend) */
+  canonical_operational_sheet?: OperationalSheet;
+  /** UI-1: worst member verification for audit display */
+  audit_verification_status?: 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
+  /** POS: jumlah order status OPEN atau PAID untuk reservasi ini (hanya saat includePosStats=true) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN untuk reservasi ini (hanya saat includePosStats=true) */
+  pos_open_count?: number;
+  /** KB-1: saldo DP (ADVANCE_PAYMENT) custody yang belum di-apply ke folio */
+  unapplied_advance_deposit?: number;
+  /** KB-1: ID deposit ADVANCE_PAYMENT aktif untuk aksi Gunakan DP */
+  active_advance_deposit_id?: number | null;
 }
 
 export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
@@ -38,7 +52,15 @@ export interface PenjualanBidGroupPayload {
   paid: number;
   remaining: number;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — group-level (derived from children) */
+  payment_responsibility?: string;
+  /** KB-1: total saldo DP (ADVANCE_PAYMENT) custody yang belum di-apply ke folio */
+  unapplied_advance_deposit?: number;
   operational_sheet: OperationalSheet;
+  /** UI-1: canonical sheet before audit overlay (preserved for frontend) */
+  canonical_operational_sheet?: OperationalSheet;
+  /** UI-1: worst member verification for audit display */
+  audit_verification_status?: 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
   children: PenjualanBidChild[];
 }
 
@@ -101,10 +123,56 @@ export interface BookingReservationLifecycleRow {
   reservation_status?: string | null;
   reservation_stay_status?: string | null;
   stay_status?: string | null;
+  canonical_effective_paid?: number;
+  canonical_remaining_balance?: number;
+  /** POS: jumlah order status OPEN atau PAID (hanya diisi bila includePosStats=true) */
+  pos_order_count?: number;
+  /** POS: jumlah order status OPEN (hanya diisi bila includePosStats=true) */
+  pos_open_count?: number;
+  /** KB-1: saldo DP (ADVANCE_PAYMENT) custody yang belum di-apply ke folio */
+  unapplied_advance_deposit?: number;
+  /** KB-1: ID deposit ADVANCE_PAYMENT aktif untuk aksi Gunakan DP */
+  active_advance_deposit_id?: number | null;
+}
+
+/**
+ * KB-1..KB-4: Determines whether a presented row (BID group or standalone transaction)
+ * belongs in the financial receivable lens Sheet `PIUTANG`.
+ * - KB-3: Must have operational_sheet IN ('PROSES', 'SELESAI') (excludes BATAL/HAPUS)
+ * - KB-4: Must be SALE or INCOME (excludes PURCHASE/EXPENSE payables)
+ * - KB-1/KB-2: For BID groups, remaining > 0 OR unapplied_advance_deposit > 0.
+ *   For standalone rows, canonical/reservation/transaction remaining > 0.
+ */
+export function isPiutangPresentedRow(row: any): boolean {
+  if (!row) return false;
+  const sheet = String(row.operational_sheet || row.sheet || '').toUpperCase();
+  if (sheet !== 'PROSES' && sheet !== 'SELESAI') return false;
+
+  const txType = String(row.transaction_type || '').toUpperCase();
+  if (txType !== 'SALE' && txType !== 'INCOME') return false;
+
+  if (row.booking_bid_group) {
+    const group = row.booking_bid_group;
+    const rem = roundIdr(group.remaining);
+    const unappliedDp = roundIdr(group.unapplied_advance_deposit);
+    return rem > 0;
+  }
+
+  const net = saleNet(row);
+  const paid = reservationPaid(row);
+  const rem = reservationRemaining(row, net, paid);
+  const unappliedDp = roundIdr(row.unapplied_advance_deposit);
+  return rem > 0;
 }
 
 export interface BidGroupingOptions {
   lifecycleReservations?: BookingReservationLifecycleRow[];
+  /**
+   * Ketika true, statistik POS (pos_order_count, pos_open_count) diikutkan
+   * pada setiap child. Ditetapkan oleh router dari permission pos.view.
+   * Default: false — field tidak ada pada output.
+   */
+  includePosStats?: boolean;
 }
 
 /** Stay-child sheet from reservation lifecycle. Paid/unpaid is ignored. */
@@ -229,14 +297,33 @@ function canonicalBookingId(rows: any[]): number | string | null {
 }
 
 function reservationPaid(row: any): number {
-  if (row.reservation_amount_paid !== undefined && row.reservation_amount_paid !== null && String(row.reservation_amount_paid) !== '') {
+  // POS SALE: paid_amount sudah termasuk pos_settlements (LATERAL JOIN).
+  // Jangan pakai canonical_effective_paid / reservation_amount_paid karena
+  // itu mengukur pembayaran kamar, bukan pembayaran POS langsung.
+  const srcType = String(row.source_type || '').toUpperCase();
+  if ((srcType === 'POS_ORDER' || srcType === 'POS') && (roundIdr(row.paid_amount) > 0 || !(Number(row.reservation_id) > 0))) {
+    return roundIdr(row.paid_amount);
+  }
+  if (row.canonical_effective_paid != null) {
+    return roundIdr(row.canonical_effective_paid);
+  }
+  if (row.reservation_amount_paid != null && String(row.reservation_amount_paid) !== '') {
     return roundIdr(row.reservation_amount_paid);
   }
   return roundIdr(row.paid_amount);
 }
 
 function reservationRemaining(row: any, net: number, paid: number): number {
-  if (row.reservation_remaining_balance !== undefined && row.reservation_remaining_balance !== null && String(row.reservation_remaining_balance) !== '') {
+  // POS SALE: pakai net - paid (yang sudah termasuk pos_settlements dari LATERAL JOIN).
+  // Jangan pakai canonical_remaining_balance karena itu menghitung sisa kamar.
+  const srcType = String(row.source_type || '').toUpperCase();
+  if ((srcType === 'POS_ORDER' || srcType === 'POS') && (roundIdr(row.paid_amount) > 0 || !(Number(row.reservation_id) > 0))) {
+    return Math.max(0, net - paid);
+  }
+  if (row.canonical_remaining_balance != null) {
+    return Math.max(0, roundIdr(row.canonical_remaining_balance));
+  }
+  if (row.reservation_remaining_balance != null && String(row.reservation_remaining_balance) !== '') {
     return Math.max(0, roundIdr(row.reservation_remaining_balance));
   }
   return Math.max(0, net - paid);
@@ -254,13 +341,126 @@ function operationalSheetOf(row: any): OperationalSheet {
   return 'PROSES';
 }
 
-function buildChild(reservationId: number | null, members: any[]): PenjualanBidChild {
+/**
+ * UI-1 Audit Overlay — presentation-only.
+ *
+ * Canonical lifecycle is NEVER overridden by audit:
+ *   BATAL / HAPUS terminal states ALWAYS win (rule #4).
+ *
+ * For SALE reservation-linked items that are NOT terminal:
+ *   UNVERIFIED + CHECKED_OUT => stays SELESAI   (rule #1)
+ *   VERIFIED + CHECKED_OUT => stays SELESAI     (rule #2)
+ *   VERIFIED + active stay => stays PROSES      (rule #2)
+ *   REJECTED + non-terminal => forced PROSES     (rule #3)
+ */
+export function applyAuditOverlay(
+  row: {
+    transaction_type?: string;
+    source_type?: string | null;
+    reservation_id?: unknown;
+    reservation_status?: string | null;
+    reservation_stay_status?: string | null;
+    verification_status?: string | null;
+    operational_sheet?: OperationalSheet | null;
+  },
+  existingSheet?: OperationalSheet | null
+): OperationalSheet {
+  const derived = deriveReservationLinkedSaleSheet({
+    transaction_type: row.transaction_type,
+    source_type: row.source_type,
+    reservation_id: row.reservation_id,
+    reservation_status: row.reservation_status,
+    reservation_stay_status: row.reservation_stay_status,
+  });
+  const canonical: OperationalSheet = (existingSheet as OperationalSheet | null) ?? derived ?? 'PROSES';
+  // Terminal states from backend/lifecycle always win (rule #4).
+  if (canonical === 'BATAL' || canonical === 'HAPUS') return canonical;
+  // Only SALE reservation-linked items are subject to the REJECTED overlay.
+  const isSaleReservationLinked =
+    String(row.transaction_type || '').toUpperCase() === 'SALE'
+    && (Number(row.reservation_id) > 0 || !!row.reservation_status || !!row.reservation_stay_status);
+  if (!isSaleReservationLinked) return canonical;
+  if (row.verification_status === 'REJECTED') return 'PROSES';
+  return canonical;
+}
+
+/**
+ * UI-1: worst verification status among a set of members.
+ * Correct semantic priority: REJECTED > UNVERIFIED > VERIFIED.
+ * REJECTED = needs correction; UNVERIFIED = not yet inspected (wins over VERIFIED to avoid false-positive); VERIFIED = confirmed.
+ */
+function worstVerificationStatus(statuses: Array<string | null | undefined>): 'UNVERIFIED' | 'VERIFIED' | 'REJECTED' | undefined {
+  const normalized = statuses
+    .map((s) => String(s || '').toUpperCase())
+    .filter(Boolean);
+  if (normalized.some((s) => s === 'REJECTED')) return 'REJECTED';
+  if (normalized.some((s) => s === 'UNVERIFIED')) return 'UNVERIFIED';
+  if (normalized.some((s) => s === 'VERIFIED')) return 'VERIFIED';
+  return undefined;
+}
+
+export function buildChild(reservationId: number | null, members: any[], includePosStats?: boolean): PenjualanBidChild {
   const primary = members[0];
   const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
   const discount = members.reduce((sum, row) => sum + roundIdr(row.discount_amount), 0);
   const net = members.reduce((sum, row) => sum + saleNet(row), 0);
-  const paid = reservationPaid(primary);
-  const remaining = reservationRemaining(primary, net, paid);
+
+  // Split members into POS and room (non-POS) groups so that the room
+  // component is computed once from canonical reservation financials and
+  // the POS component is summed from each POS SALE member's own paid_amount.
+  // This avoids double-counting when a room member and POS members share the
+  // same reservation_id, and it keeps the result independent of which
+  // member happens to be primary (members[0]).
+  const isPosMember = (row: any): boolean => {
+    const st = String(row.source_type || '').toUpperCase();
+    return st === 'POS_ORDER' || st === 'POS';
+  };
+  const isDirectPosMember = (row: any): boolean => isPosMember(row) && roundIdr(row.paid_amount) > 0;
+  const posMembers = members.filter(isDirectPosMember);
+  const roomMembers = members.filter((row) => !isDirectPosMember(row));
+
+  // POS paid: sum of paid_amount across all POS members.
+  // Each POS SALE member's paid_amount already includes its own pos_settlements
+  // (via the LATERAL JOIN in listSelectSql), so no further settlement lookup needed.
+  const posPaid = posMembers.reduce((sum, m) => sum + roundIdr(m.paid_amount), 0);
+  const posRemaining = posMembers.reduce(
+    (sum, m) => sum + Math.max(0, saleNet(m) - roundIdr(m.paid_amount)), 0
+  );
+
+  // Room component: computed ONCE from the first room member's canonical
+  // reservation financials (canonical_effective_paid / canonical_remaining_balance).
+  // All room members for the same reservation share the same per-reservation
+  // canonical values, so using any one of them is correct.
+  // If no room member is present (e.g., filtered out by source_type), the
+  // room component is 0.
+  const roomNet = roomMembers.reduce((sum, row) => sum + saleNet(row), 0);
+  let roomPaid = 0;
+  let roomRemaining = 0;
+  let unappliedAdvanceDeposit = 0;
+  let activeAdvanceDepositId: number | null = null;
+  if (roomMembers.length > 0) {
+    const roomRef = roomMembers.find((row) => !isPosMember(row)) || roomMembers[0];
+    roomPaid = reservationPaid(roomRef);
+    roomRemaining = reservationRemaining(roomRef, roomNet, roomPaid);
+    unappliedAdvanceDeposit = roundIdr(roomRef.unapplied_advance_deposit);
+    activeAdvanceDepositId = roomRef.active_advance_deposit_id ? Number(roomRef.active_advance_deposit_id) : null;
+  }
+
+  const paid = roomPaid + posPaid;
+  const remaining = roomRemaining + posRemaining;
+
+  // Use canonical aggregation across ALL member sheets, not just members[0].
+  // This makes child sheet order-independent: mixed PROSES+PROSES+BATAL => PROSES.
+  const canonicalSheet = deriveGroupOperationalSheet(
+    members.map((member) => operationalSheetOf(member))
+  );
+  // DEFECT 2 FIX: use worst verification status across all members, not just primary
+  const aggregatedVerification = worstVerificationStatus(members.map((m) => m.verification_status));
+  // BUG 1 FIX: overlay must read aggregatedVerification, not primary.verification_status
+  const appliedSheet = applyAuditOverlay(
+    { ...primary, verification_status: aggregatedVerification },
+    canonicalSheet
+  );
   return {
     reservation_id: reservationId,
     primary_transaction_id: primary.id,
@@ -276,8 +476,17 @@ function buildChild(reservationId: number | null, members: any[]): PenjualanBidC
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    reservation_status: primary.reservation_status || null,
-    operational_sheet: operationalSheetOf(primary),
+      payment_responsibility: String(primary.payment_responsibility || 'HOTEL_COLLECT').toUpperCase(),
+      reservation_status: primary.reservation_status || null,
+      operational_sheet: appliedSheet,
+      canonical_operational_sheet: canonicalSheet,
+      audit_verification_status: aggregatedVerification,
+      ...(includePosStats && primary.pos_order_count != null
+        ? { pos_order_count: primary.pos_order_count, pos_open_count: primary.pos_open_count ?? 0 }
+        : {}),
+      ...(unappliedAdvanceDeposit > 0
+        ? { unapplied_advance_deposit: unappliedAdvanceDeposit, active_advance_deposit_id: activeAdvanceDepositId }
+        : {}),
   };
 }
 
@@ -304,7 +513,8 @@ function unattachedFinancial(rows: any[]): { gross: number; discount: number; ne
 function buildGroup(
   bid: string,
   members: any[],
-  lifecycleSheets: Map<string, OperationalSheet[]>
+  lifecycleSheets: Map<string, OperationalSheet[]>,
+  includePosStats?: boolean
 ): PenjualanBidGroupPayload & { primary: any; members: any[] } {
   const reservationMembers = members.filter(hasReservationChild);
   const unattachedMembers = members.filter((row) => !hasReservationChild(row));
@@ -318,7 +528,7 @@ function buildGroup(
   const children = [...byChild.entries()]
     .map(([key, childMembers]) => {
       const reservationId = key.startsWith('r:') ? Number(key.slice(2)) : null;
-      return buildChild(reservationId && Number.isFinite(reservationId) ? reservationId : null, childMembers);
+      return buildChild(reservationId && Number.isFinite(reservationId) ? reservationId : null, childMembers, includePosStats);
     })
     .sort((a, b) => {
       const seqCmp = Number(a.stay_sequence || 0) - Number(b.stay_sequence || 0);
@@ -334,6 +544,10 @@ function buildGroup(
   const net = children.reduce((sum, child) => sum + child.net, 0) + unattached.net;
   const paid = children.reduce((sum, child) => sum + child.paid, 0) + unattached.paid;
   const remaining = children.reduce((sum, child) => sum + child.remaining, 0) + unattached.remaining;
+  const unappliedAdvanceDeposit = children.reduce((sum, child) => sum + roundIdr(child.unapplied_advance_deposit), 0);
+  const groupPaymentResponsibility = children.some((c) => c.payment_responsibility === 'OTA_COLLECT')
+    ? 'OTA_COLLECT'
+    : String(members[0]?.payment_responsibility || '').toUpperCase();
   const bookingId = canonicalBookingId(members);
   const lifetimeSheets = lookupBookingLifecycleSheets(lifecycleSheets, {
     property_id: members[0].property_id,
@@ -353,6 +567,23 @@ function buildGroup(
         ? lifetimeSheets
         : (periodSheets.length > 0 ? periodSheets : members.map((row) => operationalSheetOf(row))));
 
+  // UI-1: Apply audit overlay to parent BID.
+  // Must re-evaluate after lifetimeSheets to prevent them from masking REJECTED overlay.
+  const parentCanonicalSheet = deriveGroupOperationalSheet(statusSheets);
+  const parentVerification = worstVerificationStatus(
+    members.map((row) => row.verification_status)
+  );
+  // BUG 2 FIX: use actual member/child reservation data so isSaleReservationLinked is true.
+  const parentOverlayRow = reservationMembers.length > 0
+    ? reservationMembers[0]
+    : (children.length > 0 && members.find((m) => Number(m.reservation_id) > 0));
+  const parentAppliedSheet = applyAuditOverlay(
+    parentOverlayRow
+      ? { ...parentOverlayRow, verification_status: parentVerification }
+      : { transaction_type: 'SALE', verification_status: parentVerification },
+    parentCanonicalSheet
+  );
+
   return {
     bid,
     booking_id: bookingId,
@@ -367,7 +598,11 @@ function buildGroup(
     paid,
     remaining,
     payment_status: deriveBookingPaymentStatus(paid, remaining),
-    operational_sheet: deriveGroupOperationalSheet(statusSheets),
+    ...(groupPaymentResponsibility ? { payment_responsibility: groupPaymentResponsibility } : {}),
+    ...(unappliedAdvanceDeposit > 0 ? { unapplied_advance_deposit: unappliedAdvanceDeposit } : {}),
+    operational_sheet: parentAppliedSheet,
+    canonical_operational_sheet: parentCanonicalSheet,
+    audit_verification_status: parentVerification,
     children,
     primary: members[0],
     members,
@@ -375,11 +610,43 @@ function buildGroup(
 }
 
 export function presentBidGroupedSales(presented: any[], options?: BidGroupingOptions): any[] {
-  const lifecycleSheets = indexBookingLifecycleSheets(options?.lifecycleReservations);
+  const lifecycleReservations = options?.lifecycleReservations || [];
+  const lifecycleSheets = indexBookingLifecycleSheets(lifecycleReservations);
+  const canonicalSettlementByReservationId = new Map<number, BookingReservationLifecycleRow>();
+  for (const lifecycle of lifecycleReservations) {
+    const reservationId = Number(lifecycle.reservation_id);
+    if (Number.isInteger(reservationId) && reservationId > 0) {
+      canonicalSettlementByReservationId.set(reservationId, lifecycle);
+    }
+  }
   const items: Array<{ kind: 'standalone'; tx: any } | { kind: 'bid_group'; group: ReturnType<typeof buildGroup> }> = [];
   const bidIndex = new Map<string, number>();
 
-  for (const row of presented) {
+  for (const sourceRow of presented) {
+    const reservationId = Number(sourceRow.reservation_id);
+    const canonicalSettlement = Number.isInteger(reservationId) && reservationId > 0
+      ? canonicalSettlementByReservationId.get(reservationId)
+      : undefined;
+    const row = canonicalSettlement
+      ? {
+          ...sourceRow,
+          canonical_effective_paid: canonicalSettlement.canonical_effective_paid,
+          canonical_remaining_balance: canonicalSettlement.canonical_remaining_balance,
+          ...(canonicalSettlement.unapplied_advance_deposit && canonicalSettlement.unapplied_advance_deposit > 0
+            ? {
+                unapplied_advance_deposit: canonicalSettlement.unapplied_advance_deposit,
+                active_advance_deposit_id: canonicalSettlement.active_advance_deposit_id ?? null,
+              }
+            : {}),
+          ...(options?.includePosStats
+            ? {
+                pos_order_count: canonicalSettlement.pos_order_count ?? 0,
+                pos_open_count:  canonicalSettlement.pos_open_count  ?? 0,
+              }
+            : {}),
+        }
+      : sourceRow;
+
     if (isStandalonePenjualanSale(row)) {
       items.push({ kind: 'standalone', tx: row });
       continue;
@@ -393,11 +660,11 @@ export function presentBidGroupedSales(presented: any[], options?: BidGroupingOp
     const existing = bidIndex.get(storageKey);
     if (existing === undefined) {
       bidIndex.set(storageKey, items.length);
-      items.push({ kind: 'bid_group', group: buildGroup(bid, [row], lifecycleSheets) });
+      items.push({ kind: 'bid_group', group: buildGroup(bid, [row], lifecycleSheets, options?.includePosStats) });
     } else {
       const item = items[existing];
       if (item.kind !== 'bid_group') continue;
-      item.group = buildGroup(bid, [...item.group.members, row], lifecycleSheets);
+      item.group = buildGroup(bid, [...item.group.members, row], lifecycleSheets, options?.includePosStats);
     }
   }
 
@@ -467,4 +734,342 @@ export function presentListWithSaleBidGrouping(presented: any[], options?: BidGr
     result.push(grouped);
   }
   return result;
+}
+
+
+
+export async function loadBookingReservationLifecycle(
+  client: any,
+  propertyId: number,
+  reservationIds: number[]
+): Promise<BookingReservationLifecycleRow[]> {
+  if (reservationIds.length === 0) return [];
+
+  const res = await client.query(
+    `
+WITH net_charges AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+      THEN fe.amount ELSE 0 END), 0) AS gross_charges,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND (fe.reversal_of_entry_id IS NOT NULL
+          OR fe.entry_type = 'REVERSAL'
+          OR fe.entry_type LIKE '%_REVERSAL')
+      THEN fe.amount ELSE 0 END), 0) AS charge_reversals,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type = 'ROOM_CHARGE'
+        AND COALESCE(fe.is_voided, FALSE) = FALSE
+      THEN fe.amount ELSE 0 END), 0) AS room_charge_posted,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND fe.entry_type = 'DISCOUNT'
+        AND COALESCE(fe.is_voided, FALSE) = FALSE
+        AND fe.reversal_of_entry_id IS NULL
+      THEN fe.amount ELSE 0 END), 0) AS commercial_discounts,
+    COUNT(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+      THEN 1 END) AS charge_count
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
+),
+deposit_apply AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(
+      CASE
+        WHEN fe.entry_type = 'DEPOSIT_APPLY' AND fe.direction = 'CREDIT' THEN fe.amount
+        WHEN fe.entry_type = 'DEPOSIT_UNAPPLY' AND fe.direction = 'DEBIT' THEN -fe.amount
+        ELSE 0
+      END
+    ), 0) AS applied_deposit
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+    AND fe.entry_type IN ('DEPOSIT_APPLY', 'DEPOSIT_UNAPPLY')
+    AND fe.status = 'POSTED'
+    AND fe.is_voided = FALSE
+    AND fe.reversal_of_entry_id IS NULL
+  GROUP BY fe.reservation_id
+),
+direct AS (
+  SELECT
+    pt.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN pt.amount ELSE 0 END), 0) AS direct_paid,
+    COUNT(CASE
+      WHEN pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS direct_source_cnt,
+    COUNT(CASE
+      WHEN pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS direct_history_cnt
+  FROM payment_transactions pt
+  WHERE pt.reservation_id = ANY($2)
+    AND pt.scope = 'ROOM_RESERVATION'
+  GROUP BY pt.reservation_id
+),
+allocated AS (
+  SELECT
+    pa.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN pa.status = 'ACTIVE'
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN pa.allocated_amount ELSE 0 END), 0) AS allocated_paid,
+    COUNT(CASE
+      WHEN pa.status = 'ACTIVE'
+        AND pt.status = 'SUCCESS'
+        AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS alloc_effective_cnt,
+    COUNT(CASE
+      WHEN pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+      THEN 1 END) AS alloc_history_cnt
+  FROM payment_allocations pa
+  JOIN payment_transactions pt
+    ON pt.id = pa.payment_transaction_id
+  WHERE pa.property_id = $1
+    AND pa.reservation_id = ANY($2)
+    AND pt.scope = 'BOOKING_GROUP'
+  GROUP BY pa.reservation_id
+),
+hotel_collectible AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+        AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
+      THEN fe.amount ELSE 0 END), 0) AS gross_collectible,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND (fe.reversal_of_entry_id IS NOT NULL
+          OR fe.entry_type = 'REVERSAL'
+          OR fe.entry_type LIKE '%_REVERSAL')
+        AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
+      THEN fe.amount ELSE 0 END), 0) AS collectible_reversals
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
+),
+nightly_fallback AS (
+  SELECT
+    rn.reservation_id,
+    COALESCE(SUM(rn.total_amount), 0) AS nightly_sum
+  FROM reservation_nightly_rates rn
+  WHERE rn.property_id = $1
+    AND rn.reservation_id = ANY($2)
+  GROUP BY rn.reservation_id
+),
+folio_payment_fallback AS (
+  SELECT
+    fe.reservation_id,
+    COALESCE(SUM(CASE
+      WHEN fe.direction = 'CREDIT'
+        AND fe.entry_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+        AND fe.reversal_of_entry_id IS NULL
+      THEN fe.amount ELSE 0 END), 0)
+     - COALESCE(SUM(CASE
+       WHEN fe.direction = 'DEBIT'
+        AND fe.entry_type IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL')
+       THEN fe.amount ELSE 0 END), 0) AS folio_paid
+  FROM folio_entries fe
+  WHERE fe.property_id = $1
+    AND fe.reservation_id = ANY($2)
+  GROUP BY fe.reservation_id
+),
+ pos_counts AS (
+   SELECT
+     po.reservation_id,
+     COUNT(*) AS pos_order_count,
+     SUM(CASE WHEN po.status = 'OPEN' THEN 1 ELSE 0 END) AS pos_open_count
+   FROM pos_orders po
+   WHERE po.property_id = $1
+     AND po.reservation_id = ANY($2)
+     AND po.status IN ('OPEN', 'PAID')
+   GROUP BY po.reservation_id
+ ),
+ unapplied_deposits AS (
+   SELECT
+     d.reservation_id,
+     COALESCE(SUM(GREATEST(0,
+       COALESCE(ev.received, 0) - COALESCE(ev.reversed_received, 0)
+       - (COALESCE(ev.applied, 0) - COALESCE(ev.unapplied, 0))
+       - COALESCE(ev.refunded, 0)
+     )), 0) AS unapplied_advance_deposit,
+     MAX(CASE WHEN GREATEST(0,
+       COALESCE(ev.received, 0) - COALESCE(ev.reversed_received, 0)
+       - (COALESCE(ev.applied, 0) - COALESCE(ev.unapplied, 0))
+       - COALESCE(ev.refunded, 0)
+     ) > 0 THEN d.id ELSE NULL END) AS active_advance_deposit_id
+   FROM deposits d
+   LEFT JOIN (
+     SELECT
+       de.deposit_id,
+       SUM(CASE WHEN de.event_type = 'RECEIVED' THEN de.amount ELSE 0 END) AS received,
+       SUM(CASE WHEN de.event_type = 'APPLY' THEN de.amount ELSE 0 END) AS applied,
+       SUM(CASE WHEN de.event_type = 'UNAPPLY' THEN de.amount ELSE 0 END) AS unapplied,
+       SUM(CASE WHEN de.event_type = 'REFUND' THEN de.amount ELSE 0 END) AS refunded,
+       SUM(CASE WHEN de.event_type = 'REVERSAL' THEN de.amount ELSE 0 END) AS reversed_received
+     FROM deposit_events de
+     GROUP BY de.deposit_id
+   ) ev ON ev.deposit_id = d.id
+   WHERE d.property_id = $1
+     AND d.reservation_id = ANY($2)
+     AND d.status IN ('RECEIVED', 'PARTIALLY_USED')
+     AND COALESCE(d.purpose, 'ADVANCE_PAYMENT') = 'ADVANCE_PAYMENT'
+   GROUP BY d.reservation_id
+ )
+SELECT
+  b.property_id,
+  r.booking_id,
+  b.bid AS booking_bid,
+  b.payment_responsibility,
+  r.id AS reservation_id,
+  r.status AS reservation_status,
+  r.stay_status,
+  r.total_price AS fallback_total_price,
+  r.subtotal_amount,
+  r.amount_paid AS persisted_amount_paid,
+  COALESCE(nc.gross_charges, 0) AS gross_charges,
+  COALESCE(nc.charge_reversals, 0) AS charge_reversals,
+  COALESCE(nc.room_charge_posted, 0) AS room_charge_posted,
+  COALESCE(nc.commercial_discounts, 0) AS commercial_discounts,
+  COALESCE(nc.charge_count, 0) AS charge_count,
+  COALESCE(da.applied_deposit, 0) AS applied_deposit,
+  COALESCE(d.direct_paid, 0) AS direct_paid,
+  COALESCE(d.direct_source_cnt, 0) AS direct_source_cnt,
+  COALESCE(d.direct_history_cnt, 0) AS direct_history_cnt,
+  COALESCE(a.allocated_paid, 0) AS allocated_paid,
+  COALESCE(a.alloc_effective_cnt, 0) AS alloc_effective_cnt,
+  COALESCE(a.alloc_history_cnt, 0) AS alloc_history_cnt,
+  COALESCE(hc.gross_collectible, 0) AS gross_collectible,
+  COALESCE(hc.collectible_reversals, 0) AS collectible_reversals,
+  COALESCE(nf.nightly_sum, 0) AS nightly_sum,
+  COALESCE(fpf.folio_paid, 0) AS folio_paid,
+  COALESCE(pc.pos_order_count, 0) AS pos_order_count,
+  COALESCE(pc.pos_open_count, 0) AS pos_open_count,
+  COALESCE(ud.unapplied_advance_deposit, 0) AS unapplied_advance_deposit,
+  ud.active_advance_deposit_id
+FROM reservations r
+JOIN bookings b ON b.id = r.booking_id
+LEFT JOIN net_charges nc ON nc.reservation_id = r.id
+LEFT JOIN deposit_apply da ON da.reservation_id = r.id
+LEFT JOIN direct d ON d.reservation_id = r.id
+LEFT JOIN allocated a ON a.reservation_id = r.id
+LEFT JOIN hotel_collectible hc ON hc.reservation_id = r.id
+LEFT JOIN nightly_fallback nf ON nf.reservation_id = r.id
+LEFT JOIN folio_payment_fallback fpf ON fpf.reservation_id = r.id
+LEFT JOIN pos_counts pc ON pc.reservation_id = r.id
+LEFT JOIN unapplied_deposits ud ON ud.reservation_id = r.id
+WHERE b.property_id = $1
+  AND r.id = ANY($2)
+ORDER BY r.booking_id, r.stay_sequence, r.id
+`,
+    [propertyId, reservationIds]
+  );
+
+  return res.rows.map((row) => {
+    const grossCharges = Math.round(Number(row.gross_charges || 0));
+    const chargeReversals = Math.round(Number(row.charge_reversals || 0));
+    const roomChargePosted = Math.round(Number(row.room_charge_posted || 0));
+    const commercialDiscounts = Math.round(Number(row.commercial_discounts || 0));
+    const chargeCount = Number(row.charge_count || 0);
+    const subtotalAmount = Math.round(Number(row.subtotal_amount || 0));
+    const nightlySum = Math.round(Number(row.nightly_sum || 0));
+    const fallbackTotalPrice = Math.round(Number(row.fallback_total_price || 0));
+    const persistedAmountPaid = Math.round(Number(row.persisted_amount_paid || 0));
+    const folioPaidFallback = Math.max(0, Math.round(Number(row.folio_paid || 0)));
+    const directPaid = Math.max(0, Math.round(Number(row.direct_paid || 0)));
+    const allocatedPaid = Math.max(0, Math.round(Number(row.allocated_paid || 0)));
+    const directSourceCnt = Number(row.direct_source_cnt || 0);
+    const allocEffectiveCnt = Number(row.alloc_effective_cnt || 0);
+    const directHistoryCnt = Number(row.direct_history_cnt || 0);
+     const allocHistoryCnt = Number(row.alloc_history_cnt || 0);
+
+    // POS stats — normalisasi dari string BIGINT → number, validasi SafeInteger non-negatif
+    const posOrderCountRaw = Number(row.pos_order_count ?? 0);
+    if (!Number.isSafeInteger(posOrderCountRaw) || posOrderCountRaw < 0) {
+      const errMsg = `loadBookingReservationLifecycle: pos_order_count invalid (reservation_id=${row.reservation_id}): ${String(row.pos_order_count)}`;
+      console.error('[bookingBidGrouping]', errMsg);
+      throw new Error(errMsg);
+    }
+    const posOpenCountRaw = Number(row.pos_open_count ?? 0);
+    if (!Number.isSafeInteger(posOpenCountRaw) || posOpenCountRaw < 0) {
+      const errMsg = `loadBookingReservationLifecycle: pos_open_count invalid (reservation_id=${row.reservation_id}): ${String(row.pos_open_count)}`;
+      console.error('[bookingBidGrouping]', errMsg);
+      throw new Error(errMsg);
+    }
+    const posOrderCount = posOrderCountRaw;
+    const posOpenCount = posOpenCountRaw;
+
+
+    // Legacy fallback for ordinary payment — parity with calculateReservationFinancials
+    let ordinaryAmountPaid = directPaid + allocatedPaid;
+    const canonicalPaymentHistoryExists = directHistoryCnt > 0 || allocHistoryCnt > 0;
+    if (!canonicalPaymentHistoryExists) {
+      if (folioPaidFallback > 0) {
+        ordinaryAmountPaid = folioPaidFallback;
+      } else {
+        ordinaryAmountPaid = persistedAmountPaid;
+      }
+    }
+
+    const appliedDeposit = Math.max(0, Math.round(Number(row.applied_deposit || 0)));
+    const canonicalEffectivePaid = ordinaryAmountPaid + appliedDeposit;
+
+    // Net charges calculation (parity with calculateReservationFinancials)
+    let netTotalCharges: number;
+    if (chargeCount > 0) {
+      netTotalCharges = Math.max(0, grossCharges - chargeReversals);
+      if (
+        commercialDiscounts > 0
+        && subtotalAmount > 0
+        && roomChargePosted > 0
+        && Math.abs(roomChargePosted - subtotalAmount) <= 1
+      ) {
+        netTotalCharges = Math.max(0, netTotalCharges - commercialDiscounts);
+      }
+    } else {
+      netTotalCharges = nightlySum > 0 ? nightlySum : fallbackTotalPrice;
+    }
+    netTotalCharges = Math.max(0, netTotalCharges);
+
+    // Remaining balance calculation
+    const paymentResponsibility = String(row.payment_responsibility || 'HOTEL_COLLECT').trim().toUpperCase();
+    let remaining: number;
+    if (paymentResponsibility === 'OTA_COLLECT') {
+      // OTA_COLLECT: only non-ROOM_CHARGE charges are hotel collectible
+      const grossCollectible = Math.round(Number(row.gross_collectible || 0));
+      const collectibleReversals = Math.round(Number(row.collectible_reversals || 0));
+      const hotelCollectibleTotal = Math.max(0, grossCollectible - collectibleReversals);
+      remaining = Math.max(0, hotelCollectibleTotal - canonicalEffectivePaid);
+    } else {
+      // HOTEL_COLLECT: entire net charge is collectible
+      remaining = Math.max(0, netTotalCharges - canonicalEffectivePaid);
+    }
+
+    const unappliedAdvanceDeposit = Math.max(0, Math.round(Number(row.unapplied_advance_deposit || 0)));
+    const activeAdvanceDepositId = row.active_advance_deposit_id ? Number(row.active_advance_deposit_id) : null;
+
+    return {
+      ...row,
+      canonical_effective_paid: canonicalEffectivePaid,
+      canonical_remaining_balance: remaining,
+      pos_order_count: posOrderCount,
+      pos_open_count: posOpenCount,
+      unapplied_advance_deposit: unappliedAdvanceDeposit,
+      active_advance_deposit_id: activeAdvanceDepositId,
+    };
+  });
 }

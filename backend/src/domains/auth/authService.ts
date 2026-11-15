@@ -613,3 +613,120 @@ export async function isPlatformSuperAdmin(
     return false;
   }
 }
+
+/**
+ * Returns the effective granular permission keys for the given userId.
+ * Reads user + role state fresh from DB on every call; never trusts JWT claims.
+ * Platform Super Admin (canonical isPlatformSuperAdmin) receives the full permission set.
+ * Throws explicit errors for invalid user/role/account state so the caller can distinguish
+ * configuration errors from a legitimate empty-permissions result.
+ */
+export async function getUserEffectivePermissions(
+  clientOrPool: Pool | PoolClient,
+  userId: number | string | null | undefined
+): Promise<string[]> {
+  const uid = Number(userId);
+  if (!Number.isInteger(uid) || uid <= 0) {
+    const err: any = new Error('User ID tidak valid.');
+    err.statusCode = 401;
+    err.code = 'USER_NOT_FOUND_OR_INACTIVE';
+    throw err;
+  }
+
+  const res = await clientOrPool.query(
+    `SELECT u.id, u.property_id, u.role_id, u.is_active, u.account_status, u.access_type,
+            r.name AS role_name, r.is_active AS role_is_active, r.is_system_role, r.property_id AS role_property_id
+     FROM users u
+     LEFT JOIN roles r ON r.id = u.role_id
+     WHERE u.id = $1
+     LIMIT 1`,
+    [uid]
+  );
+
+  if (res.rows.length === 0) {
+    const err: any = new Error('Pengguna tidak ditemukan atau sudah dinonaktifkan.');
+    err.statusCode = 401;
+    err.code = 'USER_NOT_FOUND_OR_INACTIVE';
+    throw err;
+  }
+
+  const row = res.rows[0];
+
+  // Fail-closed checks with explicit errors
+  if (row.is_active !== true) {
+    const err: any = new Error('Akses ditolak: Akun pengguna tidak aktif.');
+    err.statusCode = 401;
+    err.code = 'USER_NOT_FOUND_OR_INACTIVE';
+    throw err;
+  }
+
+  if (row.account_status === 'DISABLED') {
+    const err: any = new Error('Akses ditolak: Akun pengguna dinonaktifkan.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_DISABLED';
+    throw err;
+  }
+
+  if (row.account_status === 'SUSPENDED') {
+    const err: any = new Error('Akses ditolak: Akun pengguna ditangguhkan.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_SUSPENDED';
+    throw err;
+  }
+
+  // Property validation - must be a positive integer
+  const propertyId = Number(row.property_id);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    const err: any = new Error('Akses ditolak: Property pengguna tidak valid.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_PROPERTY_INVALID';
+    throw err;
+  }
+
+  // Role validation - must be a positive integer
+  const roleId = Number(row.role_id);
+  if (!Number.isInteger(roleId) || roleId <= 0) {
+    const err: any = new Error('Akses ditolak: Role pengguna tidak valid.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_ROLE_INVALID';
+    throw err;
+  }
+
+  if (row.role_is_active !== true) {
+    const err: any = new Error('Akses ditolak: Role pengguna tidak aktif.');
+    err.statusCode = 403;
+    err.code = 'ACCOUNT_ROLE_INVALID';
+    throw err;
+  }
+
+  // Cross-property role integrity check
+  // Platform/system roles have null property_id and are shared across all properties
+  if (row.role_property_id !== null) {
+    const roleIdForCheck = Number(row.role_property_id);
+    if (!Number.isInteger(roleIdForCheck) || roleIdForCheck !== propertyId) {
+      const err: any = new Error('Akses ditolak: Role pengguna tidak valid.');
+      err.statusCode = 403;
+      err.code = 'ACCOUNT_ROLE_INVALID';
+      throw err;
+    }
+  }
+
+  // Platform Super Admin -> full permission set
+  if (await isPlatformSuperAdmin(clientOrPool, uid)) {
+    const allRes = await clientOrPool.query(
+      `SELECT p.key FROM permissions p ORDER BY p.key ASC`
+    );
+    return allRes.rows.map(r => r.key);
+  }
+
+  // Regular user -> role-granted permissions
+  const permRes = await clientOrPool.query(
+    `SELECT p.key
+     FROM role_permissions rp
+     JOIN permissions p ON p.id = rp.permission_id
+     WHERE rp.role_id = $1 AND rp.granted = TRUE
+     ORDER BY p.key ASC`,
+    [roleId]
+  );
+  return permRes.rows.map(r => r.key);
+}

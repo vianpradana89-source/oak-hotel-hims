@@ -92,6 +92,34 @@ export function buildDayUseInterval(
   return { start_at: result.start_at, end_at: result.end_at };
 }
 
+/**
+ * Compute the default Day-Use start time rounded UP to the given interval.
+ * When the current time is already on the boundary, it is kept.
+ * If rounding rolls over to midnight of the next day, the caller receives
+ * `datePlusOne: true` and must use `addHotelDays` to shift the date.
+ */
+export function roundUpHotelTimestamp(timestamp: string, intervalMinutes: number = 15): { time: string; datePlusOne: boolean } {
+  const m = timestamp.match(/^(\d{4}-\d{2}-\d{2})T?([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d))?$/);
+  if (!m) return { time: '10:00', datePlusOne: false };
+
+  const datePart = m[1];
+  const h = Number(m[2]);
+  const min = Number(m[3]);
+  const sec = Number(m[4] || 0);
+
+  const totalMin = h * 60 + min + (sec > 0 ? 1 : 0);
+  const step = Math.max(1, Math.round(intervalMinutes));
+  const rounded = Math.ceil(totalMin / step) * step;
+
+  if (rounded >= 24 * 60) {
+    // rollover to next day 00:00
+    const nextDay = addHotelDays(datePart, 1);
+    return { time: nextDay ? '00:00' : '10:00', datePlusOne: nextDay !== null };
+  }
+
+  return { time: `${pad2(Math.floor(rounded / 60))}:${pad2(rounded % 60)}`, datePlusOne: false };
+}
+
 export function buildQuickBookingStayFields(room: QuickBookingStayInput): {
   check_in: string;
   check_out: string;

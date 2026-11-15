@@ -41,6 +41,7 @@ export interface Guest {
   ktp_ocr_confidence?: number | null;
   ktp_ocr_provider?: string | null;
   ktp_extracted_at?: string | null;
+  ktp_regency_id?: number | null;
   notes: string | null;
   is_archived?: boolean;
   is_active?: boolean;
@@ -115,6 +116,7 @@ export interface GuestUpdateInput {
   valid_until?: string | null;
   ktp_ocr_confidence?: number | null;
   ktp_ocr_provider?: string | null;
+  ktp_regency_id?: number | null;
   city?: string | null;
   province?: string | null;
   country?: string | null;

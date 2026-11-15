@@ -5,8 +5,10 @@ export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 export type DepartmentCode = 'FRONT_OFFICE' | 'HOUSEKEEPING' | 'FNB' | 'MAINTENANCE' | 'ADMIN' | 'HRD' | 'GENERAL';
 
+export type PurchaseApprovalStatus = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+
 /** PURCHASE-2A3: canonical lifecycle action for inline purchase controls. */
-export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL' | 'ARCHIVE' | 'UNARCHIVE';
 
 /** EXPENSE-1C: canonical lifecycle action for inline expense controls. */
 export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
@@ -48,7 +50,14 @@ export interface TransactionLine {
   id: string;
   property_id: number;
   transaction_id: string;
-  product_id?: string | null;
+  product_id?: string | number | null;
+  packaging_id?: string | number | null;
+  po_item_id?: string | number | null;
+  po_ordered_quantity?: number | string | null;
+  po_unit_cost?: number | string | null;
+  ordered_quantity?: number | string | null;
+  line_type?: 'STOCK_PRODUCT' | 'NON_STOCK_EXPENSE';
+  received_quantity?: number | string;
   description_snapshot: string;
   quantity: number | string;
   unit: string;
@@ -60,7 +69,10 @@ export interface TransactionLine {
 }
 
 export interface TransactionLineInput {
+  id?: number | string | null;
   product_id?: number | string | null;
+  packaging_id?: number | string | null;
+  line_type?: 'STOCK_PRODUCT' | 'NON_STOCK_EXPENSE';
   description?: string;
   description_snapshot?: string;
   quantity: number;
@@ -142,6 +154,17 @@ export interface TransactionRecord {
   reservation_status?: string | null;
   reservation_stay_status?: string | null;
   booking_status?: string | null;
+  booking_source?: string | null;
+  booking_channel?: string | null;
+  ota_source_id?: number | null;
+  ota_source_name?: string | null;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — which party settles the room charge */
+  payment_responsibility?: string | null;
+  // UI-3: Canonical hotel collectible balance (computed from folio for reservation-linked sales)
+  hotel_collectible_total?: number;
+  hotel_collectible_remaining_balance?: number;
+  canonical_amount_paid?: number;
+  canonical_applied_deposit?: number;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
@@ -155,6 +178,11 @@ export interface TransactionRecord {
   recipient_bank_holder?: string | null;
   /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
   expense_workflow_status?: string | null;
+  approval_status?: PurchaseApprovalStatus | null;
+  approved_by_user_id?: string | null;
+  approved_by_name_snapshot?: string | null;
+  approved_at?: string | null;
+  rejection_reason?: string | null;
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
   verification_status: VerificationStatus;
@@ -162,6 +190,41 @@ export interface TransactionRecord {
   verified_by_name_snapshot?: string | null;
   verified_at?: string | null;
   verification_note?: string | null;
+  po_id?: number | string | null;
+  po_number?: string | null;
+  po_number_snapshot?: string | null;
+  po_status?: string | null;
+  pos_table_number?: string | null;
+  pos_order_items?: Array<{
+    id: number;
+    menu_item_id?: number | null;
+    item_name: string;
+    item_code?: string | null;
+    quantity: number;
+    unit_price: number;
+    discount_amount?: number;
+    notes?: string | null;
+  }>;
+  is_legacy_without_po?: boolean;
+  has_po_variance?: boolean;
+  po_variance_summary?: any | null;
+  balance_amount?: number | string | null;
+  workflow_status?: string | null;
+  archived_at?: string | null;
+  archived_by_user_id?: string | null;
+  archived_by_name_snapshot?: string | null;
+  archive_reason?: string | null;
+  linked_goods_receipts?: Array<{
+    id: number;
+    grn_number: string;
+    receipt_date: string;
+    status: string;
+    location_id?: number | null;
+    location_name?: string | null;
+    received_by?: string | null;
+    posted_by?: string | null;
+    total_amount?: number | string | null;
+  }>;
   reversal_of_transaction_id: number | string | null;
   correction_group_id: string | null;
   notes: string | null;
@@ -189,6 +252,9 @@ export interface TransactionRecord {
     paid: number;
     remaining: number;
     payment_status: string;
+    /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+    payment_responsibility?: string;
+    unapplied_advance_deposit?: number;
     operational_sheet: OperationalSheet;
     children: Array<{
       reservation_id: number | null;
@@ -205,6 +271,10 @@ export interface TransactionRecord {
       paid: number;
       remaining: number;
       payment_status: string;
+      /** 'HOTEL_COLLECT' | 'OTA_COLLECT' */
+      payment_responsibility?: string;
+      unapplied_advance_deposit?: number;
+      active_advance_deposit_id?: number | null;
       reservation_status: string | null;
       operational_sheet: OperationalSheet;
     }>;
@@ -234,12 +304,39 @@ export interface TransactionRecord {
   lines?: TransactionLine[];
   attachments?: TransactionAttachment[];
   linked_payments?: Array<{
-    id: number;
-    transaction_type: string;
-    amount: number;
+    id: number | string;
+    source?: 'POS_SETTLEMENT' | 'PAYMENT_TRANSACTION' | undefined;
+    settlement_id?: number;
+    pos_order_id?: number | null;
+    payment_id?: number;
+    payment_no?: string | null;
+    scope?: string;
+    transaction_type?: string;
+    amount: number | string;
     payment_method: string;
     reference_code: string | null;
     status: string;
+    created_by?: string | null;
+    created_at: string;
+  }>;
+  /**
+   * POS settlements specific to this transaction (SALE POS_ORDER/POS).
+   * Separate from linked_payments to avoid ID collision and to make it
+   * clear that pos_settlements are NOT room-balance components.
+   * Empty array for non-POS transactions.
+   *
+   * ID fields are string because the backend SQL casts BIGINT to ::text.
+   * amount is string because NUMERIC is returned as string by pg driver.
+   */
+  pos_settlements?: Array<{
+    settlement_id: string;
+    property_id: number;
+    pos_order_id: string;
+    sale_id: string;
+    amount: string;
+    payment_method: string;
+    settlement_status: string;
+    created_by: string | null;
     created_at: string;
   }>;
   audit_logs?: Array<{
@@ -298,10 +395,11 @@ export interface DepartmentOption {
 }
 
 export type OperationalSheet = 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
-export type OperationalStatus = 'ALL' | 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
+export type OperationalStatus = 'ALL' | 'PROSES' | 'PIUTANG' | 'SELESAI' | 'BATAL' | 'HAPUS';
 
 export interface TransactionSheetCounts {
   proses: number;
+  piutang?: number;
   selesai: number;
   batal: number;
   hapus?: number;
@@ -310,7 +408,10 @@ export interface TransactionSheetCounts {
 export interface TransactionQueryResult {
   transactions: TransactionRecord[];
   total_count: number;
+  /** Per-tab summary — follows active domain/tab. */
   summary: TransactionSummary;
+  /** Global period summary — independent of activeTab/operational_sheet. For dashboard cards. */
+  global_summary: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;
@@ -385,6 +486,45 @@ function reservationLinkedSaleSheet(tx: {
     return 'PROSES';
   }
   return hasReservation ? 'PROSES' : null;
+}
+
+/**
+ * UI-1 Audit Overlay — presentation-only.
+ *
+ * Canonical lifecycle is NEVER overridden by audit:
+ *   BATAL / HAPUS terminal states ALWAYS win (rule #4).
+ *
+ * For SALE reservation-linked items that are NOT terminal:
+ *   UNVERIFIED + CHECKED_OUT => tetap SELESAI   (rule #1)
+ *   VERIFIED + CHECKED_OUT => tetap SELESAI     (rule #2)
+ *   VERIFIED + active stay => tetap PROSES      (rule #2)
+ *   REJECTED + non-terminal => paksa PROSES     (rule #3)
+ */
+export function applyAuditOverlay(
+  tx: {
+    transaction_type?: string;
+    source_type?: string | null;
+    reservation_id?: unknown;
+    reservation_status?: string | null;
+    reservation_stay_status?: string | null;
+    verification_status?: VerificationStatus | null;
+    operational_sheet?: OperationalSheet | null;
+    transaction_status?: string | null;
+  },
+  existingSheet?: OperationalSheet | null
+): OperationalSheet {
+  // Start from provided sheet or derive from reservation-linked logic.
+  const derived = reservationLinkedSaleSheet(tx);
+  const canonical: OperationalSheet = (existingSheet as OperationalSheet | null) ?? derived ?? 'PROSES';
+  // Terminal states from backend/lifecycle always win (rule #4).
+  if (canonical === 'BATAL' || canonical === 'HAPUS') return canonical;
+  // Only SALE reservation-linked items are subject to the REJECTED overlay.
+  const isSaleReservationLinked =
+    String(tx.transaction_type || '').toUpperCase() === 'SALE'
+    && (Number(tx.reservation_id) > 0 || !!tx.reservation_status || !!tx.reservation_stay_status);
+  if (!isSaleReservationLinked) return canonical;
+  if (tx.verification_status === 'REJECTED') return 'PROSES';
+  return canonical;
 }
 
 export function mapToOperationalStatus(tx: {
@@ -584,6 +724,18 @@ export interface PurchasePillClass {
   text: string;
 }
 
+export function getPurchaseApprovalClass(status: string | null | undefined): PurchasePillClass {
+  switch (status) {
+    case 'APPROVED':
+      return { bg: 'bg-emerald-50', border: 'border-emerald-300', text: 'text-emerald-700' };
+    case 'REJECTED':
+      return { bg: 'bg-rose-50', border: 'border-rose-300', text: 'text-rose-700' };
+    case 'PENDING_APPROVAL':
+    default:
+      return { bg: 'bg-amber-50', border: 'border-amber-300', text: 'text-amber-700' };
+  }
+}
+
 export function getPurchaseReceivingClass(status: string): PurchasePillClass {
   switch (status) {
     case 'DITERIMA':
@@ -623,6 +775,48 @@ export function getPurchaseWorkflowClass(status: string): PurchasePillClass {
   }
 }
 
+/**
+ * Normalizes a transaction business date into a canonical YYYY-MM-DD calendar string.
+ * Preserves plain YYYY-MM-DD strings as-is and converts timestamps/Date values in Asia/Jakarta.
+ */
+export function toTransactionBusinessDateYmd(value?: string | Date | null): string {
+  if (value === null || value === undefined) return '';
+  if (value instanceof Date) {
+    if (Number.isNaN(value.getTime())) return '';
+    return value.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+  }
+  const str = String(value).trim();
+  if (!str) return '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(str)) return str;
+  const parsed = new Date(str);
+  if (!Number.isNaN(parsed.getTime())) {
+    return parsed.toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+  }
+  return str.slice(0, 10);
+}
+
+export function toJakartaDateInput(val?: string | Date | null): string {
+  const ymd = toTransactionBusinessDateYmd(val);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(ymd)) return ymd;
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
+}
+
+export function formatTransactionBusinessDate(value: string | Date | null | undefined): string {
+  const raw = toTransactionBusinessDateYmd(value);
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return raw || '-';
+
+  const [, year, month, day] = match;
+  const date = new Date(Number(year), Number(month) - 1, Number(day));
+  if (Number.isNaN(date.getTime())) return raw;
+
+  return date.toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric'
+  });
+}
+
 export type BookingSaleSourceCategory =
   | 'ROOM'
   | 'STAY_EXTRA'
@@ -643,6 +837,8 @@ export interface BookingSalesDetail {
     booker_name: string | null;
     booking_source: string | null;
     booking_channel: string | null;
+    ota_source_id: number | null;
+    ota_source_name: string | null;
     booking_status: string | null;
     check_in: string | null;
     check_out: string | null;
@@ -677,11 +873,15 @@ export interface BookingSalesDetail {
     reservation_status: string | null;
     operational_sheet: OperationalSheet;
     payment_status: string;
+    payment_responsibility?: string;
     gross: number;
     discount: number;
     net: number;
     paid: number;
     remaining: number;
+    primary_transaction_id?: number | string | null;
+    unapplied_advance_deposit?: number;
+    active_advance_deposit_id?: number | null;
   }>;
   payments: Array<{
     payment_id: number;

@@ -1,6 +1,14 @@
 import { Pool } from 'pg';
 import { initializeDatabase as initializeV2 } from './schema_v2';
 import { seedBaselineStayChargeRules } from '../domains/stayCharges/stayChargeRuleDefaults';
+import { runProductMasterMp03cMigration } from './migrations/product_master_mp03c_v1';
+import { runProductInventoryMp04bB1Migration } from './migrations/product_inventory_mp04b_b1_v1';
+import { runProductInventoryMp04bB3Migration } from './migrations/product_inventory_mp04b_b3_v1';
+import { runPosProductRecipeMigration } from './migrations/pos_product_recipe_v1';
+import { runPosPurchaseOrdersMigration } from './migrations/pos_purchase_orders_v1';
+import { runPosPurchaseReceiptDraftPostMigration } from './migrations/pos_purchase_receipt_draft_post_v1';
+import { runPosPurchaseReceiptDraftPostV2Migration } from './migrations/pos_purchase_receipt_draft_post_v2';
+import { runPosProcurementTahap1aV1Migration } from './migrations/pos_procurement_tahap1a_v1';
 
 export async function initializeDatabase(pool: Pool) {
   // Run v2 initialization first (creates availability tables)
@@ -174,9 +182,29 @@ export async function initializeDatabase(pool: Pool) {
       item_code VARCHAR(50),
       name VARCHAR(100) NOT NULL,
       description TEXT,
-      price DECIMAL(12,2) NOT NULL DEFAULT 0,
+      price DECIMAL(12,2),
       is_active BOOLEAN DEFAULT TRUE,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      is_sellable_pos BOOLEAN NOT NULL DEFAULT TRUE,
+      product_type VARCHAR(30),
+      product_kind VARCHAR(30),
+      base_unit VARCHAR(50),
+      canonical_base_unit_code VARCHAR(20),
+      barcode VARCHAR(100),
+      photo_storage_key TEXT,
+      track_stock BOOLEAN NOT NULL DEFAULT FALSE,
+      track_inventory BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      CONSTRAINT chk_pos_menu_items_product_type
+        CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')),
+      CONSTRAINT chk_pos_menu_items_product_kind
+        CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')),
+      CONSTRAINT chk_pos_menu_items_base_unit_non_empty
+        CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)),
+      CONSTRAINT chk_pos_menu_items_barcode_non_empty
+        CHECK (barcode IS NULL OR (LENGTH(BTRIM(barcode)) >= 1 AND LENGTH(BTRIM(barcode)) <= 100)),
+      CONSTRAINT chk_pos_menu_items_price_sellable
+        CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL))
     );
 
     CREATE TABLE IF NOT EXISTS pos_orders (
@@ -463,6 +491,14 @@ export async function initializeDatabase(pool: Pool) {
       CONSTRAINT bookings_currency_upper_check CHECK (currency_code = upper(currency_code)),
       CONSTRAINT bookings_bid_format_check CHECK (bid ~ '^[A-Z0-9-]+$')
     );
+
+    ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_responsibility VARCHAR(20) NOT NULL DEFAULT 'HOTEL_COLLECT';
+    DO $$ BEGIN
+      ALTER TABLE bookings
+        ADD CONSTRAINT bookings_payment_responsibility_chk
+        CHECK (payment_responsibility IN ('HOTEL_COLLECT', 'OTA_COLLECT'));
+    EXCEPTION WHEN duplicate_object THEN NULL;
+    END $$;
 
     CREATE OR REPLACE FUNCTION bookings_set_updated_at()
     RETURNS TRIGGER AS $$
@@ -776,6 +812,795 @@ export async function initializeDatabase(pool: Pool) {
     CREATE INDEX IF NOT EXISTS idx_pmc_property ON pos_menu_categories(property_id);
     CREATE INDEX IF NOT EXISTS idx_pmi_property ON pos_menu_items(property_id);
 
+    -- Product Master Stage 1 additive schema (idempotent for existing DBs)
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_sellable_pos BOOLEAN NOT NULL DEFAULT TRUE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_type VARCHAR(30);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS product_kind VARCHAR(30);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS base_unit VARCHAR(50);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS barcode VARCHAR(100);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS photo_storage_key TEXT;
+    ALTER TABLE pos_menu_items ALTER COLUMN price DROP NOT NULL;
+    ALTER TABLE pos_menu_items ALTER COLUMN price DROP DEFAULT;
+
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_menu_items_product_type'
+          AND pg_get_constraintdef(oid) NOT LIKE '%OPERATIONAL_ITEM%'
+      ) THEN
+        ALTER TABLE pos_menu_items DROP CONSTRAINT chk_pos_menu_items_product_type;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_type') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
+          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_kind') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_kind
+          CHECK (product_kind IS NULL OR product_kind IN ('STANDARD')) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_base_unit_non_empty') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_base_unit_non_empty
+          CHECK (base_unit IS NULL OR (LENGTH(BTRIM(base_unit)) >= 1 AND LENGTH(BTRIM(base_unit)) <= 50)) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_barcode_non_empty') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_barcode_non_empty
+          CHECK (barcode IS NULL OR (LENGTH(BTRIM(barcode)) >= 1 AND LENGTH(BTRIM(barcode)) <= 100)) NOT VALID;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_price_sellable') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_price_sellable
+          CHECK ((price IS NULL OR price >= 0) AND (NOT is_sellable_pos OR price IS NOT NULL)) NOT VALID;
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_barcode ON pos_menu_items(property_id, barcode) WHERE barcode IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pmi_property_sellable_active ON pos_menu_items(property_id, is_active, is_sellable_pos);
+    CREATE INDEX IF NOT EXISTS idx_pmi_property_product_type ON pos_menu_items(property_id, product_type);
+
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
+      ON pos_menu_items(property_id, track_inventory)
+      WHERE track_inventory = TRUE;
+
+    CREATE OR REPLACE FUNCTION sync_pos_menu_items_track_stock_inventory()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.track_inventory IS TRUE AND NEW.track_stock IS NOT TRUE THEN
+          NEW.track_stock := TRUE;
+        ELSIF NEW.track_stock IS TRUE AND NEW.track_inventory IS NOT TRUE THEN
+          NEW.track_inventory := TRUE;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.track_inventory IS DISTINCT FROM OLD.track_inventory THEN
+          NEW.track_stock := NEW.track_inventory;
+        ELSIF NEW.track_stock IS DISTINCT FROM OLD.track_stock THEN
+          NEW.track_inventory := NEW.track_stock;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_sync_pos_menu_items_track_stock_inventory ON pos_menu_items;
+    CREATE TRIGGER trg_sync_pos_menu_items_track_stock_inventory
+    BEFORE INSERT OR UPDATE OF track_stock, track_inventory ON pos_menu_items
+    FOR EACH ROW
+    EXECUTE FUNCTION sync_pos_menu_items_track_stock_inventory();
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
+      ON pos_menu_items(property_id, track_stock)
+      WHERE track_stock = TRUE;
+    DO $$
+    BEGIN
+      ALTER TABLE pos_menu_items DROP CONSTRAINT IF EXISTS chk_pos_menu_items_canonical_base_unit;
+      ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_canonical_base_unit
+        CHECK (
+          canonical_base_unit_code IS NULL
+          OR canonical_base_unit_code IN (
+            'PCS', 'PORSI', 'GELAS', 'CUP', 'BOTOL', 'KALENG',
+            'PACK', 'BOX', 'ROLL', 'SET', 'LEMBAR',
+            'KG', 'GRAM',
+            'LITER', 'ML'
+          )
+        );
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_menu_items_property_id_id ON pos_menu_items(property_id, id);
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_rooms_property_id_id ON rooms(property_id, id);
+
+    CREATE TABLE IF NOT EXISTS product_packaging_conversions (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      menu_item_id INTEGER NOT NULL,
+      packaging_code VARCHAR(30) NOT NULL,
+      packaging_label VARCHAR(60) NOT NULL,
+      base_unit_code VARCHAR(20) NOT NULL,
+      to_base_factor NUMERIC(12, 3) NOT NULL,
+      is_default_purchase BOOLEAN NOT NULL DEFAULT FALSE,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      idempotency_key VARCHAR(150) NOT NULL,
+      create_payload_hash VARCHAR(64) NULL,
+      create_payload_snapshot JSONB NULL,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    );
+
+    ALTER TABLE product_packaging_conversions
+      ADD COLUMN IF NOT EXISTS create_payload_hash VARCHAR(64) NULL,
+      ADD COLUMN IF NOT EXISTS create_payload_snapshot JSONB NULL;
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_ppc_property_menu_item' AND conrelid = 'product_packaging_conversions'::regclass) THEN
+        ALTER TABLE product_packaging_conversions ADD CONSTRAINT fk_ppc_property_menu_item
+          FOREIGN KEY (property_id, menu_item_id) REFERENCES pos_menu_items(property_id, id) ON DELETE CASCADE;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_ppc_packaging_code_format' AND conrelid = 'product_packaging_conversions'::regclass) THEN
+        ALTER TABLE product_packaging_conversions ADD CONSTRAINT chk_ppc_packaging_code_format
+          CHECK (BTRIM(packaging_code) <> '' AND CHAR_LENGTH(BTRIM(packaging_code)) <= 30 AND packaging_code ~ '^[A-Z0-9][A-Z0-9_-]{0,29}$');
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_ppc_packaging_label_non_empty' AND conrelid = 'product_packaging_conversions'::regclass) THEN
+        ALTER TABLE product_packaging_conversions ADD CONSTRAINT chk_ppc_packaging_label_non_empty
+          CHECK (BTRIM(packaging_label) <> '' AND CHAR_LENGTH(BTRIM(packaging_label)) <= 60);
+      END IF;
+
+      ALTER TABLE product_packaging_conversions DROP CONSTRAINT IF EXISTS chk_ppc_base_unit_code_valid;
+      ALTER TABLE product_packaging_conversions ADD CONSTRAINT chk_ppc_base_unit_code_valid
+        CHECK (base_unit_code IN ('PCS', 'PORSI', 'GELAS', 'CUP', 'BOTOL', 'KALENG', 'PACK', 'BOX', 'ROLL', 'SET', 'LEMBAR', 'KG', 'GRAM', 'LITER', 'ML'));
+
+      ALTER TABLE product_packaging_conversions DROP CONSTRAINT IF EXISTS chk_ppc_factor_positive;
+      ALTER TABLE product_packaging_conversions ADD CONSTRAINT chk_ppc_factor_positive
+        CHECK (to_base_factor > 0 AND to_base_factor <= 100000.000);
+
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_ppc_idempotency_key_non_empty' AND conrelid = 'product_packaging_conversions'::regclass) THEN
+        ALTER TABLE product_packaging_conversions ADD CONSTRAINT chk_ppc_idempotency_key_non_empty
+          CHECK (BTRIM(idempotency_key) <> '' AND CHAR_LENGTH(BTRIM(idempotency_key)) <= 150);
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ppc_item_packaging_code
+      ON product_packaging_conversions(property_id, menu_item_id, UPPER(BTRIM(packaging_code)));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ppc_item_packaging_label
+      ON product_packaging_conversions(property_id, menu_item_id, LOWER(BTRIM(packaging_label)));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ppc_item_idempotency_key
+      ON product_packaging_conversions(property_id, menu_item_id, BTRIM(idempotency_key));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_ppc_default_purchase_per_item
+      ON product_packaging_conversions(property_id, menu_item_id)
+      WHERE is_default_purchase = TRUE AND is_active = TRUE;
+
+    CREATE OR REPLACE FUNCTION trg_fn_guard_pos_menu_item_base_unit()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_old_base_trimmed TEXT := LOWER(BTRIM(COALESCE(OLD.base_unit, '')));
+      v_new_base_trimmed TEXT := LOWER(BTRIM(COALESCE(NEW.base_unit, '')));
+      v_is_initial_assignment BOOLEAN := FALSE;
+      v_is_equivalent_promotion BOOLEAN := FALSE;
+      v_is_unit_changing BOOLEAN := FALSE;
+      v_has_minibar_usage BOOLEAN := FALSE;
+      v_has_stock_movements BOOLEAN := FALSE;
+    BEGIN
+      v_is_initial_assignment := (
+        OLD.canonical_base_unit_code IS NULL
+        AND v_old_base_trimmed = ''
+      );
+
+      IF (
+        OLD.canonical_base_unit_code IS NULL
+        AND NEW.canonical_base_unit_code IS NOT NULL
+        AND v_old_base_trimmed <> ''
+      ) THEN
+        v_is_equivalent_promotion := (
+          v_old_base_trimmed = LOWER(NEW.canonical_base_unit_code)
+          OR (NEW.canonical_base_unit_code = 'PCS' AND v_old_base_trimmed IN ('pcs', 'pc', 'piece', 'pieces', 'buah', 'biji', 'unit'))
+          OR (NEW.canonical_base_unit_code = 'PORSI' AND v_old_base_trimmed IN ('porsi', 'portion', 'serving', 'piring', 'plate', 'mangkuk', 'bowl'))
+          OR (NEW.canonical_base_unit_code = 'GELAS' AND v_old_base_trimmed IN ('gelas', 'glass'))
+          OR (NEW.canonical_base_unit_code = 'CUP' AND v_old_base_trimmed IN ('cup', 'cups', 'cangkir'))
+          OR (NEW.canonical_base_unit_code = 'BOTOL' AND v_old_base_trimmed IN ('botol', 'btl', 'bottle', 'bottles'))
+          OR (NEW.canonical_base_unit_code = 'KALENG' AND v_old_base_trimmed IN ('kaleng', 'klg', 'can', 'cans', 'tin'))
+          OR (NEW.canonical_base_unit_code = 'PACK' AND v_old_base_trimmed IN ('pack', 'pak', 'bungkus', 'bks', 'sachet', 'sct', 'pouch'))
+          OR (NEW.canonical_base_unit_code = 'BOX' AND v_old_base_trimmed IN ('box', 'kotak', 'dus', 'doos', 'karton', 'ctn', 'carton', 'crate', 'krat'))
+          OR (NEW.canonical_base_unit_code = 'ROLL' AND v_old_base_trimmed IN ('roll', 'rol', 'gulung'))
+          OR (NEW.canonical_base_unit_code = 'SET' AND v_old_base_trimmed IN ('set', 'pasang', 'pair', 'kit'))
+          OR (NEW.canonical_base_unit_code = 'LEMBAR' AND v_old_base_trimmed IN ('lembar', 'lbr', 'sheet', 'sheets', 'helai', 'slice'))
+          OR (NEW.canonical_base_unit_code = 'KG' AND v_old_base_trimmed IN ('kg', 'kilogram', 'kilo', 'kgs'))
+          OR (NEW.canonical_base_unit_code = 'GRAM' AND v_old_base_trimmed IN ('gram', 'gr', 'g', 'gm', 'grams'))
+          OR (NEW.canonical_base_unit_code = 'LITER' AND v_old_base_trimmed IN ('liter', 'ltr', 'l', 'lt', 'litre', 'liters'))
+          OR (NEW.canonical_base_unit_code = 'ML' AND v_old_base_trimmed IN ('ml', 'milliliter', 'mililiter', 'millilitre', 'cc'))
+        );
+      END IF;
+
+      IF NOT v_is_initial_assignment AND NOT v_is_equivalent_promotion THEN
+        IF OLD.canonical_base_unit_code IS DISTINCT FROM NEW.canonical_base_unit_code THEN
+          v_is_unit_changing := TRUE;
+        ELSIF OLD.canonical_base_unit_code IS NULL AND NEW.canonical_base_unit_code IS NULL AND v_old_base_trimmed IS DISTINCT FROM v_new_base_trimmed THEN
+          v_is_unit_changing := TRUE;
+        END IF;
+      END IF;
+
+      IF v_is_unit_changing THEN
+        IF EXISTS (
+          SELECT 1
+          FROM product_packaging_conversions ppc
+          WHERE ppc.property_id = NEW.property_id
+            AND ppc.menu_item_id = NEW.id
+            AND ppc.is_active = TRUE
+        ) THEN
+          RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah selama produk memiliki kemasan aktif';
+        END IF;
+
+        IF to_regclass('public.room_type_minibar_standard') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM room_type_minibar_standard WHERE property_id = $1 AND menu_item_id = $2)'
+            INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+          IF v_has_minibar_usage THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk digunakan pada standar minibar kamar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.minibar_baseline_verification') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_baseline_verification WHERE property_id = $1 AND menu_item_id = $2)'
+            INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+          IF v_has_minibar_usage THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada verifikasi baseline minibar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.minibar_stay_event') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_stay_event WHERE property_id = $1 AND menu_item_id = $2)'
+            INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+          IF v_has_minibar_usage THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada riwayat stay event minibar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.minibar_inspection_report_line') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM minibar_inspection_report_line WHERE property_id = $1 AND menu_item_id = $2)'
+            INTO v_has_minibar_usage USING NEW.property_id, NEW.id;
+          IF v_has_minibar_usage THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_USAGE: Satuan dasar tidak dapat diubah karena produk tercatat pada laporan inspeksi minibar';
+          END IF;
+        END IF;
+
+        IF to_regclass('public.stock_movements') IS NOT NULL THEN
+          EXECUTE 'SELECT EXISTS (SELECT 1 FROM stock_movements WHERE product_id = $1)'
+            INTO v_has_stock_movements USING NEW.id;
+          IF v_has_stock_movements THEN
+            RAISE EXCEPTION 'BASE_UNIT_LOCKED_BY_STOCK: Satuan dasar tidak dapat diubah karena produk sudah memiliki mutasi stok';
+          END IF;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_pos_menu_item_base_unit ON pos_menu_items;
+    CREATE TRIGGER trg_guard_pos_menu_item_base_unit
+      BEFORE UPDATE OF canonical_base_unit_code, base_unit ON pos_menu_items
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_guard_pos_menu_item_base_unit();
+
+    CREATE OR REPLACE FUNCTION trg_fn_guard_product_packaging_conversion()
+    RETURNS TRIGGER AS $$
+    DECLARE
+      v_item_base_unit VARCHAR(20);
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        IF OLD.base_unit_code IS DISTINCT FROM NEW.base_unit_code THEN
+          RAISE EXCEPTION 'IMMUTABLE_PACKAGING_BASE_UNIT: base_unit_code pada kemasan tidak dapat diubah';
+        END IF;
+        IF BTRIM(OLD.idempotency_key) IS DISTINCT FROM BTRIM(NEW.idempotency_key) THEN
+          RAISE EXCEPTION 'IMMUTABLE_IDEMPOTENCY_KEY: idempotency_key pada kemasan tidak dapat diubah';
+        END IF;
+        IF OLD.create_payload_hash IS DISTINCT FROM NEW.create_payload_hash
+           OR OLD.create_payload_snapshot IS DISTINCT FROM NEW.create_payload_snapshot THEN
+          RAISE EXCEPTION 'IMMUTABLE_CREATE_PAYLOAD_SNAPSHOT: snapshot penciptaan kemasan tidak dapat diubah';
+        END IF;
+      END IF;
+
+      SELECT canonical_base_unit_code
+        INTO v_item_base_unit
+        FROM pos_menu_items
+       WHERE id = NEW.menu_item_id
+         AND property_id = NEW.property_id
+       FOR UPDATE;
+
+      IF v_item_base_unit IS NULL AND (TG_OP = 'INSERT' OR NEW.is_active = TRUE) THEN
+        RAISE EXCEPTION 'BASE_UNIT_NOT_CANONICAL: Produk wajib memiliki satuan dasar kanonik sebelum kemasan aktif disimpan';
+      END IF;
+
+      IF (TG_OP = 'INSERT' OR NEW.is_active = TRUE OR (TG_OP = 'UPDATE' AND OLD.to_base_factor IS DISTINCT FROM NEW.to_base_factor)) THEN
+        IF NEW.base_unit_code IS DISTINCT FROM v_item_base_unit THEN
+          RAISE EXCEPTION 'PACKAGING_BASE_UNIT_MISMATCH: Satuan dasar kemasan (%) tidak cocok dengan satuan dasar produk saat ini (%)', NEW.base_unit_code, v_item_base_unit;
+        END IF;
+      END IF;
+
+      IF NEW.base_unit_code IN ('PCS', 'PORSI', 'GELAS', 'CUP', 'BOTOL', 'KALENG', 'PACK', 'BOX', 'ROLL', 'SET', 'LEMBAR') THEN
+        IF MOD(NEW.to_base_factor * 1000, 1000) <> 0 THEN
+          RAISE EXCEPTION 'INTEGER_UNIT_REQUIRES_WHOLE_NUMBER: Satuan hitung diskrit wajib memiliki faktor konversi bilangan bulat';
+        END IF;
+      END IF;
+
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_product_packaging_conversion ON product_packaging_conversions;
+    CREATE TRIGGER trg_guard_product_packaging_conversion
+      BEFORE INSERT OR UPDATE ON product_packaging_conversions
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_guard_product_packaging_conversion();
+
+    CREATE TABLE IF NOT EXISTS stock_locations (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(40) NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      location_type VARCHAR(30) NOT NULL,
+      room_id INTEGER NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      notes TEXT NULL,
+      created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'fk_stock_locations_property_room' AND conrelid = 'stock_locations'::regclass) THEN
+        ALTER TABLE stock_locations ADD CONSTRAINT fk_stock_locations_property_room
+          FOREIGN KEY (property_id, room_id) REFERENCES rooms(property_id, id) ON DELETE RESTRICT;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_stock_locations_code_format' AND conrelid = 'stock_locations'::regclass) THEN
+        ALTER TABLE stock_locations ADD CONSTRAINT chk_stock_locations_code_format
+          CHECK (BTRIM(code) <> '' AND CHAR_LENGTH(BTRIM(code)) <= 40 AND code ~ '^[A-Z0-9][A-Z0-9_-]{1,39}$');
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_stock_locations_name_non_empty' AND conrelid = 'stock_locations'::regclass) THEN
+        ALTER TABLE stock_locations ADD CONSTRAINT chk_stock_locations_name_non_empty
+          CHECK (BTRIM(name) <> '' AND CHAR_LENGTH(BTRIM(name)) <= 100);
+      END IF;
+
+      ALTER TABLE stock_locations DROP CONSTRAINT IF EXISTS chk_stock_locations_type;
+      ALTER TABLE stock_locations ADD CONSTRAINT chk_stock_locations_type
+        CHECK (location_type IN ('WAREHOUSE', 'KITCHEN', 'POS_OUTLET', 'HK_PANTRY', 'ROOM_MINIBAR'));
+
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_stock_locations_room_minibar_rule' AND conrelid = 'stock_locations'::regclass) THEN
+        ALTER TABLE stock_locations ADD CONSTRAINT chk_stock_locations_room_minibar_rule
+          CHECK ((location_type = 'ROOM_MINIBAR' AND room_id IS NOT NULL) OR (location_type <> 'ROOM_MINIBAR' AND room_id IS NULL));
+      END IF;
+    END $$;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_locations_property_code
+      ON stock_locations(property_id, UPPER(BTRIM(code)));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_locations_property_name
+      ON stock_locations(property_id, LOWER(BTRIM(name)));
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_locations_property_room_minibar
+      ON stock_locations(property_id, room_id)
+      WHERE location_type = 'ROOM_MINIBAR' AND room_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_stock_locations_property_type_active
+      ON stock_locations(property_id, location_type, is_active);
+
+    CREATE OR REPLACE FUNCTION trg_fn_guard_stock_location_identity()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF OLD.property_id IS DISTINCT FROM NEW.property_id
+         OR OLD.location_type IS DISTINCT FROM NEW.location_type
+         OR OLD.room_id IS DISTINCT FROM NEW.room_id THEN
+        RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id, location_type, dan room_id pada stock_locations tidak dapat diubah setelah dibuat';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_location_identity ON stock_locations;
+    CREATE TRIGGER trg_guard_stock_location_identity
+      BEFORE UPDATE ON stock_locations
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_guard_stock_location_identity();
+    /* MP-04B Batch 1: Inventory ledger tables, projection and append-only invariants */
+    CREATE TABLE IF NOT EXISTS stock_operations (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      operation_type VARCHAR(50) NOT NULL,
+      operation_key VARCHAR(100) NOT NULL,
+      payload_fingerprint VARCHAR(128) NOT NULL,
+      created_by INTEGER REFERENCES users(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_operations_prop_key'
+          AND conrelid = 'stock_operations'::regclass
+      ) THEN
+        ALTER TABLE stock_operations
+          ADD CONSTRAINT uq_stock_operations_prop_key UNIQUE (property_id, operation_key);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_type
+      ON stock_operations(property_id, operation_type);
+
+    CREATE TABLE IF NOT EXISTS stock_movements (
+      id BIGSERIAL PRIMARY KEY,
+      operation_id BIGINT NOT NULL REFERENCES stock_operations(id),
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      packaging_code VARCHAR(30),
+      packaging_label VARCHAR(60),
+      quantity_delta NUMERIC(12, 3) NOT NULL,
+      base_unit_code VARCHAR(20) NOT NULL,
+      unit_cost NUMERIC(14, 2),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_property_product_location
+      ON stock_movements(property_id, product_id, location_id);
+
+    CREATE INDEX IF NOT EXISTS idx_stock_movements_operation_id
+      ON stock_movements(operation_id);
+
+    CREATE TABLE IF NOT EXISTS stock_balances (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0),
+      CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_stock_balance_non_negative'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT chk_stock_balance_non_negative CHECK (quantity >= 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_balances_product_location'
+          AND conrelid = 'stock_balances'::regclass
+      ) THEN
+        ALTER TABLE stock_balances
+          ADD CONSTRAINT uq_stock_balances_product_location UNIQUE (property_id, product_id, location_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_balances_property_product
+      ON stock_balances(property_id, product_id);
+
+    CREATE TABLE IF NOT EXISTS stock_cutover_windows (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      cutover_at TIMESTAMPTZ NOT NULL,
+      status VARCHAR(30) NOT NULL DEFAULT 'OPEN',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_stock_cutover_prop_active'
+          AND conrelid = 'stock_cutover_windows'::regclass
+      ) THEN
+        ALTER TABLE stock_cutover_windows
+          ADD CONSTRAINT uq_stock_cutover_prop_active UNIQUE (property_id, status);
+      END IF;
+    END $$;
+
+    CREATE OR REPLACE FUNCTION trg_fn_stock_movements_append_only()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'UPDATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Perubahan (UPDATE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'DELETE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Penghapusan (DELETE) pada stock_movements dilarang';
+      ELSIF TG_OP = 'TRUNCATE' THEN
+        RAISE EXCEPTION 'STOCK_MOVEMENTS_APPEND_ONLY: Pembersihan (TRUNCATE) pada stock_movements dilarang';
+      END IF;
+      RETURN NULL;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_append_only ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_append_only
+      BEFORE UPDATE OR DELETE ON stock_movements
+      FOR EACH ROW
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    DROP TRIGGER IF EXISTS trg_guard_stock_movements_no_truncate ON stock_movements;
+    CREATE TRIGGER trg_guard_stock_movements_no_truncate
+      BEFORE TRUNCATE ON stock_movements
+      FOR EACH STATEMENT
+      EXECUTE FUNCTION trg_fn_stock_movements_append_only();
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b1_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+    /* MP-04B Batch 3: Purchase line bindings & receipt tracking */
+    CREATE TABLE IF NOT EXISTS stock_purchase_line_bindings (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      transaction_id INTEGER NOT NULL,
+      transaction_line_id INTEGER NOT NULL,
+      line_type VARCHAR(30) NOT NULL DEFAULT 'STOCK',
+      product_id INTEGER REFERENCES pos_menu_items(id),
+      destination_location_id INTEGER REFERENCES stock_locations(id),
+      packaging_id INTEGER REFERENCES product_packaging_conversions(id),
+      ordered_quantity NUMERIC(12, 3) NOT NULL,
+      received_quantity NUMERIC(12, 3) NOT NULL DEFAULT 0.000,
+      base_unit_code VARCHAR(20) NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE')),
+      CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0),
+      CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id)
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_purchase_line_binding'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT uq_purchase_line_binding UNIQUE (property_id, transaction_id, transaction_line_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_type'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_type CHECK (line_type IN ('STOCK', 'NON_STOCK_PHYSICAL', 'SERVICE'));
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_purchase_line_quantities'
+          AND conrelid = 'stock_purchase_line_bindings'::regclass
+      ) THEN
+        ALTER TABLE stock_purchase_line_bindings
+          ADD CONSTRAINT chk_purchase_line_quantities CHECK (ordered_quantity >= 0 AND received_quantity >= 0);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_tx
+      ON stock_purchase_line_bindings(property_id, transaction_id);
+
+    CREATE INDEX IF NOT EXISTS idx_purchase_line_bindings_prod
+      ON stock_purchase_line_bindings(property_id, product_id);
+
+    ALTER TABLE stock_operations
+      ADD COLUMN IF NOT EXISTS transaction_id BIGINT,
+      ADD COLUMN IF NOT EXISTS notes TEXT,
+      ADD COLUMN IF NOT EXISTS metadata JSONB;
+
+    CREATE INDEX IF NOT EXISTS idx_stock_operations_property_tx
+      ON stock_operations(property_id, transaction_id)
+      WHERE transaction_id IS NOT NULL;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('product_inventory_mp04b_b3_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+
+    -- MP-04C: Master Resep & Bill of Materials (BOM) Bahan Baku POS
+    CREATE TABLE IF NOT EXISTS pos_product_uoms (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(20) NOT NULL,
+      name VARCHAR(50) NOT NULL,
+      category VARCHAR(30) DEFAULT 'GENERAL',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_product_uoms_prop_code
+      ON pos_product_uoms (COALESCE(property_id, 0), UPPER(code));
+
+    INSERT INTO pos_product_uoms (property_id, code, name, category)
+    VALUES
+      (NULL, 'GRAM', 'Gram', 'WEIGHT'),
+      (NULL, 'KG', 'Kilogram', 'WEIGHT'),
+      (NULL, 'ML', 'Mililiter', 'VOLUME'),
+      (NULL, 'LITER', 'Liter', 'VOLUME'),
+      (NULL, 'PCS', 'Pieces', 'COUNT'),
+      (NULL, 'PORSI', 'Porsi', 'COUNT'),
+      (NULL, 'CUP', 'Cup', 'COUNT'),
+      (NULL, 'GELAS', 'Gelas', 'COUNT'),
+      (NULL, 'BOTOL', 'Botol', 'COUNT'),
+      (NULL, 'KALENG', 'Kaleng', 'COUNT'),
+      (NULL, 'PACK', 'Pack', 'COUNT'),
+      (NULL, 'BOX', 'Box', 'COUNT'),
+      (NULL, 'ROLL', 'Roll', 'COUNT'),
+      (NULL, 'SET', 'Set', 'COUNT'),
+      (NULL, 'LEMBAR', 'Lembar', 'COUNT')
+    ON CONFLICT DO NOTHING;
+
+    ALTER TABLE pos_menu_items
+      ADD COLUMN IF NOT EXISTS is_raw_material BOOLEAN NOT NULL DEFAULT FALSE;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_raw_material
+      ON pos_menu_items (property_id, is_raw_material)
+      WHERE is_raw_material = TRUE;
+
+    CREATE TABLE IF NOT EXISTS pos_product_recipes (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE CASCADE,
+      ingredient_product_id INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE RESTRICT,
+      quantity NUMERIC(12, 4) NOT NULL,
+      uom_id INTEGER REFERENCES pos_product_uoms(id) ON DELETE SET NULL,
+      notes VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_quantity_positive'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_quantity_positive CHECK (quantity > 0);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_product_recipes_no_self_ref'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT chk_pos_product_recipes_no_self_ref CHECK (product_id <> ingredient_product_id);
+      END IF;
+
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_pos_product_recipes_prop_prod_ing'
+          AND conrelid = 'pos_product_recipes'::regclass
+      ) THEN
+        ALTER TABLE pos_product_recipes
+          ADD CONSTRAINT uq_pos_product_recipes_prop_prod_ing UNIQUE (property_id, product_id, ingredient_product_id);
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_product
+      ON pos_product_recipes (property_id, product_id);
+
+    CREATE INDEX IF NOT EXISTS idx_pos_product_recipes_ingredient
+      ON pos_product_recipes (property_id, ingredient_product_id);
+
+    CREATE OR REPLACE VIEW pos_products AS
+      SELECT * FROM pos_menu_items;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_product_recipe_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+    -- MP-04D: Purchase Orders & Goods Receipts
+    CREATE TABLE IF NOT EXISTS pos_suppliers (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      code VARCHAR(50) NOT NULL,
+      name VARCHAR(150) NOT NULL,
+      contact_person VARCHAR(100),
+      phone VARCHAR(50),
+      email VARCHAR(100),
+      address TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_suppliers_property_code UNIQUE (property_id, code)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_suppliers_property ON pos_suppliers(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_suppliers_property_active ON pos_suppliers(property_id, is_active);
+
+    ALTER TABLE pos_menu_items
+      ADD COLUMN IF NOT EXISTS average_cost NUMERIC(14,2) NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS last_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+
+    CREATE TABLE IF NOT EXISTS pos_purchase_orders (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      po_number VARCHAR(50) NOT NULL,
+      supplier_id INTEGER NOT NULL REFERENCES pos_suppliers(id),
+      order_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      expected_date DATE,
+      status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+      notes TEXT,
+      total_estimated_amount NUMERIC(14,2) NOT NULL DEFAULT 0,
+      created_by VARCHAR(100),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_purchase_orders_property_po UNIQUE (property_id, po_number),
+      CONSTRAINT chk_pos_purchase_orders_status
+        CHECK (status IN ('DRAFT', 'ORDERED', 'PARTIALLY_RECEIVED', 'COMPLETED', 'CANCELLED'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_purchase_orders_prop_status ON pos_purchase_orders(property_id, status);
+    CREATE INDEX IF NOT EXISTS idx_pos_purchase_orders_prop_supplier ON pos_purchase_orders(property_id, supplier_id);
+
+    CREATE TABLE IF NOT EXISTS pos_purchase_order_items (
+      id SERIAL PRIMARY KEY,
+      po_id INTEGER NOT NULL REFERENCES pos_purchase_orders(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      ordered_qty NUMERIC(12,4) NOT NULL CHECK (ordered_qty > 0),
+      received_qty NUMERIC(12,4) NOT NULL DEFAULT 0 CHECK (received_qty >= 0),
+      unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (unit_cost >= 0),
+      uom_id INTEGER REFERENCES pos_product_uoms(id),
+      notes VARCHAR(255),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_purchase_order_items_po_prod UNIQUE (po_id, product_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_po_items_po_id ON pos_purchase_order_items(po_id);
+
+    CREATE TABLE IF NOT EXISTS pos_goods_receipts (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      grn_number VARCHAR(50) NOT NULL,
+      po_id INTEGER REFERENCES pos_purchase_orders(id),
+      supplier_id INTEGER REFERENCES pos_suppliers(id),
+      location_id INTEGER REFERENCES stock_locations(id),
+      receipt_date DATE NOT NULL DEFAULT CURRENT_DATE,
+      invoice_no VARCHAR(100),
+      received_by VARCHAR(100),
+      status VARCHAR(30) NOT NULL DEFAULT 'COMPLETED',
+      notes TEXT,
+      idempotency_key VARCHAR(120),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_pos_goods_receipts_property_grn UNIQUE (property_id, grn_number),
+      CONSTRAINT chk_pos_goods_receipts_status
+        CHECK (status IN ('COMPLETED', 'CANCELLED'))
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_pos_goods_receipts_idemp
+      ON pos_goods_receipts(property_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pos_goods_receipts_prop ON pos_goods_receipts(property_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_goods_receipts_po ON pos_goods_receipts(po_id);
+
+    CREATE TABLE IF NOT EXISTS pos_goods_receipt_items (
+      id SERIAL PRIMARY KEY,
+      receipt_id INTEGER NOT NULL REFERENCES pos_goods_receipts(id) ON DELETE CASCADE,
+      product_id INTEGER NOT NULL REFERENCES pos_menu_items(id),
+      po_item_id INTEGER REFERENCES pos_purchase_order_items(id),
+      received_qty NUMERIC(12,4) NOT NULL CHECK (received_qty > 0),
+      unit_cost NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (unit_cost >= 0),
+      subtotal NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
+      uom_id INTEGER REFERENCES pos_product_uoms(id),
+      location_id INTEGER NOT NULL REFERENCES stock_locations(id),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_grn_items_receipt ON pos_goods_receipt_items(receipt_id);
+    CREATE INDEX IF NOT EXISTS idx_pos_grn_items_prod ON pos_goods_receipt_items(product_id);
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_purchase_orders_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+
     CREATE OR REPLACE FUNCTION pos_menu_items_enforce_property_scope()
     RETURNS TRIGGER AS $$
     BEGIN
@@ -847,6 +1672,8 @@ export async function initializeDatabase(pool: Pool) {
 
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property ON pos_orders(property_id);
     CREATE INDEX IF NOT EXISTS idx_pos_orders_property_status ON pos_orders(property_id, status);
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
   `);
 
   // GL accounts and journal property isolation (idempotent for existing DBs)
@@ -3006,6 +3833,7 @@ export async function initializeDatabase(pool: Pool) {
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_by VARCHAR(100);
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS override_at TIMESTAMP WITH TIME ZONE;
         ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS revenue_category VARCHAR(50) DEFAULT 'ROOM_SALES';
+        ALTER TABLE folio_entries ADD COLUMN IF NOT EXISTS unit VARCHAR(30);
 
         CREATE INDEX IF NOT EXISTS idx_folio_entries_rule ON folio_entries (rule_id);
         CREATE INDEX IF NOT EXISTS idx_folio_entries_rev_cat ON folio_entries (revenue_category);
@@ -3636,23 +4464,29 @@ export async function initializeDatabase(pool: Pool) {
         );
       }
       await auditMigrationClient.query(`
-        CREATE TABLE IF NOT EXISTS deposits (
-          id BIGSERIAL PRIMARY KEY,
-          property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
-          reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
-          deposit_number VARCHAR(40) NOT NULL,
-          original_amount BIGINT NOT NULL CHECK (original_amount > 0),
-          payment_method VARCHAR(30) NOT NULL,
-          status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED'
-            CHECK (status IN ('RECEIVED', 'PARTIALLY_USED', 'CLOSED', 'CANCELLED')),
-          received_by VARCHAR(100) NOT NULL,
-          received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          notes TEXT,
-          created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-          CONSTRAINT uq_deposits_property_number UNIQUE (property_id, deposit_number),
-          CONSTRAINT uq_deposits_event_identity UNIQUE (id, property_id, reservation_id)
-        );
+         CREATE TABLE IF NOT EXISTS deposits (
+           id BIGSERIAL PRIMARY KEY,
+           property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+           reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
+           deposit_number VARCHAR(40) NOT NULL,
+           original_amount BIGINT NOT NULL CHECK (original_amount > 0),
+           payment_method VARCHAR(30) NOT NULL,
+           status VARCHAR(20) NOT NULL DEFAULT 'RECEIVED'
+             CHECK (status IN ('RECEIVED', 'PARTIALLY_USED', 'CLOSED', 'CANCELLED')),
+           received_by VARCHAR(100) NOT NULL,
+           received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           notes TEXT,
+           created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+           -- DEPOSIT-PURPOSE-PHASE-A (canonical fresh schema, hardening #3):
+           -- purpose is nullable, NO DEFAULT. New deposits MUST set it explicitly
+           -- (enforced at service layer). Legacy rows stay NULL = LEGACY/UNKNOWN.
+           -- Check allows NULL (legacy) or one of the two canonical purposes.
+           purpose VARCHAR(30) NULL
+             CHECK (purpose IS NULL OR purpose IN ('ADVANCE_PAYMENT', 'SECURITY_DEPOSIT')),
+           CONSTRAINT uq_deposits_property_number UNIQUE (property_id, deposit_number),
+           CONSTRAINT uq_deposits_event_identity UNIQUE (id, property_id, reservation_id)
+         );
 
         CREATE TABLE IF NOT EXISTS deposit_events (
           id BIGSERIAL PRIMARY KEY,
@@ -3660,7 +4494,7 @@ export async function initializeDatabase(pool: Pool) {
           property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
           reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE RESTRICT,
           event_type VARCHAR(30) NOT NULL
-            CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL')),
+            CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL', 'UNAPPLY')),
           amount BIGINT NOT NULL CHECK (amount > 0),
           payment_transaction_id INTEGER REFERENCES payment_transactions(id) ON DELETE RESTRICT,
           folio_entry_id INTEGER REFERENCES folio_entries(id) ON DELETE RESTRICT,
@@ -3679,6 +4513,7 @@ export async function initializeDatabase(pool: Pool) {
             OR (event_type = 'APPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NULL)
             OR (event_type = 'REFUND' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
             OR (event_type = 'REVERSAL' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NOT NULL)
+            OR (event_type = 'UNAPPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NOT NULL)
           )
         );
 
@@ -3699,6 +4534,15 @@ export async function initializeDatabase(pool: Pool) {
         CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_events_single_reversal
           ON deposit_events(reversal_of_event_id)
           WHERE event_type = 'REVERSAL';
+        -- DEPOSIT-PURPOSE-PHASE-A (hardening #3): NON-UNIQUE index for UNAPPLY
+        -- target lookups (multiple partial UNAPPLY events may target the same
+        -- APPLY event; per-target uniqueness is service-layer enforced).
+        CREATE INDEX IF NOT EXISTS idx_deposit_events_unapply_target
+          ON deposit_events(reversal_of_event_id)
+          WHERE event_type = 'UNAPPLY';
+        -- DEPOSIT-PURPOSE-PHASE-A (hardening #3): classification lookups.
+        CREATE INDEX IF NOT EXISTS idx_deposits_purpose
+          ON deposits(property_id, purpose);
         CREATE UNIQUE INDEX IF NOT EXISTS uq_deposit_refund_reference
           ON payment_transactions(property_id, reference_code)
           WHERE transaction_type = 'DEPOSIT_REFUND' AND reference_code IS NOT NULL;
@@ -3734,6 +4578,229 @@ export async function initializeDatabase(pool: Pool) {
         VALUES ('front_office_deposit_identity_custody_v1')
         ON CONFLICT (version) DO NOTHING;
       `);
+    }
+
+    // 27b. DEPOSIT PURPOSE + UNAPPLY SCHEMA FOUNDATION (PHASE A)
+    // Marker: deposit_purpose_unapply_v1
+    //
+    // Purpose:
+    //   - deposits.purpose: nullable, NO default. New deposits MUST set it
+    //     explicitly (enforced at service layer). Legacy rows remain NULL and
+    //     are treated as LEGACY/UNKNOWN on read — no auto-backfill.
+    //   - deposit_events.event_type: extend to include 'UNAPPLY' so the
+    //     schema supports the future UNAPPLY operation (Phase B service).
+    //   - chk_deposit_event_projection: add UNAPPLY branch (offsets an APPLY
+    //     folio CREDIT; carries both a folio_entry_id and a
+    //     reversal_of_event_id pointing at the UNAPPLY target).
+    //   - NON-UNIQUE index idx_deposit_events_unapply_target on
+    //     reversal_of_event_id WHERE event_type = 'UNAPPLY': multiple
+    //     partial UNAPPLY events may target the same APPLY event; per-target
+    //     uniqueness is enforced at service layer, not DB.
+    //
+    // Safety:
+    //   - Additive & idempotent (ADD COLUMN IF NOT EXISTS / conditional DDL).
+    //   - Single transaction + advisory lock + double-checked marker.
+    //   - No UPDATE/DELETE of business data.
+    const depositPurposeUnapplyMarker = await auditMigrationClient.query(
+      "SELECT 1 FROM schema_migrations WHERE version = 'deposit_purpose_unapply_v1'"
+    );
+    if ((depositPurposeUnapplyMarker.rowCount ?? 0) === 0) {
+      const dpClient = await auditMigrationClient;
+      await dpClient.query('BEGIN');
+      try {
+        await dpClient.query(
+          "SELECT pg_advisory_xact_lock(hashtext('oak_hims_deposit_purpose_unapply_v1_lock'))"
+        );
+        // Double-check marker inside the lock
+        const recheck = await dpClient.query(
+          "SELECT 1 FROM schema_migrations WHERE version = 'deposit_purpose_unapply_v1'"
+        );
+        if ((recheck.rowCount ?? 0) === 0) {
+          // ── Pre-flight: verify expected current state ────────────────────
+          // deposits & deposit_events must already exist (created by 27 above).
+          const depTable = await dpClient.query(
+            "SELECT to_regclass('public.deposits') AS t, to_regclass('public.deposit_events') AS e"
+          );
+          if (depTable.rows[0]?.t !== 'deposits' || depTable.rows[0]?.e !== 'deposit_events') {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: public.deposits or public.deposit_events does not exist. ' +
+              'The canonical deposit foundation (front_office_deposit_identity_custody_v1) must be applied first.'
+            );
+          }
+
+          // Verify the event_type CHECK constraint is in a known shape before
+          // we extend it. We only proceed if the column exists with a
+          // constraint named chk_deposit_events_event_type_check (PostgreSQL
+          // default naming) OR no named check exists yet (fresh table just
+          // created inline). If an unexpected custom constraint is present we
+          // fail rather than silently DROP/REPLACE it.
+          const evTypeChecks = await dpClient.query(
+            `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+               FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposit_events'
+                AND c.contype = 'c'
+                AND c.conname LIKE '%event_type%'`
+          );
+          const evTypeCheckNames = evTypeChecks.rows.map((r: any) => r.conname);
+          const hasStandardCheck = evTypeCheckNames.length === 1;
+          if (!hasStandardCheck) {
+            // Fail-safe: refuse to guess at an unknown constraint layout.
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: expected exactly one CHECK constraint on ' +
+              'deposit_events referencing event_type, found ' + evTypeCheckNames.length +
+              ' (' + evTypeCheckNames.join(', ') + '). Manual review required before re-running.'
+            );
+          }
+
+          // Verify deposits.purpose does not already exist with a DEFAULT
+          // (which would contradict the no-default design). If present and
+          // has a default, fail. If absent, we create it.
+          const purposeCol = await dpClient.query(
+            `SELECT d.column_default IS NOT NULL AS has_default, d.column_default
+               FROM information_schema.columns d
+              WHERE d.table_schema = 'public' AND d.table_name = 'deposits' AND d.column_name = 'purpose'`
+          );
+          if ((purposeCol.rowCount ?? 0) === 1 && purposeCol.rows[0].has_default) {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: deposits.purpose already exists WITH a default ' +
+              '(' + purposeCol.rows[0].column_default + '). Design requires no default. Manual fix needed.'
+            );
+          }
+
+          // ── 1. Add deposits.purpose (nullable, no default) ──────────────
+          await dpClient.query(`
+            ALTER TABLE deposits
+              ADD COLUMN IF NOT EXISTS purpose VARCHAR(30) NULL
+          `);
+          // Enforce the purpose domain (legacy NULL stays legal; any non-null
+          // value must be one of the two canonical purposes). Idempotent.
+          const purposeCheck = await dpClient.query(
+            `SELECT 1 FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposits'
+                AND c.contype = 'c'
+                AND c.conname = 'chk_deposits_purpose'`
+          );
+          if ((purposeCheck.rowCount ?? 0) === 0) {
+            await dpClient.query(`
+              ALTER TABLE deposits
+                ADD CONSTRAINT chk_deposits_purpose
+                CHECK (purpose IS NULL OR purpose IN ('ADVANCE_PAYMENT', 'SECURITY_DEPOSIT'))
+            `);
+          }
+
+          // ── 2. Extend event_type CHECK constraint to include UNAPPLY ────
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              DROP CONSTRAINT ${evTypeCheckNames[0]}
+          `);
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              ADD CONSTRAINT ${evTypeCheckNames[0]}
+              CHECK (event_type IN ('RECEIVED', 'APPLY', 'REFUND', 'REVERSAL', 'UNAPPLY'))
+          `);
+
+          // ── 3. Extend projection constraint with UNAPPLY branch ─────────
+          // Find the existing projection check constraint and replace it.
+          const projChecks = await dpClient.query(
+            `SELECT c.conname, pg_get_constraintdef(c.oid) AS def
+               FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposit_events'
+                AND c.contype = 'c'
+                AND c.conname LIKE '%projection%'`
+          );
+          if ((projChecks.rowCount ?? 0) !== 1) {
+            throw new Error(
+              '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] PRE-FLIGHT FAILED: expected exactly one projection CHECK ' +
+              'constraint on deposit_events, found ' + (projChecks.rowCount ?? 0) + ' (' +
+              projChecks.rows.map((r: any) => r.conname).join(', ') + ').'
+            );
+          }
+          const projName = projChecks.rows[0].conname;
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              DROP CONSTRAINT ${projName}
+          `);
+          await dpClient.query(`
+            ALTER TABLE deposit_events
+              ADD CONSTRAINT ${projName} CHECK (
+                (event_type = 'RECEIVED' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'APPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'REFUND' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NULL)
+                OR (event_type = 'REVERSAL' AND payment_transaction_id IS NOT NULL AND folio_entry_id IS NULL AND reversal_of_event_id IS NOT NULL)
+                OR (event_type = 'UNAPPLY' AND payment_transaction_id IS NULL AND folio_entry_id IS NOT NULL AND reversal_of_event_id IS NOT NULL)
+              )
+          `);
+
+          // ── 4. Non-UNIQUE index for UNAPPLY target lookups ──────��──────
+          // Multiple partial UNAPPLY events may target the same APPLY event.
+          // Per-target uniqueness is service-layer enforced, not DB-level.
+          await dpClient.query(`
+            CREATE INDEX IF NOT EXISTS idx_deposit_events_unapply_target
+              ON deposit_events (reversal_of_event_id)
+              WHERE event_type = 'UNAPPLY'
+          `);
+
+          // ── 5. Index on deposits.purpose for classification queries ────
+          await dpClient.query(`
+            CREATE INDEX IF NOT EXISTS idx_deposits_purpose
+              ON deposits (property_id, purpose)
+          `);
+
+          // ── 6. Verify final state before committing marker ──────────────
+          const verifyPurpose = await dpClient.query(
+            `SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'deposits' AND column_name = 'purpose'`
+          );
+          if ((verifyPurpose.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: deposits.purpose missing');
+          }
+          const verifyEvType = await dpClient.query(
+            `SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'deposit_events' AND column_name = 'event_type'`
+          );
+          if ((verifyEvType.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: deposit_events.event_type missing');
+          }
+          const verifyUnapplyIdx = await dpClient.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_deposit_events_unapply_target'`
+          );
+          if ((verifyUnapplyIdx.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: idx_deposit_events_unapply_target missing');
+          }
+          const verifyPurposeIdx = await dpClient.query(
+            `SELECT 1 FROM pg_indexes WHERE indexname = 'idx_deposits_purpose'`
+          );
+          if ((verifyPurposeIdx.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: idx_deposits_purpose missing');
+          }
+          const verifyPurposeCheck = await dpClient.query(
+            `SELECT 1 FROM pg_constraint c
+               JOIN pg_class t ON t.oid = c.conrelid
+              WHERE t.relname = 'deposits'
+                AND c.contype = 'c'
+                AND c.conname = 'chk_deposits_purpose'`
+          );
+          if ((verifyPurposeCheck.rowCount ?? 0) === 0) {
+            throw new Error('[DEPOSIT PURPOSE/UNAPPLY MIGRATION] POST-VERIFY FAILED: chk_deposits_purpose missing');
+          }
+
+          // ── 7. Write marker ─────────────────────────────────────────────
+          await dpClient.query(`
+            INSERT INTO schema_migrations (version)
+            VALUES ('deposit_purpose_unapply_v1')
+            ON CONFLICT (version) DO NOTHING;
+          `);
+        }
+        await dpClient.query('COMMIT');
+      } catch (err: any) {
+        await dpClient.query('ROLLBACK').catch(() => {});
+        throw new Error(
+          '[DEPOSIT PURPOSE/UNAPPLY MIGRATION] ROLLED BACK: ' + (err?.message || String(err))
+        );
+      }
     }
 
     // 28. CHECKED-IN AUDITED ROOM MOVE LEDGER
@@ -5446,5 +6513,458 @@ export async function initializeDatabase(pool: Pool) {
     `);
   }
 
+  // Migration: complimentary_access_v1 — Atomic Complimentary Permission Foundation
+  const compAccessCheck = await pool.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_access_v1'`
+  );
+  if ((compAccessCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      INSERT INTO permissions (resource, action, key, description, is_system)
+      VALUES
+        ('reservations.complimentary', 'view', 'reservations.complimentary.view', 'Melihat reservasi yang mendapat perlakuan komplementer', TRUE),
+        ('reservations.complimentary', 'request', 'reservations.complimentary.request', 'Meminta perubahan harga reservasi menjadi komplementer', TRUE),
+        ('reservations.complimentary', 'approve', 'reservations.complimentary.approve', 'Menyetujui permintaan komplementer pada reservasi', TRUE),
+        ('reservations.complimentary', 'revoke', 'reservations.complimentary.revoke', 'Membatalkan persetujuan komplementer pada reservasi', TRUE)
+      ON CONFLICT (key) DO NOTHING;
+    `);
+    await pool.query(`
+      INSERT INTO schema_migrations (version)
+      VALUES ('complimentary_access_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
+  // Migration: complimentary_flow_v1 — Reservation Complimentary Workflow Foundation
+  const complimentaryFlowCheck = await pool.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_flow_v1'`
+  );
+  if ((complimentaryFlowCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS reservation_complimentary_requests (
+        id BIGSERIAL PRIMARY KEY,
+        property_id INTEGER NOT NULL REFERENCES properties(id),
+        reservation_id INTEGER NOT NULL REFERENCES reservations(id) ON DELETE CASCADE,
+        status VARCHAR(32) NOT NULL DEFAULT 'PENDING_APPROVAL',
+        category VARCHAR(50) NOT NULL,
+        reason TEXT NOT NULL,
+        original_gross_amount BIGINT NOT NULL DEFAULT 0,
+        pre_complimentary_payable_amount BIGINT NOT NULL DEFAULT 0,
+        applied_adjustment_amount BIGINT NOT NULL DEFAULT 0,
+        requestor_user_id VARCHAR(100),
+        requestor_name_snapshot VARCHAR(150),
+        requested_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        approver_user_id VARCHAR(100),
+        approver_name_snapshot VARCHAR(150),
+        approved_at TIMESTAMPTZ,
+        rejector_user_id VARCHAR(100),
+        rejector_name_snapshot VARCHAR(150),
+        rejected_at TIMESTAMPTZ,
+        rejection_reason TEXT,
+        revoker_user_id VARCHAR(100),
+        revoker_name_snapshot VARCHAR(150),
+        revoked_at TIMESTAMPTZ,
+        revoke_reason TEXT,
+        idempotency_key VARCHAR(100),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        CONSTRAINT chk_comp_req_status CHECK (status IN ('PENDING_APPROVAL', 'APPROVED', 'REJECTED', 'REVOKED')),
+        CONSTRAINT chk_comp_req_category CHECK (category IN ('OWNER_GUEST', 'VIP', 'SERVICE_RECOVERY', 'PROMOTION', 'STAFF', 'MANAGEMENT', 'OTHER')),
+        CONSTRAINT chk_comp_req_original_gross_amount CHECK (original_gross_amount >= 0),
+        CONSTRAINT chk_comp_req_pre_complimentary_payable_amount CHECK (pre_complimentary_payable_amount >= 0),
+        CONSTRAINT chk_comp_req_applied_adjustment_amount CHECK (applied_adjustment_amount >= 0)
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_comp_req_active
+        ON reservation_complimentary_requests (reservation_id)
+        WHERE status IN ('PENDING_APPROVAL', 'APPROVED');
+
+      CREATE INDEX IF NOT EXISTS idx_comp_req_property_status
+        ON reservation_complimentary_requests (property_id, status);
+
+      CREATE INDEX IF NOT EXISTS idx_comp_req_reservation
+        ON reservation_complimentary_requests (reservation_id);
+
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_comp_req_idempotency_key
+        ON reservation_complimentary_requests (idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+
+      INSERT INTO schema_migrations (version)
+      VALUES ('complimentary_flow_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
+  // Migration: complimentary_flow_runtime_privileges_v1 - Grant runtime privileges to oak_app
+  // Uses auditMigrationClient (same client as schema_migrations) for atomicity.
+  // Pre-conditions checked via SELECT before any DDL; marker only written after successful GRANT.
+  const runtimePrivsCheck = await auditMigrationClient.query(
+    `SELECT 1 FROM schema_migrations WHERE version = 'complimentary_flow_runtime_privileges_v1'`
+  );
+  if ((runtimePrivsCheck.rowCount ?? 0) === 0) {
+    // Check preconditions separately to avoid writing the marker when GRANT cannot be applied.
+    const roleCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM pg_roles WHERE rolname = 'oak_app'`
+    );
+    const tableCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'reservation_complimentary_requests'`
+    );
+    const seqCheck = await auditMigrationClient.query(
+      `SELECT 1 FROM information_schema.sequences WHERE sequence_schema = 'public' AND sequence_name = 'reservation_complimentary_requests_id_seq'`
+    );
+    if ((roleCheck.rowCount ?? 0) > 0 &&
+        (tableCheck.rowCount ?? 0) > 0 &&
+        (seqCheck.rowCount ?? 0) > 0) {
+      // Preconditions confirmed - run direct GRANT (no extra conditional).
+      await auditMigrationClient.query(
+        `GRANT SELECT, INSERT, UPDATE ON TABLE public.reservation_complimentary_requests TO oak_app`
+      );
+      await auditMigrationClient.query(
+        `GRANT USAGE ON SEQUENCE public.reservation_complimentary_requests_id_seq TO oak_app`
+      );
+      // Marker written only after successful GRANT.
+      await auditMigrationClient.query(`
+        INSERT INTO schema_migrations (version)
+        VALUES ('complimentary_flow_runtime_privileges_v1')
+        ON CONFLICT (version) DO NOTHING;
+      `);
+    }
+  }
+
+    // Migration: doc_1b_2b_documents_permission_rows_v1
+  await pool.query(`
+    INSERT INTO permissions (resource, action, key, description, is_system)
+    VALUES
+      ('documents', 'view',    'documents.view',    'Hak akses VIEW pada modul documents', TRUE),
+      ('documents', 'create',  'documents.create',  'Hak akses CREATE pada modul documents', TRUE),
+      ('documents', 'edit',    'documents.edit',    'Hak akses EDIT pada modul documents', TRUE),
+      ('documents', 'delete',  'documents.delete',  'Hak akses DELETE pada modul documents', TRUE)
+    ON CONFLICT (key) DO NOTHING;
+  `);
+  await pool.query(`
+    INSERT INTO schema_migrations (version)
+    VALUES ('doc_1b_2b_documents_permission_rows_v1')
+    ON CONFLICT (version) DO NOTHING;
+  `);
+
+  // Migration: doc_quotations_v1
+  const docQuotationsCheck = await pool.query(
+    "SELECT 1 FROM schema_migrations WHERE version = 'doc_quotations_v1'"
+  );
+  if ((docQuotationsCheck.rowCount ?? 0) === 0) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS quotations (
+        id BIGSERIAL PRIMARY KEY,
+        property_id INT NOT NULL REFERENCES properties(id),
+        quotation_number VARCHAR(50) NOT NULL,
+        customer_name VARCHAR(150) NOT NULL,
+        customer_email VARCHAR(150),
+        customer_phone VARCHAR(50),
+        customer_address TEXT,
+        check_in_date DATE,
+        check_out_date DATE,
+        status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+        total_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+        version INT NOT NULL DEFAULT 1,
+        notes TEXT,
+        terms_conditions TEXT,
+        created_by INT REFERENCES users(id),
+        updated_by INT REFERENCES users(id),
+        deleted_by INT REFERENCES users(id),
+        deleted_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT uq_quotations_property_number UNIQUE (property_id, quotation_number)
+      );
+
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_email VARCHAR(150);
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_phone VARCHAR(50);
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS customer_address TEXT;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS check_in_date DATE;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS check_out_date DATE;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS total_amount NUMERIC(15,2) NOT NULL DEFAULT 0;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS version INT NOT NULL DEFAULT 1;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS notes TEXT;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS terms_conditions TEXT;
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS created_by INT REFERENCES users(id);
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS updated_by INT REFERENCES users(id);
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS deleted_by INT REFERENCES users(id);
+      ALTER TABLE quotations ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ;
+
+      CREATE TABLE IF NOT EXISTS quotation_revisions (
+        id BIGSERIAL PRIMARY KEY,
+        quotation_id BIGINT NOT NULL REFERENCES quotations(id) ON DELETE CASCADE,
+        revision_number INT NOT NULL,
+        revision_label VARCHAR(10) NOT NULL,
+        snapshot JSONB NOT NULL,
+        change_summary TEXT,
+        created_by INT REFERENCES users(id),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT uq_quotation_revision UNIQUE (quotation_id, revision_number)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_quotations_property_status ON quotations (property_id, status);
+      CREATE INDEX IF NOT EXISTS idx_quotations_number ON quotations (quotation_number);
+      CREATE INDEX IF NOT EXISTS idx_quotations_customer ON quotations (customer_name);
+      CREATE INDEX IF NOT EXISTS idx_quotation_revisions_quotation ON quotation_revisions (quotation_id, revision_number DESC);
+
+      INSERT INTO permissions (resource, action, key, description, is_system)
+      VALUES 
+        ('documents', 'view',    'documents.view',    'Hak akses VIEW pada modul documents', TRUE),
+        ('documents', 'create',  'documents.create',  'Hak akses CREATE pada modul documents', TRUE),
+        ('documents', 'edit',    'documents.edit',    'Hak akses EDIT pada modul documents', TRUE),
+        ('documents', 'delete',  'documents.delete',  'Hak akses DELETE pada modul documents', TRUE)
+      ON CONFLICT (key) DO NOTHING;
+
+      INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+      SELECT r.id, p.id, TRUE, 'MIGRATION_DOC_QUOTATIONS'
+      FROM roles r
+      CROSS JOIN permissions p
+      WHERE r.id IN (1, 2, 5)
+        AND p.key IN ('documents.view', 'documents.create', 'documents.edit', 'documents.delete')
+      ON CONFLICT DO NOTHING;
+
+      INSERT INTO schema_migrations (version)
+      VALUES ('doc_quotations_v1')
+      ON CONFLICT (version) DO NOTHING;
+    `);
+  }
+
+  await ensureBookingCreateRequestsSchema(pool);
+  await ensureInventoryTahapAR1Schema(pool);
   console.log('Schema v3: idempotency, payment, folio, housekeeping, maintenance, POS catalog, accounting basics, guest CRM, HR, and check-in/out fields ensured');
+}
+
+
+export async function ensureBookingCreateRequestsSchema(pool: Pool): Promise<void> {
+  await pool.query(`
+    DO $$
+    BEGIN
+      IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'uq_bookings_id_property'
+      ) THEN
+        ALTER TABLE bookings
+          ADD CONSTRAINT uq_bookings_id_property UNIQUE (id, property_id);
+      END IF;
+    END $$;
+
+    CREATE TABLE IF NOT EXISTS booking_create_requests (
+      id            BIGSERIAL    PRIMARY KEY,
+      property_id   INTEGER      NOT NULL
+        REFERENCES properties(id) ON DELETE RESTRICT,
+      request_key   VARCHAR(200) NOT NULL
+        CHECK (request_key ~ '^[a-zA-Z0-9._-]+$' AND length(request_key) >= 1),
+      status        VARCHAR(20)  NOT NULL DEFAULT 'PENDING'
+        CHECK (status IN ('PENDING', 'FINAL')),
+      fingerprint   CHAR(64)     NOT NULL
+        CHECK (fingerprint ~ '^[a-f0-9]{64}$'),
+      fingerprint_version INTEGER NOT NULL DEFAULT 1
+        CHECK (fingerprint_version > 0),
+      payment_intent  JSONB      NULL,
+      booking_id      BIGINT     NULL
+        CHECK (booking_id IS NULL OR booking_id > 0),
+      result          JSONB      NULL
+        CHECK (
+          status = 'PENDING'
+          OR (
+            result IS NOT NULL
+            AND jsonb_typeof(result) = 'object'
+            AND NOT (result = 'null'::jsonb)
+          )
+        ),
+      response_status INTEGER    NULL
+        CHECK (
+          status = 'PENDING'
+          OR (response_status IS NOT NULL AND response_status >= 200 AND response_status <= 399)
+        ),
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finalized_at  TIMESTAMPTZ NULL
+        CHECK (status = 'PENDING' OR finalized_at IS NOT NULL),
+      CONSTRAINT chk_bcr_pending_clean CHECK (
+        status = 'FINAL'
+        OR (booking_id IS NULL AND result IS NULL AND finalized_at IS NULL)
+      ),
+      CONSTRAINT chk_bcr_final_complete CHECK (
+        status = 'PENDING'
+        OR (booking_id IS NOT NULL AND booking_id > 0)
+      ),
+      CONSTRAINT uq_bcr_property_key UNIQUE (property_id, request_key),
+      CONSTRAINT fk_bcr_booking_composite
+        FOREIGN KEY (booking_id, property_id)
+        REFERENCES bookings(id, property_id)
+        ON DELETE RESTRICT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bcr_prop_status
+      ON booking_create_requests (property_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_bcr_fp_lookup
+      ON booking_create_requests (fingerprint, fingerprint_version);
+  `);
+}
+
+
+export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version VARCHAR(255) PRIMARY KEY,
+      applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS canonical_base_unit_code VARCHAR(20) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_stock BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS track_inventory BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_raw_material BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS average_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS last_cost NUMERIC(14,2) NOT NULL DEFAULT 0;
+
+    DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_pos_menu_items_product_type'
+          AND pg_get_constraintdef(oid) NOT LIKE '%OPERATIONAL_ITEM%'
+      ) THEN
+        ALTER TABLE pos_menu_items DROP CONSTRAINT chk_pos_menu_items_product_type;
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_menu_items_product_type') THEN
+        ALTER TABLE pos_menu_items ADD CONSTRAINT chk_pos_menu_items_product_type
+          CHECK (product_type IS NULL OR product_type IN ('RAW_MATERIAL', 'SEMI_FINISHED', 'FINISHED_GOOD', 'OPERATIONAL_ITEM')) NOT VALID;
+      END IF;
+    END $$;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_inventory
+      ON pos_menu_items(property_id, track_inventory)
+      WHERE track_inventory = TRUE;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_property_track_stock
+      ON pos_menu_items(property_id, track_stock)
+      WHERE track_stock = TRUE;
+
+    CREATE OR REPLACE FUNCTION sync_pos_menu_items_track_stock_inventory()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF TG_OP = 'INSERT' THEN
+        IF NEW.track_inventory IS TRUE AND NEW.track_stock IS NOT TRUE THEN
+          NEW.track_stock := TRUE;
+        ELSIF NEW.track_stock IS TRUE AND NEW.track_inventory IS NOT TRUE THEN
+          NEW.track_inventory := TRUE;
+        END IF;
+      ELSIF TG_OP = 'UPDATE' THEN
+        IF NEW.track_inventory IS DISTINCT FROM OLD.track_inventory THEN
+          NEW.track_stock := NEW.track_inventory;
+        ELSIF NEW.track_stock IS DISTINCT FROM OLD.track_stock THEN
+          NEW.track_inventory := NEW.track_stock;
+        END IF;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    DROP TRIGGER IF EXISTS trg_sync_pos_menu_items_track_stock_inventory ON pos_menu_items;
+    CREATE TRIGGER trg_sync_pos_menu_items_track_stock_inventory
+      BEFORE INSERT OR UPDATE OF track_stock, track_inventory ON pos_menu_items
+      FOR EACH ROW
+      EXECUTE FUNCTION sync_pos_menu_items_track_stock_inventory();
+  `);
+
+  await runProductMasterMp03cMigration(pool);
+  await runProductInventoryMp04bB1Migration(pool);
+  await runProductInventoryMp04bB3Migration(pool);
+  await runPosProductRecipeMigration(pool);
+  await runPosPurchaseOrdersMigration(pool);
+  await runPosPurchaseReceiptDraftPostMigration(pool);
+  await runPosPurchaseReceiptDraftPostV2Migration(pool);
+  await runPosProcurementTahap1aV1Migration(pool);
+
+  await pool.query(`
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS location_id INTEGER REFERENCES stock_locations(id);
+    CREATE INDEX IF NOT EXISTS idx_pos_orders_location_id ON pos_orders(location_id);
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
+    ALTER TABLE stock_balances ADD COLUMN IF NOT EXISTS storage_sublocation VARCHAR(100) NULL;
+    ALTER TABLE pos_menu_categories ADD COLUMN IF NOT EXISTS product_type VARCHAR(30) NULL;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS variants JSONB NOT NULL DEFAULT '[]'::jsonb;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS is_deleted BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_menu_items ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ NULL;
+
+    UPDATE pos_menu_items
+       SET product_type = 'FINISHED_GOOD'
+     WHERE product_type IS NULL;
+
+    UPDATE pos_menu_categories pmc
+       SET product_type = sub.product_type
+      FROM (
+        SELECT category_id, MIN(product_type) AS product_type
+          FROM pos_menu_items
+         WHERE category_id IS NOT NULL AND product_type IS NOT NULL
+         GROUP BY category_id
+        HAVING COUNT(DISTINCT product_type) = 1
+      ) sub
+     WHERE pmc.id = sub.category_id
+       AND pmc.product_type IS NULL;
+
+    UPDATE pos_menu_categories
+       SET product_type = 'FINISHED_GOOD'
+     WHERE product_type IS NULL;
+
+    UPDATE pos_menu_items
+       SET track_stock = TRUE,
+           track_inventory = TRUE
+     WHERE (UPPER(BTRIM(COALESCE(item_code, ''))) LIKE 'BR.RK-%'
+            OR LOWER(BTRIM(COALESCE(storage_sublocation, ''))) = 'box rokok')
+       AND (COALESCE(track_stock, FALSE) = FALSE OR COALESCE(track_inventory, FALSE) = FALSE);
+
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pos_menu_categories_property_name') THEN
+        ALTER TABLE pos_menu_categories DROP CONSTRAINT uq_pos_menu_categories_property_name;
+      END IF;
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pos_menu_categories_property_id_name_key') THEN
+        ALTER TABLE pos_menu_categories DROP CONSTRAINT pos_menu_categories_property_id_name_key;
+      END IF;
+    END $$;
+
+    -- ═══ property_pos_pricing_settings (POS Service & Tax V1) ═══
+    CREATE TABLE IF NOT EXISTS property_pos_pricing_settings (
+      id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+      property_id INTEGER NOT NULL,
+      service_charge_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      service_charge_percent NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (service_charge_percent >= 0 AND service_charge_percent <= 100),
+      tax_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      tax_percent NUMERIC(5,2) NOT NULL DEFAULT 0.00
+        CHECK (tax_percent >= 0 AND tax_percent <= 100),
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_by VARCHAR(100) NULL,
+      CONSTRAINT fk_pos_pricing_settings_property
+        FOREIGN KEY (property_id) REFERENCES properties(id) ON DELETE RESTRICT,
+      CONSTRAINT uq_pos_pricing_settings_property UNIQUE (property_id)
+    );
+
+    -- Kolom snapshot per order (NOT NULL DEFAULT — order lama otomatis 0/false)
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_amount DECIMAL(12,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_amount DECIMAL(12,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_charge_percent_snapshot NUMERIC(5,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_percent_snapshot NUMERIC(5,2) NOT NULL DEFAULT 0;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS service_charge_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE;
+    ALTER TABLE pos_orders ADD COLUMN IF NOT EXISTS tax_enabled_snapshot BOOLEAN NOT NULL DEFAULT FALSE;
+
+    -- CHECK constraints (idempotent — hanya apply jika belum ada)
+    DO $$ BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_service_amount_nonneg') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_service_amount_nonneg CHECK (service_amount >= 0);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_tax_amount_nonneg') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_tax_amount_nonneg CHECK (tax_amount >= 0);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_service_percent_snapshot') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_service_percent_snapshot
+          CHECK (service_charge_percent_snapshot >= 0 AND service_charge_percent_snapshot <= 100);
+      END IF;
+      IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'chk_pos_orders_tax_percent_snapshot') THEN
+        ALTER TABLE pos_orders ADD CONSTRAINT chk_pos_orders_tax_percent_snapshot
+          CHECK (tax_percent_snapshot >= 0 AND tax_percent_snapshot <= 100);
+      END IF;
+    END $$;
+  `);
 }

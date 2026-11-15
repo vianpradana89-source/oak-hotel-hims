@@ -21,6 +21,8 @@ import {
   hasActiveGroupDeposit,
   hasActiveGroupCustody,
   selectActionableRoomDeposit,
+  selectUnapplyActionableRoomDeposit,
+  isUnapplyActionableRoomDeposit,
   selectActionableRoomCustody,
   summarizeDepositBalances,
   canShowCreateChooser,
@@ -183,6 +185,68 @@ check(selectActionableRoomDeposit([makeDep(63, 'ROOM_RESERVATION', 'CLOSED')]) =
 check(selectActionableRoomDeposit([makeDep(64, 'ROOM_RESERVATION', 'CANCELLED')]) === undefined,
   'T21: direct CANCELLED deposit => not actionable');
 
+// T21b: DEPOSIT-PURPOSE-PHASE-B UNAPPLY target — CLOSED deposit WITH applied > 0
+// is actionable for UNAPPLY, even though it is NOT actionable for Apply/Refund/Reverse.
+const closedDeposit = Object.assign(makeDep(641, 'ROOM_RESERVATION', 'CLOSED'), {
+  balance: { effective_received: 100000, applied: 40000, refunded: 60000, reversed_received: 0, remaining: 0, status: 'CLOSED' },
+});
+check(isUnapplyActionableRoomDeposit(closedDeposit) === true,
+  'T21b-1: CLOSED room deposit with applied>0 => UNAPPLY actionable');
+check(selectUnapplyActionableRoomDeposit([closedDeposit])?.id === 641,
+  'T21b-2: UNAPPLY selector picks the CLOSED deposit with applied>0');
+check(selectActionableRoomDeposit([closedDeposit]) === undefined,
+  'T21b-3: same CLOSED deposit remains NOT actionable for Apply/Refund/Reverse (no behavior change)');
+
+// T21c: fully-used ADVANCE_PAYMENT -> CLOSED, applied>0, remaining=0 (bug scenario)
+const fullyUsedDep = Object.assign(makeDep(642, 'ROOM_RESERVATION', 'CLOSED'), {
+  balance: { effective_received: 100000, applied: 100000, refunded: 0, reversed_received: 0, remaining: 0, status: 'CLOSED' },
+});
+check(isUnapplyActionableRoomDeposit(fullyUsedDep) === true,
+  'T21c-1: fully-used (CLOSED, applied>0, remaining=0) => UNAPPLY actionable');
+check(selectUnapplyActionableRoomDeposit([fullyUsedDep])?.id === 642,
+  'T21c-2: fully-used deposit selected for UNAPPLY');
+check(selectActionableRoomDeposit([fullyUsedDep]) === undefined,
+  'T21c-3: fully-used deposit NOT selectable for the active-state selector');
+
+// T21d: CANCELLED room deposit => UNAPPLY not actionable
+check(isUnapplyActionableRoomDeposit(makeDep(643, 'ROOM_RESERVATION', 'CANCELLED')) === false,
+  'T21d-1: CANCELLED room deposit => UNAPPLY not actionable');
+check(selectUnapplyActionableRoomDeposit([makeDep(643, 'ROOM_RESERVATION', 'CANCELLED')]) === undefined,
+  'T21d-2: CANCELLED room deposit => UNAPPLY selector returns undefined');
+
+// T21e: ROOM deposit with applied=0 => UNAPPLY not actionable (nothing to unapply)
+const zeroApplied = Object.assign(makeDep(644, 'ROOM_RESERVATION', 'RECEIVED'), {
+  balance: { effective_received: 100000, applied: 0, refunded: 0, reversed_received: 0, remaining: 100000, status: 'RECEIVED' },
+});
+check(isUnapplyActionableRoomDeposit(zeroApplied) === false,
+  'T21e-1: applied=0 => UNAPPLY not actionable');
+check(selectUnapplyActionableRoomDeposit([zeroApplied]) === undefined,
+  'T21e-2: applied=0 => UNAPPLY selector returns undefined');
+
+// T21f: BOOKING_GROUP with applied>0 => UNAPPLY not actionable (group stays read-only)
+const groupApplied = Object.assign(makeDep(645, 'BOOKING_GROUP', 'CLOSED'), {
+  balance: { effective_received: 100000, applied: 50000, refunded: 50000, reversed_received: 0, remaining: 0, status: 'CLOSED' },
+});
+check(isUnapplyActionableRoomDeposit(groupApplied) === false,
+  'T21f-1: BOOKING_GROUP applied>0 => UNAPPLY not actionable (group read-only)');
+check(selectUnapplyActionableRoomDeposit([groupApplied]) === undefined,
+  'T21f-2: BOOKING_GROUP only => UNAPPLY selector returns undefined');
+
+// T21g: mixed [BOOKING_GROUP applied, ROOM_RESERVATION CLOSED applied>0]
+// -> UNAPPLY selector picks the room deposit, never the group one.
+const mixedUnapply = [
+  groupApplied,
+  closedDeposit,
+];
+check(selectUnapplyActionableRoomDeposit(mixedUnapply)?.id === 641,
+  'T21g-1: mixed group+room => UNAPPLY selector picks the room deposit (id=641)');
+check(isUnapplyActionableRoomDeposit(selectUnapplyActionableRoomDeposit(mixedUnapply)!) === true,
+  'T21g-2: selected UNAPPLY target is a non-group room deposit');
+
+// T21h: empty deposits => UNAPPLY not actionable
+check(selectUnapplyActionableRoomDeposit([]) === undefined,
+  'T21h: empty deposits => UNAPPLY selector returns undefined');
+
 // T22: mixed [GROUP, ROOM active] => ROOM selected (order-independent)
 check(selectActionableRoomDeposit([makeDep(65, 'BOOKING_GROUP', 'RECEIVED'), makeDep(66, 'ROOM_RESERVATION', 'RECEIVED')])?.scope === 'ROOM_RESERVATION',
   'T22a: mixed [GROUP, ROOM] => ROOM selected');
@@ -260,6 +324,8 @@ const depositApi = readSrc('src/features/deposits/depositApi.ts');
 
 check(policySrc.includes('export function getGuaranteeScope'), 'Guard: policy exports getGuaranteeScope');
 check(policySrc.includes('export function selectActionableRoomDeposit'), 'Guard: policy exports selectActionableRoomDeposit');
+check(policySrc.includes('export function selectUnapplyActionableRoomDeposit'), 'Guard: policy exports selectUnapplyActionableRoomDeposit');
+check(policySrc.includes('export function isUnapplyActionableRoomDeposit'), 'Guard: policy exports isUnapplyActionableRoomDeposit');
 check(policySrc.includes('export function hasActiveGroupDeposit'), 'Guard: policy exports hasActiveGroupDeposit');
 check(policySrc.includes('export function hasActiveGroupCustody'), 'Guard: policy exports hasActiveGroupCustody');
 check(policySrc.includes('export function canShowCreateChooser'), 'Guard: policy exports canShowCreateChooser');
@@ -273,6 +339,12 @@ check(guaranteeSection.includes("from './guaranteeScopePolicy'"),
   'Guard: DepositGuaranteeSection imports from guaranteeScopePolicy');
 check(guaranteeSection.includes('selectActionableRoomDeposit'),
   'Guard: component uses selectActionableRoomDeposit');
+check(guaranteeSection.includes('selectUnapplyActionableRoomDeposit'),
+  'Guard: component uses selectUnapplyActionableRoomDeposit');
+check(guaranteeSection.includes('const unapplyActionableRoomDeposit = selectUnapplyActionableRoomDeposit(deposits);'),
+  'Guard: component computes unapplyActionableRoomDeposit from the dedicated selector');
+check(guaranteeSection.includes('deposit={unapplyActionableRoomDeposit}'),
+  'Guard: UnapplyDepositModal receives unapplyActionableRoomDeposit (not actionableRoomDeposit)');
 check(guaranteeSection.includes('canShowCreateChooser'),
   'Guard: component uses canShowCreateChooser');
 check(guaranteeSection.includes('canCreateGroupDeposit'),

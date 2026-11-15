@@ -6,6 +6,9 @@ import {
   CANONICAL_CHECKIN_REQUIREMENT_LABELS,
   getMissingRequirementLabel,
   evaluatePrecheckinReadiness,
+  buildCheckinReadinessRows,
+  resolveAuthoritativeReservationFinancials,
+  isChecklistRequirementActionable,
 } from '../src/features/calendar/precheckinGateUi.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -251,5 +254,386 @@ check(
   depositSrc.includes('isOpen={showHoldId}'),
   'HoldIdentityForm is rendered for both compact and full modes'
 );
+
+// --------------------------------------------------------------------------
+// 5. CHECKLIST ROW DERIVATION — no silent drop of backend missing codes
+// --------------------------------------------------------------------------
+console.log('--- 5. Checklist Rows: Unknown & PRECHECKIN_EVALUATION_CODES Surfaced ---');
+
+// A) PRECHECKIN_EVALUATION_FAILED must appear as a row even though it is
+//    not in the known-codes set.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [{ code: 'PRECHECKIN_EVALUATION_FAILED', label: 'Kesiapan check-in belum dapat diverifikasi' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const failedRow = rows.find(r => r.code === 'PRECHECKIN_EVALUATION_FAILED');
+  check(failedRow !== undefined, 'PRECHECKIN_EVALUATION_FAILED is present in checklist rows');
+  check(failedRow!.isMet === false, 'PRECHECKIN_EVALUATION_FAILED is not-met');
+  check(failedRow!.hasKnownAction === false, 'PRECHECKIN_EVALUATION_FAILED has no actionable handler');
+}
+
+// B) Unknown future code must not be silently dropped.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [
+      { code: 'PRECHECKIN_EVALUATION_FAILED' },
+      { code: 'FUTURE_UNKNOWN_REQUIREMENT_CODE', label: 'Kode baru dari backend' },
+    ],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  check(
+    rows.some(r => r.code === 'FUTURE_UNKNOWN_REQUIREMENT_CODE'),
+    'Unknown future requirement code is surfaced in checklist rows'
+  );
+  const unknownRow = rows.find(r => r.code === 'FUTURE_UNKNOWN_REQUIREMENT_CODE');
+  check(unknownRow!.isMet === false, 'Unknown future code is marked not-met');
+  check(unknownRow!.hasKnownAction === false, 'Unknown future code has no actionable handler');
+  check(
+    unknownRow!.label === 'Kode baru dari backend',
+    'Unknown future code uses backend-provided label when available'
+  );
+}
+
+// C) Known actionable requirement with a handler still gets hasKnownAction = true.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: true,
+    guest_phone_ok: false,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [{ code: 'PRIMARY_GUEST_PHONE_MISSING' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const phoneRow = rows.find(r => r.code === 'PRIMARY_GUEST_PHONE_MISSING');
+  check(phoneRow!.isMet === false, 'Known missing requirement is not-met');
+  check(phoneRow!.hasKnownAction === true, 'Known requirement with a UI handler has hasKnownAction = true');
+}
+
+// D) Known requirement that is satisfied does NOT appear in missing and
+//    still shows as a met row (progress display).
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: false,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [{ code: 'PAYMENT_MISSING' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const metNameRow = rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING');
+  check(metNameRow!.isMet === true, 'Satisfied known requirement is marked met');
+  check(metNameRow!.hasKnownAction === true, 'Satisfied known requirement PRIMARY_GUEST_NAME_MISSING still has a known action');
+  const missingPaymentRow = rows.find(r => r.code === 'PAYMENT_MISSING');
+  check(missingPaymentRow!.isMet === false, 'Missing known requirement is marked not-met');
+  check(missingPaymentRow!.hasKnownAction === true, 'Missing known requirement keeps action available');
+}
+
+// E) When eligible === true, all rows are met regardless of missing codes in array
+//    (the backend clearing the array is the actual contract; this tests isAllMet override).
+{
+  const eligibility = {
+    eligible: true,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  check(rows.every(r => r.isMet === true), 'All rows are met when eligible === true');
+  check(rows.length === 7, 'Exactly 7 known-code rows when no extra backend missing codes');
+}
+
+// F) Duplicate codes in missing array do not create duplicate rows.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: false,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [
+      { code: 'PRIMARY_GUEST_NAME_MISSING' },
+      { code: 'PRIMARY_GUEST_NAME_MISSING' },
+    ],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const nameRows = rows.filter(r => r.code === 'PRIMARY_GUEST_NAME_MISSING');
+  check(nameRows.length === 1, 'Duplicate missing codes are de-duplicated into a single row');
+}
+
+// G) FAIL-CLOSED: eligible=true but code still present in missingRequirements
+//    => isMet must be false (missing array always wins).
+{
+  const eligibility = {
+    eligible: true,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: false,   // flag says not-ok, and code is in missing
+    room_ready_ok: true,
+    missing: [{ code: 'GUARANTEE_MISSING' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const guaranteeRow = rows.find(r => r.code === 'GUARANTEE_MISSING');
+  check(
+    guaranteeRow!.isMet === false,
+    'FAIL-CLOSED: eligible=true + code in missingRequirements => isMet is false'
+  );
+  // All other non-missing known codes: eligible=true => met
+  const nameRow = rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING');
+  check(
+    nameRow!.isMet === true,
+    'eligible=true + not in missing => isMet is true'
+  );
+}
+
+// H) eligible=true + no missing codes => all rows met.
+{
+  const eligibility = {
+    eligible: true,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  check(
+    rows.every(r => r.isMet === true),
+    'eligible=true + missing empty => all rows met'
+  );
+  check(rows.length === 7, 'exactly 7 known-code rows when no extra backend missing codes');
+}
+
+// I) MET label: satisfied known requirement shows positive label.
+{
+  const eligibility = {
+    eligible: true,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  check(
+    rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING')!.label === 'Nama tamu lengkap',
+    'met known requirement uses positive MET label for name'
+  );
+  check(
+    rows.find(r => r.code === 'PRIMARY_GUEST_PHONE_MISSING')!.label === 'No. telepon tersedia',
+    'met known requirement uses positive MET label for phone'
+  );
+  check(
+    rows.find(r => r.code === 'IDENTITY_DOCUMENT_MISSING')!.label === 'Dokumen identitas tersedia',
+    'met known requirement uses positive MET label for identity'
+  );
+  check(
+    rows.find(r => r.code === 'PAYMENT_MISSING')!.label === 'Pembayaran tercatat',
+    'met known requirement uses positive MET label for payment'
+  );
+  check(
+    rows.find(r => r.code === 'PAYMENT_EVIDENCE_MISSING')!.label === 'Bukti pembayaran tersedia',
+    'met known requirement uses positive MET label for evidence'
+  );
+  check(
+    rows.find(r => r.code === 'GUARANTEE_MISSING')!.label === 'Jaminan tersedia',
+    'met known requirement uses positive MET label for guarantee'
+  );
+  check(
+    rows.find(r => r.code === 'ROOM_NOT_READY')!.label === 'Kamar siap',
+    'met known requirement uses positive MET label for room'
+  );
+}
+
+// J) MISSING label: unsatisfied known requirement keeps negative canonical label.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: false,
+    guest_phone_ok: false,
+    identity_ok: false,
+    payment_ok: false,
+    payment_evidence_ok: false,
+    guarantee_ok: false,
+    room_ready_ok: false,
+    missing: [
+      { code: 'PRIMARY_GUEST_NAME_MISSING' },
+      { code: 'GUARANTEE_MISSING' },
+    ],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  check(
+    rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING')!.label === 'Nama tamu menginap belum lengkap',
+    'missing known requirement keeps negative canonical label (name)'
+  );
+  check(
+    rows.find(r => r.code === 'GUARANTEE_MISSING')!.label === 'Jaminan belum ditambahkan',
+    'missing known requirement keeps negative canonical label (guarantee)'
+  );
+}
+
+// K) UNKNOWN missing code: backend-provided label is preserved.
+{
+  const eligibility = {
+    eligible: false,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: true,
+    room_ready_ok: true,
+    missing: [{ code: 'FUTURE_CODE_X', label: 'Kode masa depan dari backend' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const unknownRow = rows.find(r => r.code === 'FUTURE_CODE_X');
+  check(unknownRow !== undefined, 'unknown future code still appears in rows');
+  check(
+    unknownRow!.label === 'Kode masa depan dari backend',
+    'unknown missing requirement preserves backend-provided label'
+  );
+}
+
+// L) FAIL-CLOSED regression check: eligible=true + missing still present → isMet=false.
+//    (Previously tested in G, kept here as a concise regression marker.)
+{
+  const eligibility = {
+    eligible: true,
+    guest_name_ok: true,
+    guest_phone_ok: true,
+    identity_ok: true,
+    payment_ok: true,
+    payment_evidence_ok: true,
+    guarantee_ok: false,
+    room_ready_ok: true,
+    missing: [{ code: 'GUARANTEE_MISSING' }],
+  };
+  const rows = buildCheckinReadinessRows(eligibility, eligibility.missing!);
+  const guaranteeRow = rows.find(r => r.code === 'GUARANTEE_MISSING')!;
+  check(guaranteeRow.isMet === false, 'FAIL-CLOSED regression: eligible=true + missing => isMet=false');
+  // met rows use positive label
+  const nameRow = rows.find(r => r.code === 'PRIMARY_GUEST_NAME_MISSING')!;
+  check(nameRow.isMet === true, 'non-missing row with eligible=true => isMet=true');
+  check(nameRow.label === 'Nama tamu lengkap', 'non-missing row with eligible=true uses positive MET label');
+}
+
+// --------------------------------------------------------------------------
+// 6. AUTHORITATIVE FINANCIALS & DECOUPLED PAYMENT EVIDENCE ACTIONABILITY (#1503)
+// --------------------------------------------------------------------------
+console.log('--- 6. Authoritative Financials & Decoupled Payment Evidence Action (#1503) ---');
+{
+  // Full payment (balance 0) without evidence: canShowPaymentForm=false, canManagePaymentEvidence=true
+  const fullPaidNoEvidence = resolveAuthoritativeReservationFinancials(
+    {
+      id: 150301,
+      status: 'BOOKED',
+      property_id: 1,
+      total_price: '500000.00',
+      amount_paid: '500000.00',
+      remaining_balance: '0.00',
+      payment_status: 'PAID',
+    },
+    {
+      authoritative_financials: {
+        total_price: 500000,
+        amount_paid: 500000,
+        applied_deposit: 0,
+        remaining_balance: 0,
+        payment_status: 'PAID',
+        payment_responsibility: 'HOTEL_COLLECT',
+      },
+    }
+  );
+  check(fullPaidNoEvidence.remainingBalance === 0, 'Full paid has remainingBalance = 0');
+  check(fullPaidNoEvidence.canShowPaymentForm === false, 'Full paid hides new payment form');
+  check(fullPaidNoEvidence.canManagePaymentEvidence === true, 'Full paid keeps evidence upload available');
+  check(
+    isChecklistRequirementActionable('PAYMENT_EVIDENCE_MISSING', {
+      canShowPaymentForm: fullPaidNoEvidence.canShowPaymentForm,
+      canManagePaymentEvidence: fullPaidNoEvidence.canManagePaymentEvidence,
+      hasGuaranteeSection: true,
+      canEditGuestData: true,
+    }) === true,
+    'PAYMENT_EVIDENCE_MISSING remains actionable even when canShowPaymentForm is false (balance = 0)'
+  );
+
+  // #1503 exact case: raw reservation row had stale 638,000 / 0 / PAID, while authoritative_financials has 699,000 / 638,000 / 61,000 / PARTIAL
+  const case1503 = resolveAuthoritativeReservationFinancials(
+    {
+      id: 1503,
+      status: 'BOOKED',
+      property_id: 1,
+      total_price: '638000.00',
+      amount_paid: '638000.00',
+      remaining_balance: '0.00',
+      payment_status: 'PAID',
+    },
+    {
+      authoritative_financials: {
+        total_price: 699000,
+        amount_paid: 638000,
+        applied_deposit: 0,
+        remaining_balance: 61000,
+        payment_status: 'PARTIAL',
+        payment_responsibility: 'HOTEL_COLLECT',
+      },
+    }
+  );
+  check(case1503.totalPrice === 699000, '#1503 uses authoritative totalPrice = 699,000 instead of stale 638,000');
+  check(case1503.amountPaid === 638000, '#1503 uses authoritative amountPaid = 638,000');
+  check(case1503.remainingBalance === 61000, '#1503 uses authoritative remainingBalance = 61,000 instead of stale 0');
+  check(case1503.paymentStatus === 'PARTIAL', '#1503 uses authoritative paymentStatus = PARTIAL instead of stale PAID');
+  check(case1503.canShowPaymentForm === true, '#1503 enables canShowPaymentForm so FO can pay remaining Rp 61,000');
+  check(
+    isChecklistRequirementActionable('PAYMENT_MISSING', {
+      canShowPaymentForm: case1503.canShowPaymentForm,
+      canManagePaymentEvidence: case1503.canManagePaymentEvidence,
+      hasGuaranteeSection: true,
+      canEditGuestData: true,
+    }) === true,
+    '#1503 enables PAYMENT_MISSING "Catat Pembayaran" button'
+  );
+}
 
 console.log(`\nAll ${assertions} test assertions passed successfully!`);

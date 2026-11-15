@@ -37,6 +37,7 @@ export interface Guest {
   identity_number?: string | null;
   identity_path?: string | null;
   has_valid_identity?: boolean | null;
+  identity_storage_key?: string | null;
   rt_rw?: string | null;
   village_kelurahan?: string | null;
   district_kecamatan?: string | null;
@@ -48,6 +49,7 @@ export interface Guest {
   ktp_ocr_confidence?: number | null;
   ktp_ocr_provider?: string | null;
   ktp_extracted_at?: string | null;
+  ktp_regency_id?: number | null;
   notes?: string | null;
   is_archived?: boolean;
   is_active?: boolean;
@@ -147,7 +149,7 @@ export interface DuplicateCandidateCluster {
   guests: Guest[];
 }
 
-export type GuestCrmTab = 'summary' | 'database';
+export type GuestCrmTab = 'summary' | 'database' | 'communication';
 
 export interface GuestFilterState {
   search: string;

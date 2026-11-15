@@ -63,8 +63,21 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/attendance\/(check-in|check-out)$/, resources: ['Employee Mobile'], action: 'view' },
   { pattern: /^\/api\/attendance/, resources: ['Employee Mobile'] },
 
+  { pattern: /^\/api\/pos\/menu\/categories(\/|$)/, resources: ['Master Produk'] },
+  { pattern: /^\/api\/pos\/menu\/items\/[^/]+\/photo$/, resources: ['POS', 'Master Produk'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/menu\/items\/[^/]+\/photo$/, resources: ['Master Produk'], action: 'edit', methods: ['POST', 'DELETE'] },
+  { pattern: /^\/api\/pos\/menu\/items\/[^/]+\/packagings(\/|$)/, resources: ['Master Produk', 'Transaksi', 'POS'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/products\/[^/]+\/packagings(\/|$)/, resources: ['Master Produk', 'Transaksi', 'POS'], action: 'view', methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/pos\/menu\/items/, resources: ['Master Produk'] },
-  { pattern: /^\/api\/pos\/menu(\/|$)/, resources: ['POS', 'Master Produk'] },
+  { pattern: /^\/api\/pos\/stock-locations(\/|$)/, resources: ['Master Produk', 'Transaksi', 'POS'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/stock-locations(\/|$)/, resources: ['Master Produk'] },
+  { pattern: /^\/api\/pos\/(purchase-orders|goods-receipts|suppliers)(\/|$)/, resources: ['Transaksi', 'Master Produk', 'POS'] },
+  { pattern: /^\/api\/pos\/(inventory|stock|reports|uoms|raw-materials|recipes|stock-movements|stock-balances|stock-adjustments|stock-opname|stock-transfers|stock-opening-balance|products|food-cost|units)(\/|$)/, resources: ['Master Produk', 'POS', 'Transaksi', 'Laporan'] },
+  { pattern: /^\/api\/pos\/menu(\/|$)/, resources: ['POS', 'Master Produk', 'Transaksi'] },
+  { pattern: /^\/api\/pos\/communication-settings$/, resources: ['POS', 'Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/communication-settings$/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
+  { pattern: /^\/api\/pos\/pricing-settings$/, resources: ['POS', 'Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/pos\/pricing-settings$/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/pos/, resources: ['POS'] },
 
   { pattern: /^\/api\/rooms\/[^/]+\/status$/, resources: ['Kalender', 'Housekeeping', 'Master Kamar'] },
@@ -78,14 +91,23 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/stay-charges\/rules/, resources: ['Master Kamar'] },
   { pattern: /^\/api\/stay-charges\/(post-charge|void-entry|correct-entry)/, resources: ['Transaksi'] },
 
-  { pattern: /^\/api\/reports\/daily-kpis(\/drilldown)?$/, resources: ['Kalender', 'Laporan'], methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/reports\/daily-kpis(\/(drilldown|history))?$/, resources: ['Kalender', 'Laporan'], methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/reports/, resources: ['Laporan'] },
   { pattern: /^\/api\/accounting/, resources: ['Laporan'] },
 
   { pattern: /^\/api\/access-control/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/settings\/purchases\/categories\/[^/]+\/(activate|deactivate)$/, resources: ['Pengaturan'], action: 'edit' },
+  { pattern: /^\/api\/settings\/property\/payment-instructions\/qris-image$/, resources: ['Pengaturan'], action: 'edit', methods: ['POST', 'DELETE'] },
+  { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/settings\/property\/payment-instructions/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
+  { pattern: /^\/api\/settings\/property\/registration-form\/terms/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/settings\/property\/registration-form\/terms/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/settings/, resources: ['Pengaturan'] },
   { pattern: /^\/api\/front-office/, resources: ['Pengaturan'] },
+  { pattern: /^\/api\/properties\/[^/]+\/payment-instructions/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/properties\/[^/]+\/payment-instructions/, resources: ['Pengaturan'], action: 'edit', methods: ['POST', 'PUT', 'PATCH', 'DELETE'] },
+  { pattern: /^\/api\/properties\/[^/]+\/registration-form\/terms/, resources: ['Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
+  { pattern: /^\/api\/properties\/[^/]+\/registration-form\/terms/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/properties\/[^/]+\/(branding|features|quick-booking-rules|day-use)/, resources: ['Pengaturan'], methods: ['POST', 'PUT', 'PATCH', 'DELETE'] },
 
   { pattern: /^\/api\/reservations/, resources: ['Kalender'] },
@@ -96,6 +118,8 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/identity/, resources: ['Kalender'] },
   { pattern: /^\/api\/ocr/, resources: ['Kalender'] },
   { pattern: /^\/api\/maintenance/, resources: ['Kalender'] },
+
+  { pattern: /^\/api\/documents(\/|$)/, resources: ['Dokumen & Print'] },
 ];
 
 const SKIP_PATTERNS = [

@@ -6,6 +6,7 @@ export type OperationalSheet = 'PROSES' | 'SELESAI' | 'BATAL' | 'HAPUS';
 
 /** Canonical Purchase operational workflow (PURCHASE-2A1). BATAL is not stored here. */
 export type PurchaseWorkflowStatus = 'PROSES' | 'SELESAI';
+export type PurchaseApprovalStatus = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
 
 /** Canonical Expense operational workflow (EXPENSE-1B). BATAL is not stored here. */
 export type ExpenseWorkflowStatus = 'PROSES' | 'SELESAI';
@@ -59,7 +60,7 @@ export function isReportingEligible(sheet: OperationalSheet): boolean {
 
 export type VerificationStatus = 'UNVERIFIED' | 'VERIFIED' | 'REJECTED';
 
-export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA';
+export type ReceivingStatus = 'BELUM_DITERIMA' | 'DITERIMA_SEBAGIAN' | 'DITERIMA' | 'DITERIMA_LENGKAP';
 
 export type AttachmentPurpose = 'RECEIPT' | 'PAYMENT_PROOF' | 'INVOICE' | 'OTHER';
 
@@ -94,7 +95,11 @@ export interface TransactionLine {
   id: string; // BIGINT as string
   property_id: number;
   transaction_id: string;
+  po_item_id?: string | number | null;
   product_id?: string | number | null;
+  packaging_id?: string | number | null;
+  line_type?: 'STOCK' | 'NON_STOCK' | string | null;
+  received_quantity?: number | string | null;
   description_snapshot: string;
   quantity: number | string; // NUMERIC(12,3)
   unit: string;
@@ -107,6 +112,9 @@ export interface TransactionLine {
 
 export interface TransactionLineInput {
   product_id?: number | string | null;
+  po_item_id?: number | string | null;
+  packaging_id?: number | string | null;
+  line_type?: 'STOCK' | 'NON_STOCK' | string | null;
   description?: string;
   description_snapshot?: string;
   quantity: number;
@@ -176,6 +184,15 @@ export interface TransactionRow {
   reservation_id: number | null;
   booking_id: string | null;
   stay_type?: string | null;
+  po_id?: string | number | null;
+  po_number?: string | null;
+  is_legacy_without_po?: boolean;
+  has_po_variance?: boolean;
+  po_variance_summary?: Record<string, any> | null;
+  archived_at?: string | null;
+  archived_by_user_id?: string | null;
+  archived_by_name_snapshot?: string | null;
+  archive_reason?: string | null;
   supplier_id?: string | number | null;
   supplier_name?: string | null;
   supplier_phone?: string | null;
@@ -186,6 +203,12 @@ export interface TransactionRow {
   receiving_status?: ReceivingStatus | null;
   received_at?: string | null;
   purchase_workflow_status?: PurchaseWorkflowStatus | null;
+  approval_status?: PurchaseApprovalStatus | null;
+  approved_by_user_id?: string | null;
+  approved_by_name_snapshot?: string | null;
+  approved_at?: string | null;
+  rejection_reason?: string | null;
+  source_revision?: number | null;
   /** EXPENSE-1B: recipient bank snapshot (manual per-transaction, independent of Supplier Master) */
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;
@@ -295,6 +318,7 @@ export interface CreatePurchaseTransactionDto {
   supplier_bank_account?: string | null;
   supplier_address?: string | null;
   source_reference?: string | null; // e.g. No. Nota / Faktur
+  po_id?: number | string | null;
   receiving_status?: ReceivingStatus;
   received_at?: string | null;
   department_code?: string;
@@ -313,6 +337,50 @@ export interface CreatePurchaseTransactionDto {
   purchase_workflow_status?: PurchaseWorkflowStatus | null;
   /** PURCHASE-2A1/2A2: explicit initial verification (defaults UNVERIFIED). */
   verification_status?: VerificationStatus | null;
+  notes?: string | null;
+  actor_name?: string | null;
+  actor_user_id?: string | null;
+}
+
+export interface UpdatePurchaseLineInput {
+  id?: number | string | null; // Stable line identity if existing
+  po_item_id?: number | string | null;
+  product_id?: number | string | null;
+  packaging_id?: number | string | null;
+  line_type?: 'STOCK' | 'NON_STOCK' | string | null;
+  description?: string;
+  description_snapshot?: string;
+  quantity: number | string;
+  unit?: string;
+  unit_price: number | string; // Integer IDR
+  discount_amount?: number | string; // Integer IDR
+}
+
+/** DTO for updating an existing Purchase transaction (PROSES only) */
+export interface UpdatePurchaseTransactionDto {
+  property_id: number;
+  po_id?: number | string | null;
+  transaction_date?: string;
+  category_code?: string;
+  category_name?: string;
+  department_code?: string;
+  purchase_category_id?: number | string | null;
+  department_id?: number | string | null;
+  supplier_id?: number | string | null;
+  supplier_name?: string | null;
+  supplier_phone?: string | null;
+  supplier_bank_name?: string | null;
+  supplier_bank_account?: string | null;
+  supplier_address?: string | null;
+  source_reference?: string | null;
+  description?: string | null;
+  lines?: UpdatePurchaseLineInput[];
+  discount_amount?: number;
+  transaction_discount?: number;
+  rounding_amount?: number;
+  payment_method?: string | null;
+  receiving_status?: ReceivingStatus | null;
+  received_at?: string | null;
   notes?: string | null;
   actor_name?: string | null;
   actor_user_id?: string | null;
@@ -451,6 +519,17 @@ export interface TransactionFilterParams {
   supplier_id?: number;
   limit?: number;
   offset?: number;
+  /**
+   * Ketika true, statistik POS (pos_order_count, pos_open_count)
+   * diikutkan pada booking_bid_group.children. Ditetapkan oleh router
+   * dari permission pos.view. Default: false — field tidak ada.
+   */
+  includePosStats?: boolean;
+  /**
+   * Ketika true (atau saat operational_sheet === 'PIUTANG'), sheet_counts.piutang
+   * dihitung dan disertakan pada respons.
+   */
+  includePiutangCount?: boolean;
 }
 
 export interface TransactionSummary {
@@ -466,6 +545,7 @@ export interface TransactionSummary {
 
 export interface TransactionSheetCounts {
   proses: number;
+  piutang?: number;
   selesai: number;
   batal: number;
   hapus?: number;
@@ -481,7 +561,10 @@ export interface TransactionListFetchStats {
 export interface TransactionQueryResult {
   transactions: TransactionRow[];
   total_count: number;
+  /** Per-tab summary — follows active domain/tab. Kept for existing test contracts. */
   summary: TransactionSummary;
+  /** Global period summary — independent of activeTab/operational_sheet. For dashboard cards. */
+  global_summary: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;
@@ -513,7 +596,7 @@ export interface SoftDeleteTransactionDto {
 }
 
 /** PURCHASE-2A2: canonical purchase lifecycle action enum. */
-export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW';
+export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL' | 'ARCHIVE' | 'UNARCHIVE';
 
 /** EXPENSE-1C: canonical expense lifecycle action enum. */
 export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
@@ -521,6 +604,8 @@ export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
 export interface PurchaseLifecycleDto {
   property_id: number;
   action: PurchaseLifecycleAction;
+  /** Approval action only (Inventori 01). */
+  approval_status?: PurchaseApprovalStatus | null;
   /** Receiving action only. */
   receiving_status?: ReceivingStatus | null;
   /** Receiving action optional override for received_at. */
@@ -546,6 +631,11 @@ export interface PurchaseLifecycleAuditPayload {
     verified_by_user_id: string | null;
     verified_by_name_snapshot: string | null;
     verified_at: string | null;
+    approval_status?: string | null;
+    approved_by_user_id?: string | null;
+    approved_by_name_snapshot?: string | null;
+    approved_at?: string | null;
+    rejection_reason?: string | null;
   };
   next: {
     receiving_status: string | null;
@@ -554,6 +644,11 @@ export interface PurchaseLifecycleAuditPayload {
     verified_by_user_id: string | null;
     verified_by_name_snapshot: string | null;
     verified_at: string | null;
+    approval_status?: string | null;
+    approved_by_user_id?: string | null;
+    approved_by_name_snapshot?: string | null;
+    approved_at?: string | null;
+    rejection_reason?: string | null;
   };
   auto_rules: {
     verified_forced_workflow_complete: boolean;

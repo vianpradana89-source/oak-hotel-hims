@@ -24,6 +24,8 @@ export interface BookingSalesHeader {
   booker_name: string | null;
   booking_source: string | null;
   booking_channel: string | null;
+  ota_source_id: number | null;
+  ota_source_name: string | null;
   booking_status: string | null;
   check_in: string | null;
   check_out: string | null;
@@ -61,11 +63,16 @@ export interface BookingSalesChildRow {
   reservation_status: string | null;
   operational_sheet: OperationalSheet;
   payment_status: PenjualanPaymentStatus;
+  /** 'HOTEL_COLLECT' | 'OTA_COLLECT' — which party bears the room-charge settlement */
+  payment_responsibility: string;
   gross: number;
   discount: number;
   net: number;
   paid: number;
   remaining: number;
+  primary_transaction_id?: number | string | null;
+  unapplied_advance_deposit?: number;
+  active_advance_deposit_id?: number | null;
 }
 
 export interface BookingSalesPaymentRow {
@@ -99,6 +106,8 @@ export interface BookingSalesDetailBookingInput {
   booking_source?: string | null;
   channel?: string | null;
   booking_channel?: string | null;
+  ota_source_id?: number | string | null;
+  ota_source_name?: string | null;
   booking_status?: string | null;
 }
 
@@ -116,6 +125,8 @@ export interface BookingSalesDetailReservationInput {
   stay_status?: string | null;
   amount_paid?: unknown;
   remaining_balance?: unknown;
+  unapplied_advance_deposit?: unknown;
+  active_advance_deposit_id?: unknown;
 }
 
 export interface BookingSalesDetailSaleInput {
@@ -141,15 +152,26 @@ export interface BookingSalesDetailSaleInput {
 
 export interface BookingSalesDetailPaymentInput {
   id: number | string;
+  transaction_type?: string | null;
   reservation_id?: number | string | null;
   transaction_id?: number | string | null;
   payment_method?: string | null;
   amount?: unknown;
+  effective_amount?: unknown;
   status?: string | null;
   created_at?: string | null;
   reference_code?: string | null;
   evidence_filename?: string | null;
   evidence_storage_key?: string | null;
+  scope?: string | null;
+  booking_id?: number | string | null;
+  // Fields from UNION ALL query (service layer)
+  payment_id?: number | string | null;
+  pa_reservation_id?: number | string | null;
+  allocated_amount?: unknown;
+  parent_amount?: unknown;
+  payment_status?: string | null;
+  allocation_status?: string | null;
 }
 
 function hotelDate(value: unknown): string | null {
@@ -190,9 +212,16 @@ function effectiveSaleAmounts(members: BookingSalesDetailSaleInput[]): { gross: 
 }
 
 function unattachedPaid(row: BookingSalesDetailSaleInput, net: number): number {
+  // paid_amount tersedia (termasuk 0) → gunakan nilai tersimpan
   if (row.paid_amount !== undefined && row.paid_amount !== null && String(row.paid_amount) !== '') {
     return roundIdr(row.paid_amount);
   }
+  // POS tanpa paid_amount → 0 (jangan fallback ke net)
+  const sourceType = String(row.source_type || '').toUpperCase();
+  if (sourceType === 'POS_ORDER' || sourceType === 'POS') {
+    return 0;
+  }
+  // Non-POS: pertahankan fallback PAID→net existing
   if (String(row.payment_status || '').toUpperCase() === 'PAID') return net;
   return 0;
 }
@@ -212,6 +241,12 @@ export function assembleBookingSalesDetail(input: {
   reservations: BookingSalesDetailReservationInput[];
   sales: BookingSalesDetailSaleInput[];
   payments: BookingSalesDetailPaymentInput[];
+  reservationFinancials?: Map<number, {
+    amount_paid: number;
+    applied_deposit: number;
+    hotel_collectible_remaining_balance: number;
+    payment_responsibility: string;
+  }> | Record<string, unknown>;
 }): BookingSalesDetail {
   const bookingId = asPositiveInt(input.booking.id);
   if (!bookingId) {
@@ -227,6 +262,7 @@ export function assembleBookingSalesDetail(input: {
   const lifecycleGroups = groupSaleLifecycles(saleRows as any);
 
   type EffectiveGroup = {
+    primaryId: number | string;
     reservationId: number | null;
     sourceType: string;
     category: BookingSaleSourceCategory;
@@ -241,8 +277,17 @@ export function assembleBookingSalesDetail(input: {
     const amounts = effectiveSaleAmounts(group.members);
     const sourceType = String(group.primary.source_type || 'OTHER_SALE').toUpperCase();
     const reservationId = asPositiveInt(group.primary.reservation_id);
-    const paid = reservationId ? 0 : unattachedPaid(group.primary, amounts.net);
+    // POS SALE: paid_amount sudah termasuk pos_settlements (LATERAL JOIN).
+    // Untuk POS terhubung reservation, tetap hitung paid dari LATERAL JOIN
+    // (tidak di-kanonisasi ke reservation financials kamar).
+    const isPosSource = sourceType === 'POS_ORDER' || sourceType === 'POS';
+    const isDirectSettledPos = isPosSource && roundIdr((group.primary as any).paid_amount) > 0;
+    const isBilledToReservationFolio = Boolean(reservationId) && !isDirectSettledPos;
+    const paid = isBilledToReservationFolio
+      ? 0
+      : unattachedPaid(group.primary, amounts.net);
     return {
+      primaryId: group.primary.id,
       reservationId,
       sourceType,
       category: mapSaleSourceCategory(sourceType),
@@ -250,7 +295,9 @@ export function assembleBookingSalesDetail(input: {
       discount: amounts.discount,
       net: amounts.net,
       paid,
-      remaining: reservationId ? 0 : Math.max(0, amounts.net - paid),
+      remaining: isBilledToReservationFolio
+        ? 0
+        : Math.max(0, amounts.net - paid),
     };
   });
 
@@ -262,10 +309,60 @@ export function assembleBookingSalesDetail(input: {
       const gross = groups.reduce((sum, group) => sum + group.gross, 0);
       const discount = groups.reduce((sum, group) => sum + group.discount, 0);
       const net = groups.reduce((sum, group) => sum + group.net, 0);
-      const paid = roundIdr(reservation.amount_paid);
-      const remaining = reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
-        ? Math.max(0, roundIdr(reservation.remaining_balance))
-        : Math.max(0, net - paid);
+      // POS paid: sum dari effective groups yang source_type-nya POS (sudah termasuk settlement).
+      // Room paid: dari canonical reservation financials (tidak diubah).
+      const posGroupPaid = groups
+        .filter((g) => g.sourceType === 'POS_ORDER' || g.sourceType === 'POS')
+        .reduce((sum, g) => sum + g.paid, 0);
+      const paid = (() => {
+        const rid = asPositiveInt(reservation.id);
+        const fin = rid && input.reservationFinancials
+          ? (input.reservationFinancials instanceof Map
+              ? input.reservationFinancials.get(rid)
+              : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+          : null;
+        let roomPaid: number;
+        if (fin && typeof fin === 'object') {
+          const canonicalPaid = roundIdr((fin as any).amount_paid ?? 0);
+          const canonicalAppliedDeposit = roundIdr((fin as any).applied_deposit ?? 0);
+          roomPaid = canonicalPaid + canonicalAppliedDeposit;
+        } else {
+          roomPaid = roundIdr(reservation.amount_paid);
+        }
+        // Agregat child = pembayaran kamar + pembayaran POS (masing-masing tepat sekali).
+        return roomPaid + posGroupPaid;
+      })();
+      const remaining = (() => {
+        const rid = asPositiveInt(reservation.id);
+        const fin = rid && input.reservationFinancials
+          ? (input.reservationFinancials instanceof Map
+              ? input.reservationFinancials.get(rid)
+              : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+          : null;
+        let roomRemaining: number;
+        if (fin && typeof fin === 'object') {
+          roomRemaining = Math.max(0, roundIdr((fin as any).hotel_collectible_remaining_balance ?? 0));
+        } else {
+          const roomNet = groups
+            .filter((g) => g.sourceType !== 'POS_ORDER' && g.sourceType !== 'POS')
+            .reduce((sum, g) => sum + g.net, 0);
+          roomRemaining = reservation.remaining_balance !== undefined && reservation.remaining_balance !== null && String(reservation.remaining_balance) !== ''
+            ? Math.max(0, roundIdr(reservation.remaining_balance))
+            : Math.max(0, roomNet - (paid - posGroupPaid));
+        }
+        // Sisa child = sisa kamar + sisa POS
+        const posGroupRemaining = groups
+          .filter((g) => g.sourceType === 'POS_ORDER' || g.sourceType === 'POS')
+          .reduce((sum, g) => sum + g.remaining, 0);
+        return roomRemaining + posGroupRemaining;
+      })();
+      // Resolve payment_responsibility once (same fin lookup as remaining)
+      const rid = asPositiveInt(reservation.id);
+      const fin = rid && input.reservationFinancials
+        ? (input.reservationFinancials instanceof Map
+            ? input.reservationFinancials.get(rid)
+            : (input.reservationFinancials as Record<string, unknown>)?.[String(rid)])
+        : null;
       return {
         reservation_id: reservationId,
         room_id: asPositiveInt(reservation.room_id),
@@ -280,11 +377,21 @@ export function assembleBookingSalesDetail(input: {
         reservation_status: reservation.status || reservation.stay_status || null,
         operational_sheet: childOperationalSheet(reservation),
         payment_status: derivePaymentStatus(paid, remaining, net),
+        payment_responsibility: (fin && typeof fin === 'object')
+          ? String((fin as any).payment_responsibility || 'HOTEL_COLLECT').toUpperCase()
+          : 'HOTEL_COLLECT',
         gross,
         discount,
         net,
         paid,
         remaining,
+        primary_transaction_id: (groups.find((g) => g.category === 'ROOM') || groups[0])?.primaryId ?? null,
+        ...(roundIdr(reservation.unapplied_advance_deposit) > 0
+          ? {
+              unapplied_advance_deposit: roundIdr(reservation.unapplied_advance_deposit),
+              active_advance_deposit_id: asPositiveInt(reservation.active_advance_deposit_id),
+            }
+          : {}),
       } as BookingSalesChildRow;
     })
     .filter((row): row is BookingSalesChildRow => Boolean(row))
@@ -335,16 +442,35 @@ export function assembleBookingSalesDetail(input: {
   const checkIns = children.map((child) => child.check_in).filter((value): value is string => Boolean(value)).sort();
   const checkOuts = children.map((child) => child.check_out).filter((value): value is string => Boolean(value)).sort();
 
-  const payments: BookingSalesPaymentRow[] = [...(input.payments || [])]
+  // Filter to canonical settlement types only (exclude DEPOSIT / DEPOSIT_REFUND).
+  // Backward-compatible: when transaction_type is absent the payment is kept
+  // so pre-existing test fixtures that omit this field continue to work.
+  const qualifyingPayments = [...(input.payments || [])].filter(
+    (payment) => {
+      if (payment.transaction_type != null) {
+        const type = String(payment.transaction_type).toUpperCase();
+        return type === 'PAYMENT' || type === 'CORRECTION_REPLACEMENT';
+      }
+      return true;
+    }
+  );
+
+  const payments: BookingSalesPaymentRow[] = qualifyingPayments
     .map((payment) => ({
-      payment_id: Number(payment.id),
-      reservation_id: asPositiveInt(payment.reservation_id),
+      payment_id: Number(payment.payment_id ?? payment.id),
+      reservation_id: asPositiveInt(payment.pa_reservation_id ?? payment.reservation_id),
       transaction_id: payment.transaction_id == null || payment.transaction_id === ''
         ? null
         : payment.transaction_id,
       method: payment.payment_method || null,
-      amount: roundIdr(payment.amount),
-      status: String(payment.status || '').toUpperCase() || 'SUCCESS',
+      amount: roundIdr(payment.allocated_amount !== undefined && payment.allocated_amount !== null
+        ? payment.allocated_amount
+        : payment.effective_amount !== undefined && payment.effective_amount !== null
+          ? payment.effective_amount
+          : payment.parent_amount !== undefined && payment.parent_amount !== null
+            ? payment.parent_amount
+            : payment.amount),
+      status: String(payment.payment_status ?? (payment.status || '')).toUpperCase() || 'SUCCESS',
       paid_at: payment.created_at ? String(payment.created_at) : null,
       reference: payment.reference_code || null,
       evidence_reference: payment.evidence_filename || payment.evidence_storage_key || null,
@@ -362,6 +488,12 @@ export function assembleBookingSalesDetail(input: {
       booker_name: input.booking.booker_name ? String(input.booking.booker_name).trim() : null,
       booking_source: input.booking.booking_source || null,
       booking_channel: input.booking.booking_channel || input.booking.channel || null,
+      ota_source_id: input.booking.ota_source_id != null
+        ? Number(input.booking.ota_source_id)
+        : null,
+      ota_source_name: input.booking.ota_source_name
+        ? String(input.booking.ota_source_name).trim()
+        : null,
       booking_status: input.booking.booking_status || null,
       check_in: checkIns[0] || null,
       check_out: checkOuts[checkOuts.length - 1] || null,

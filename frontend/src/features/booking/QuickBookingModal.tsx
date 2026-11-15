@@ -4,11 +4,27 @@ import { fetchOtaSources } from '../ota/otaApi';
 import { fetchStayChargeRules } from '../stayCharges/stayChargesApi';
 import { StayChargePickerCombobox } from '../stayCharges/StayChargePickerCombobox';
 import GuestSearchAutocomplete from './GuestSearchAutocomplete';
-import IdentityExtractionModal, { type ExtractedIdentityData } from './IdentityExtractionModal';
+import IdentityExtractionModal, { type ExtractedIdentityData, type IdentityModalMode, type InitialIdentityData } from './IdentityExtractionModal';
 import OtaSourceManagerModal from '../ota/OtaSourceManagerModal';
 import type { Guest, DuplicateCandidate } from '../guests/guestTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  QUICK_BOOKING_PAYMENT_OPTIONS,
+  effectiveQuickBookingPaymentMode,
+  nextQuickBookingOrdinaryAmount,
+  quickBookingPaymentIssues,
+  quickBookingPaymentSummary,
+  buildQuickBookingPaymentPayload,
+  createQuickBookingAttempt,
+  sendQuickBookingAttempt,
+  pendingQuickBookingAttempt,
+  rememberQuickBookingAttempt,
+  finishQuickBookingAttempt,
+  type QuickBookingPaymentMode,
+  type QuickBookingAttempt,
+} from './quickBookingPayment';
 import { buildQuickBookingStayFields, tryBuildDayUseInterval } from './dayUseInterval';
+import { hotelNowFromInstant, applyDayUseSeed, type DayUseClockState, INITIAL_CLOCK_STATE } from './dayUseSessionClock';
 import {
   applyInvalidAvailabilitySelections,
   createAvailabilityRequestFromDraft,
@@ -35,6 +51,7 @@ import {
   overnightNights,
   resolveOvernightStayDates
 } from './quickBookingDates';
+import { normalizeHotelDate } from '../calendar/calendarDates';
 
 /**
  * QuickBookingModal is strictly CREATE-ONLY (New Quick Booking Composer).
@@ -43,8 +60,8 @@ import {
  * IMPORTANT ARCHITECTURAL INVARIANT:
  * - Existing reservations are NEVER edited via this modal; existing reservations use EditReservationModal
  *   or ReservationDetailDrawer.
- * - Every time QuickBookingModal opens/closes, its entire transient guest, identity, and payment state
- *   is unconditionally reset via resetQuickBookingState() to prevent cross-guest state leakage.
+ * - Fresh sessions reset transient guest, identity, and payment state via resetQuickBookingState().
+ *   An unresolved create attempt stays frozen until its result is confirmed; closing cannot discard it.
  */
 interface Props {
   isOpen: boolean;
@@ -101,6 +118,10 @@ export interface RoomDraft {
   quoteOk: boolean;
   quotedFingerprint: string;
   stayCharges: StayChargeLineItem[];
+  /** true when the user has manually edited the Day-Use start-time input */
+  duTimeSeeded: boolean;
+  /** true when the user has manually edited the Day-Use date input */
+  duDateSeeded: boolean;
 }
 
 export default function QuickBookingModal({
@@ -141,6 +162,7 @@ export default function QuickBookingModal({
 
   // --- Booking-Level Shared State: Identity / KTP ---
   const [isIdentityModalOpen, setIsIdentityModalOpen] = useState(false);
+  const [identityModalMode, setIdentityModalMode] = useState<IdentityModalMode>('UPLOAD');
   const [ktpPath, setKtpPath] = useState<string | null>(null);
   const [identityNumber, setIdentityNumber] = useState('');
   const [hasValidIdentity, setHasValidIdentity] = useState(false);
@@ -149,21 +171,47 @@ export default function QuickBookingModal({
   // --- Booking-Level Shared State: Payment Gate ---
   const [paymentMethod, setPaymentMethod] = useState<'CASH' | 'TRANSFER' | 'QRIS' | 'DEBIT_CARD' | 'CREDIT_CARD'>('CASH');
   const [amountPaid, setAmountPaid] = useState<number>(0);
+  const [paymentMode, setPaymentMode] = useState<QuickBookingPaymentMode>('PAY_BILL');
+  const [advanceAmount, setAdvanceAmount] = useState<number>(0);
+  const [requestLocked, setRequestLocked] = useState(() => Boolean(pendingQuickBookingAttempt(propertyId)));
+  const [recoveringAttempt, setRecoveringAttempt] = useState(() => Boolean(pendingQuickBookingAttempt(propertyId)));
+  const [submitting, setSubmitting] = useState(false);
+  const attemptRef = useRef<QuickBookingAttempt | null>(pendingQuickBookingAttempt(propertyId));
+  const submitGuardRef = useRef(false);
+  const completedRef = useRef(false);
+  const activePropertyRef = useRef(propertyId);
+  activePropertyRef.current = propertyId;
   const [buktiBayarFile, setBuktiBayarFile] = useState<File | null>(null);
-  const [buktiBayarPath, setBuktiBayarPath] = useState<string | null>(null);
   const [specialRequests, setSpecialRequests] = useState('');
   const [globalDiscountType, setGlobalDiscountType] = useState<'NOMINAL' | 'PERCENT'>('NOMINAL');
   const [globalDiscountValue, setGlobalDiscountValue] = useState<number>(0);
   const [globalDiscountReason, setGlobalDiscountReason] = useState('');
+  const [paymentResponsibility, setPaymentResponsibility] = useState<'HOTEL_COLLECT' | 'OTA_COLLECT'>('HOTEL_COLLECT');
 
   // --- Payment-intent guard: distinguishes "default 0" from "user intentionally chose 0" ---
   const isPaymentTouchedRef = useRef(false);
+  const otaCollect = channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT';
+  const effectivePaymentMode = effectiveQuickBookingPaymentMode({ mode: paymentMode, otaCollect });
+  const cashNow = otaCollect || effectivePaymentMode === 'UNPAID' ? 0
+    : effectivePaymentMode === 'ADVANCE_PAYMENT' ? advanceAmount : amountPaid;
 
   // --- Front Office Dynamic Property Rules & Day Use Presets ---
   const [propertyRules, setPropertyRules] = useState<{ WALK_IN: Record<string, string>; OTA: Record<string, string> }>({ WALK_IN: {}, OTA: {} });
   const [dayUseDurationsList, setDayUseDurationsList] = useState<any[]>([]);
   const [rulesLoading, setRulesLoading] = useState<boolean>(false);
   const [rulesLoadError, setRulesLoadError] = useState<string | null>(null);
+  // QB-R2-04: clockState carries status + data so the UI can show
+  // 'pending' / 'error' explicitly. OVERNIGHT is never gated by this.
+  const [clockState, setClockState] = useState<DayUseClockState>(INITIAL_CLOCK_STATE);
+  // Captured once per session at the moment the modal opens, before any await.
+  // Used to convert to property-timezone so the clock reflects the opening
+  // instant rather than the response-arrival time.
+  const openInstantRef = useRef<string | null>(null);
+  // Monotonically increasing key: session-open-counter + propertyId.
+  // Any in-flight timezone fetch that resolves with a stale key is discarded.
+  const clockSessionKeyRef = useRef<number>(0);
+  // The key value that was captured when the active loadInitialData started.
+  const activeClockSessionKeyRef = useRef<number>(0);
 
   const activeChannelRules = useMemo(() => {
     return channelType === 'OTA' ? propertyRules.OTA || {} : propertyRules.WALK_IN || {};
@@ -189,6 +237,10 @@ export default function QuickBookingModal({
     }
 
     const { checkIn, checkOut } = resolveOvernightStayDates(initialDate);
+    // dayUseStartTime starts as static '10:00' until the property-timezone
+    // clock response arrives; duTimeSeeded=false signals it's not yet seeded.
+    // This is no longer a sentinel checked by the seed effect — the seed
+    // effect now uses the explicit duTimeSeeded flag.
 
     return {
       id: 'room-' + Date.now() + '-' + index + '-' + Math.random().toString(36).substring(2, 6),
@@ -209,7 +261,12 @@ export default function QuickBookingModal({
       quoteLoading: false,
       quoteOk: false,
       quotedFingerprint: '',
-      stayCharges: []
+      stayCharges: [],
+      duTimeSeeded: false,
+      // QB-R2-02: normalizeHotelDate handles all falsy forms ('' , null, undefined,
+      // invalid strings) → empty string. Only a valid calendar-selected date sets
+      // duDateSeeded=true so auto-seed respects provenance.
+      duDateSeeded: normalizeHotelDate(initialDate) !== '',
     };
   }, [rooms, initialDate]);
 
@@ -245,7 +302,10 @@ export default function QuickBookingModal({
       quoteLoading: false,
       quoteOk: false,
       quotedFingerprint: '',
-      stayCharges: []
+      stayCharges: [],
+      duTimeSeeded: false,
+      // QB-R2-02: same as createInitialRoomDraft — calendar date is protected
+      duDateSeeded: normalizeHotelDate(initialDate) !== '',
     };
   }, [rooms, initialDate, channelType, selectedOtaSourceName]);
 
@@ -346,11 +406,17 @@ export default function QuickBookingModal({
   }, [internalRatePlans, ratePlans, channelType]);
 
   // --- UI & Submission State ---
-  const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Load OTA sources, Stay Charges, Rate Plans, Rules, and Day Use Presets
   const loadInitialData = async () => {
+    // Capture the open instant and session key BEFORE any await so that
+    // the clock reflects the actual moment the modal was opened, not the
+    // time when the network response arrived. Stale responses (wrong
+    // session or property) are discarded when the keys no longer match.
+    const openInstant = openInstantRef.current; // ISO UTC string or null
+    const sessionKey = activeClockSessionKeyRef.current;
+
     try {
       const list = await fetchOtaSources(propertyId);
       const active = list.filter(o => o.is_active && !o.is_archived);
@@ -393,6 +459,50 @@ export default function QuickBookingModal({
     }
 
     try {
+      // Single fetch for property timezone (used to compute Day-Use start time).
+      // Guard: if the session key has changed (modal re-opened or property
+      // switched), discard this response so a stale clock never overwrites
+      // the current session's state.
+      const tzRes = await authenticatedFetch(`/api/properties/${propertyId}`);
+      if (sessionKey !== activeClockSessionKeyRef.current) return; // stale (header arrived)
+      if (tzRes.ok) {
+        const tzJson = await tzRes.json();
+        // QB-R2-03: recheck AFTER the body JSON has been read — not just before
+        // the await. A stale session's body must not seed the active session.
+        if (sessionKey !== activeClockSessionKeyRef.current) return; // stale (body read late)
+        const tz = tzJson?.data?.timezone || tzJson?.data?.data?.timezone || 'Asia/Jakarta';
+
+        // Convert the captured open-instant to property timezone and round up.
+        const clockResult = hotelNowFromInstant(openInstant, tz);
+        if (clockResult.ok) {
+          setClockState({
+            status: 'ready',
+            data: {
+              time: clockResult.time,
+              hotelDate: clockResult.hotelDate,
+              datePlusOne: clockResult.datePlusOne,
+            },
+            error: null,
+          });
+        } else {
+          // QB-R2-04: explicit error status — no silent fallback to 10:00.
+          console.warn('Day-Use clock unavailable:', clockResult.error);
+          setClockState({ status: 'error', data: null, error: clockResult.error });
+        }
+      } else {
+        // QB-R2-04: non-OK response → explicit error status, not silent null.
+        console.warn('Day-Use clock unavailable: property endpoint returned non-OK');
+        setClockState({ status: 'error', data: null, error: 'Property endpoint non-OK' });
+      }
+    } catch (err) {
+      // QB-R2-03: also recheck on the error path (network failure after header guard passed)
+      if (sessionKey !== activeClockSessionKeyRef.current) return;
+      // QB-R2-04: network error → explicit error status.
+      console.warn('Failed to load property timezone', err);
+      setClockState({ status: 'error', data: null, error: String(err) });
+    }
+
+    try {
       setRulesLoading(true);
       setRulesLoadError(null);
       const [rulesRes, durRes] = await Promise.all([
@@ -423,12 +533,24 @@ export default function QuickBookingModal({
 
   useEffect(() => {
     if (isOpen && propertyId) {
+      // Capture the open instant before any await so the clock reflects
+      // the moment the user opened the modal, not when the response
+      // arrives after other fetches.
+      openInstantRef.current = new Date().toISOString();
+      clockSessionKeyRef.current += 1;
+      activeClockSessionKeyRef.current = clockSessionKeyRef.current;
       loadInitialData();
     }
   }, [isOpen, propertyId]);
 
   // Complete state reset function for fresh booking session
   const resetQuickBookingState = useCallback(() => {
+    if (attemptRef.current || submitGuardRef.current) return;
+    completedRef.current = false;
+    setRequestLocked(false);
+    setRecoveringAttempt(false);
+    setPaymentMode('PAY_BILL');
+    setAdvanceAmount(0);
     setChannelType('WALKIN');
     setWalkinSubSource('DIRECT');
     setSelectedOtaSourceId(null);
@@ -445,6 +567,7 @@ export default function QuickBookingModal({
     setShowDuplicateModal(false);
     setDuplicateBypassed(false);
     setIsIdentityModalOpen(false);
+    setIdentityModalMode('UPLOAD');
     setKtpPath(null);
     setIdentityNumber('');
     setHasValidIdentity(false);
@@ -452,9 +575,9 @@ export default function QuickBookingModal({
     setExtractedKtpData(null);
     setPaymentMethod('CASH');
     setAmountPaid(0);
+    setPaymentResponsibility('HOTEL_COLLECT');
     isPaymentTouchedRef.current = false;
     setBuktiBayarFile(null);
-    setBuktiBayarPath(null);
     setSpecialRequests('');
     setGlobalDiscountType('NOMINAL');
     setGlobalDiscountValue(0);
@@ -467,6 +590,7 @@ export default function QuickBookingModal({
     setSelectionWarning(null);
     setRulesLoading(false);
     setRulesLoadError(null);
+    setClockState(INITIAL_CLOCK_STATE);
     availabilityRequestRef.current += 1;
   }, []);
 
@@ -476,6 +600,7 @@ export default function QuickBookingModal({
 
   // Reset entirely on open/close for fresh new booking session
   useEffect(() => {
+    if (attemptRef.current || submitGuardRef.current) return;
     const wasOpen = prevIsOpenRef.current;
     const prevInitialRoomId = prevInitialRoomIdRef.current;
     const prevInitialDate = prevInitialDateRef.current;
@@ -487,13 +612,44 @@ export default function QuickBookingModal({
       const gridContextChanged =
         initialRoomId !== prevInitialRoomId || initialDate !== prevInitialDate;
       if (!wasOpen || gridContextChanged) {
+        // openInstantRef and clockSessionKeyRef are set by the load effect
+        // which runs first in the same render cycle. This effect handles
+        // the reset + reseed path.
         resetQuickBookingState();
         setRoomsList([createInitialRoomDraft(0, initialRoomId)]);
       }
     } else if (wasOpen) {
       resetQuickBookingState();
+      // Invalidation: any in-flight timezone response arriving after close
+      // will see a mismatched session key and be discarded.
+      activeClockSessionKeyRef.current = clockSessionKeyRef.current + 1;
     }
   }, [isOpen, initialRoomId, initialDate, createInitialRoomDraft, resetQuickBookingState]);
+
+  // Seed all eligible room drafts when the property-timezone clock data
+  // becomes available. Respects per-draft dirty flags (duTimeSeeded /
+  // duDateSeeded) so manual inputs are never overwritten.
+  // QB-R2-04: only seed when status === 'ready'; pending/error is surfaced
+  // in the UI without seeding.
+  const clockData = clockState.status === 'ready' ? clockState.data : null;
+  useEffect(() => {
+    if (!isOpen || !clockData) return;
+    setRoomsList(prev => applyDayUseSeed(prev, clockData));
+  }, [clockData, isOpen]);
+
+  // QB-R2-01: when the operator transitions a draft from OVERNIGHT to DAY_USE
+  // and clock data is already available, apply the rollover immediately so
+  // late clicks produce the same result as early clicks. This is a direct
+  // handler call (not an effect), so it does not add a room-list effect
+  // that could loop.
+  const applyClockToDayUseDraft = useCallback((roomIdx: number) => {
+    if (!clockData) return;
+    setRoomsList(prev => {
+      const copy = [...prev];
+      copy[roomIdx] = applyDayUseSeed([copy[roomIdx]], clockData)[0];
+      return copy;
+    });
+  }, [clockData]);
 
   // Multi-room management actions
   const handleAddRoom = () => {
@@ -505,6 +661,8 @@ export default function QuickBookingModal({
       newRoom.checkOut = prevRoom.checkOut;
       newRoom.dayUseHours = prevRoom.dayUseHours;
       newRoom.dayUseStartTime = prevRoom.dayUseStartTime;
+      newRoom.duTimeSeeded = prevRoom.duTimeSeeded;
+      newRoom.duDateSeeded = prevRoom.duDateSeeded;
       if (channelType === 'OTA' && prevRoom.manualOverridePrice) {
         newRoom.manualOverridePrice = prevRoom.manualOverridePrice;
       }
@@ -696,10 +854,13 @@ export default function QuickBookingModal({
       if (draft.stayType === 'OVERNIGHT') {
         nightsCount = overnightNights(draft.checkIn, draft.checkOut);
       }
-      // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount
+      // For DAY_USE, stay is 1 unit. For OVERNIGHT, multiply manual nightly rate by nightsCount.
       const effectiveNights = draft.stayType === 'DAY_USE' ? 1 : Math.max(0, nightsCount);
+      const isOta = channelType === 'OTA';
       const roomCharge = draft.isManualOverride
-        ? Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights)
+        ? (isOta
+          ? Math.max(0, Number(draft.manualOverridePrice) || 0)
+          : Math.max(0, (Number(draft.manualOverridePrice) || 0) * effectiveNights))
         : Math.max(0, Number(draft.roomNightlyRate) || 0);
 
       const stayChargesTotal = draft.stayCharges.reduce((acc, curr) => acc + curr.amount, 0);
@@ -716,7 +877,9 @@ export default function QuickBookingModal({
         roomNumber: matchedRoom?.room_number || availabilityRoom?.room_number || matchedRoom?.name || 'Belum dipilih',
         roomTypeName: matchedType?.name || 'Tipe Kamar',
         nights: nightsCount,
-        nightlyRate: draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge),
+        nightlyRate: isOta && draft.isManualOverride && effectiveNights > 0
+          ? Math.round((Number(draft.manualOverridePrice) || 0) / effectiveNights)
+          : (draft.isManualOverride ? Number(draft.manualOverridePrice || 0) : (draft.stayType === 'OVERNIGHT' && nightsCount > 0 ? Math.round(roomCharge / nightsCount) : roomCharge)),
         roomCharge,
         stayChargesTotal,
         grossSubtotal
@@ -738,39 +901,48 @@ export default function QuickBookingModal({
     [grossBookingTotal, globalDiscountType, globalDiscountValue]
   );
   const grandTotal = Math.max(0, grossBookingTotal - globalDiscountAmount);
-  const remainingBill = Math.max(0, grandTotal - amountPaid);
+  const paymentSummary = quickBookingPaymentSummary({
+    mode: paymentMode, amountPaid, advanceAmount, paymentMethod, otaCollect, grandTotal,
+  });
+  const remainingBill = paymentSummary.remainingBill;
 
-  // Auto-sync amountPaid when grandTotal changes if it was full or 0.
-  // For OTA: default = Hotel Collect (zero payment) unless user explicitly records payment.
+  // Only ordinary PAY_BILL participates in auto-fill; DP/UNPAID stay at zero.
   useEffect(() => {
-    const isOta = channelType === 'OTA';
-    // When switching to OTA without touching payment, default to zero (Hotel Collect)
-    if (isOta && !isPaymentTouchedRef.current) {
-      if (amountPaid !== 0) {
-        setAmountPaid(0);
-      }
-      return;
-    }
-    // For any explicit payment (positive or zero), only clamp overpayment
-    if (isPaymentTouchedRef.current) {
-      if (amountPaid > grandTotal) {
-        setAmountPaid(grandTotal);
-      }
-      return;
-    }
-    // Default behavior (WALK-IN/DIRECT): auto-fill or clamp
-    if (amountPaid === 0 || amountPaid > grandTotal) {
-      setAmountPaid(grandTotal);
-    }
-  }, [grandTotal, channelType]);
+    const next = nextQuickBookingOrdinaryAmount({ mode: paymentMode, otaCollect,
+      isOta: channelType === 'OTA', touched: isPaymentTouchedRef.current, amountPaid, grandTotal });
+    if (next !== amountPaid) setAmountPaid(next);
+  }, [grandTotal, channelType, paymentResponsibility, paymentMode, otaCollect, amountPaid]);
 
-  // Deterministic channel switch: zero payment on OTA switch unless user touched it
-  const handleChannelTypeChange = useCallback((next: 'WALKIN' | 'OTA') => {
-    if (next === 'OTA' && !isPaymentTouchedRef.current) {
-      setAmountPaid(0);
-    }
-    setChannelType(next);
+  const clearPaymentDraft = useCallback(() => {
+    setAmountPaid(0);
+    setAdvanceAmount(0);
+    setBuktiBayarFile(null);
+    isPaymentTouchedRef.current = false;
   }, []);
+
+  const handlePaymentModeChange = (next: QuickBookingPaymentMode) => {
+    clearPaymentDraft();
+    setPaymentMode(next);
+  };
+
+  const handlePaymentResponsibilityChange = (next: 'HOTEL_COLLECT' | 'OTA_COLLECT') => {
+    if (next === paymentResponsibility) return;
+    clearPaymentDraft();
+    setPaymentMode(next === 'OTA_COLLECT' ? 'UNPAID' : 'PAY_BILL');
+    setPaymentResponsibility(next);
+  };
+
+  const handleChannelTypeChange = useCallback((next: 'WALKIN' | 'OTA') => {
+    if (next === channelType) return;
+    if (next === 'OTA' && !isPaymentTouchedRef.current) setAmountPaid(0);
+    if (paymentResponsibility === 'OTA_COLLECT') {
+      // A voucher never becomes a hotel receipt when returning to WALKIN.
+      clearPaymentDraft();
+      setPaymentMode('PAY_BILL');
+    }
+    setPaymentResponsibility('HOTEL_COLLECT');
+    setChannelType(next);
+  }, [channelType, paymentResponsibility, clearPaymentDraft]);
 
   // CRM guest selection
   const handleSelectGuest = (guest: Guest) => {
@@ -797,7 +969,32 @@ export default function QuickBookingModal({
     setDuplicateBypassed(false);
   };
 
-  const [extractedKtpData, setExtractedKtpData] = useState<ExtractedIdentityData | null>(null);
+   const [extractedKtpData, setExtractedKtpData] = useState<ExtractedIdentityData | null>(null);
+
+  // Build initial identity data from selectedCrmGuest (primary) or extractedKtpData (fallback for same-session uploads)
+  const initialIdentityDataForModal = useMemo<InitialIdentityData | null>(() => {
+    if (!selectedCrmGuest && !extractedKtpData) return null;
+    return {
+      full_name: selectedCrmGuest?.full_name || extractedKtpData?.full_name || guestName || '',
+      identity_number: selectedCrmGuest?.identity_number || extractedKtpData?.identity_number || identityNumber || null,
+      birth_place: selectedCrmGuest?.birth_place || extractedKtpData?.birth_place || null,
+      birth_date: selectedCrmGuest?.birth_date || extractedKtpData?.birth_date || null,
+      gender: selectedCrmGuest?.gender || extractedKtpData?.gender || null,
+      address: selectedCrmGuest?.address || extractedKtpData?.address || null,
+      rt_rw: selectedCrmGuest?.rt_rw || extractedKtpData?.rt_rw || null,
+      village_kelurahan: selectedCrmGuest?.village_kelurahan || extractedKtpData?.village_kelurahan || null,
+      district_kecamatan: selectedCrmGuest?.district_kecamatan || extractedKtpData?.district_kecamatan || null,
+      religion: selectedCrmGuest?.religion || extractedKtpData?.religion || null,
+      marital_status: selectedCrmGuest?.marital_status || extractedKtpData?.marital_status || null,
+      occupation: selectedCrmGuest?.occupation || extractedKtpData?.occupation || null,
+      citizenship: selectedCrmGuest?.citizenship || extractedKtpData?.citizenship || 'WNI',
+      valid_until: selectedCrmGuest?.valid_until || extractedKtpData?.valid_until || null,
+      identity_path: selectedCrmGuest?.identity_path || extractedKtpData?.file_path || ktpPath || null,
+      ktp_regency_id: selectedCrmGuest?.ktp_regency_id ?? extractedKtpData?.ktp_regency_id ?? null,
+      ktp_ocr_confidence: selectedCrmGuest?.ktp_ocr_confidence ?? extractedKtpData?.confidence ?? 1.0,
+      ktp_ocr_provider: selectedCrmGuest?.ktp_ocr_provider || extractedKtpData?.provider || 'MANUAL',
+    };
+  }, [selectedCrmGuest, extractedKtpData, guestName, identityNumber, ktpPath]);
 
   // OCR Identity confirmation
   const handleIdentityConfirmed = (data: ExtractedIdentityData, savedGuest?: Guest | null) => {
@@ -827,8 +1024,9 @@ export default function QuickBookingModal({
       : rulesList.find((r: any) => r.id === ruleOrType?.id || r.charge_type === ruleType || r.code === ruleType);
 
     const roomDraft = roomsList[roomIndex];
+    const _isOta = channelType === 'OTA';
     const roomRate = roomDraft
-      ? (roomDraft.isManualOverride ? roomDraft.manualOverridePrice : roomDraft.roomNightlyRate)
+      ? (_isOta && roomDraft.isManualOverride ? (roomDraft.manualOverridePrice / (roomDraft.stayType === 'DAY_USE' ? 1 : Math.max(1, overnightNights(roomDraft.checkIn, roomDraft.checkOut)))) : (roomDraft.isManualOverride ? roomDraft.manualOverridePrice : roomDraft.roomNightlyRate))
       : 0;
 
     const targetCharges = [...roomDraft.stayCharges];
@@ -1054,7 +1252,6 @@ export default function QuickBookingModal({
     if (e.target.files && e.target.files[0]) {
       const file = e.target.files[0];
       setBuktiBayarFile(file);
-      setBuktiBayarPath(null); // reset path legacy
     }
   };
 
@@ -1108,27 +1305,10 @@ export default function QuickBookingModal({
       }
     }
 
-    // Payment Method Gate
-    const _paymentMethodMode = getFieldMode('payment_method');
-    if (!rulesLoading && !rulesLoadError && _paymentMethodMode === 'REQUIRED' && !paymentMethod) {
-      issues.push('Metode pembayaran wajib dipilih');
-    }
-
-    // Payment Amount Gate
-    const _paymentAmountMode = getFieldMode('payment_amount');
-    if (!rulesLoading && !rulesLoadError && _paymentAmountMode === 'REQUIRED' && amountPaid <= 0) {
-      issues.push('Nominal pembayaran wajib lebih dari 0');
-    }
-
-    // Payment Proof Gate — must align with backend canonical rule:
-    // backend rejects only when: evidence REQUIRED AND amountPaid > 0 AND no evidence
-    // WALK-IN/DIRECT: user is expected to pay at counter, evidence required for ALL methods including CASH
-    // OTA: pay-at-hotel (Hotel Collect) is a valid pattern — amountPaid=0 must NOT require evidence
-    const _evidenceRuleMode = getFieldMode('payment_evidence');
-    const _isEvidenceRequired = _evidenceRuleMode === 'REQUIRED'
-      && amountPaid > 0;
-    if (_isEvidenceRequired && !buktiBayarFile) {
-      issues.push('Bukti pembayaran wajib diunggah untuk nominal pembayaran > 0');
+    // Payment gates use the same cash-now/rules semantics as explicit backend C.
+    if (!rulesLoading && !rulesLoadError) {
+      issues.push(...quickBookingPaymentIssues({ mode: paymentMode, amountPaid, advanceAmount,
+        paymentMethod, otaCollect, rules: activeChannelRules, hasFile: Boolean(buktiBayarFile) }));
     }
 
     // Multi-room Validation
@@ -1153,7 +1333,7 @@ export default function QuickBookingModal({
       }
       if (channelType === 'OTA') {
         if (!r.manualOverridePrice || Number(r.manualOverridePrice) <= 0) {
-          issues.push(label + ': Tarif kamar OTA per malam wajib diisi dengan nominal lebih dari 0');
+          issues.push(label + ': Total harga kamar OTA sesuai voucher wajib diisi dengan nominal lebih dari 0');
         }
       } else {
         if (r.isManualOverride && !r.manualOverrideReason.trim()) {
@@ -1203,8 +1383,13 @@ export default function QuickBookingModal({
     selectedOtaSourceId,
     referral,
     amountPaid,
+    advanceAmount,
+    paymentMode,
+    paymentMethod,
+    paymentResponsibility,
+    otaCollect,
+    activeChannelRules,
     buktiBayarFile,
-    buktiBayarPath,
     roomsList,
     getFieldMode,
     rowAvailabilityTypes,
@@ -1220,9 +1405,58 @@ export default function QuickBookingModal({
 
   const isValid = validationIssues.length === 0;
 
+  const handleClose = () => {
+    if (submitGuardRef.current) {
+      setErrorMsg('Pengiriman sedang diproses. Tunggu sebentar sebelum menutup.');
+      return;
+    }
+    onClose();
+  };
+
+  const submitAttempt = async (attempt: QuickBookingAttempt) => {
+    const outcome = await sendQuickBookingAttempt(attempt, authenticatedFetch);
+    if (outcome.kind === 'success') {
+      finishQuickBookingAttempt(attempt);
+      completedRef.current = true;
+      attemptRef.current = null;
+      setRequestLocked(false);
+      // A refresh callback failure must never make the create request retryable.
+      try { onBookingSuccess(); } catch (error) { console.error('Booking saved; refresh failed', error); }
+      onClose();
+      return;
+    }
+    if (outcome.kind === 'rejected') {
+      finishQuickBookingAttempt(attempt);
+      setRecoveringAttempt(false);
+      attemptRef.current = null;
+      setRequestLocked(false);
+    }
+    setErrorMsg(outcome.message);
+  };
+
   // Submit Handler
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitGuardRef.current || completedRef.current) return;
+    const retainedAttempt = pendingQuickBookingAttempt(propertyId);
+    if (!attemptRef.current && retainedAttempt) {
+      attemptRef.current = retainedAttempt;
+      setRequestLocked(true);
+      setRecoveringAttempt(true);
+      setErrorMsg('Pengiriman sebelumnya perlu diperiksa sebelum membuat reservasi baru.');
+      return;
+    }
+    if (attemptRef.current) {
+      if (attemptRef.current.propertyId !== propertyId) {
+        setErrorMsg('Kembali ke properti asal untuk memeriksa pengiriman yang belum selesai.');
+        return;
+      }
+      submitGuardRef.current = true;
+      setSubmitting(true);
+      try { await submitAttempt(attemptRef.current); }
+      finally { submitGuardRef.current = false; setSubmitting(false); }
+      return;
+    }
     setErrorMsg(null);
 
     // QB-FO-FORM-1A: Hard guard — never submit when rules are unavailable
@@ -1236,6 +1470,7 @@ export default function QuickBookingModal({
       return;
     }
 
+    submitGuardRef.current = true;
     try {
       setSubmitting(true);
 
@@ -1299,9 +1534,7 @@ export default function QuickBookingModal({
         valid_until: extractedKtpData?.valid_until || selectedCrmGuest?.valid_until || undefined,
         ktp_ocr_confidence: extractedKtpData?.confidence || selectedCrmGuest?.ktp_ocr_confidence || undefined,
         ktp_ocr_provider: extractedKtpData?.provider || selectedCrmGuest?.ktp_ocr_provider || undefined,
-        payment_method: paymentMethod,
-        amount_paid: amountPaid,
-        bukti_bayar_path: buktiBayarPath || undefined,
+        payment_responsibility: paymentResponsibility,
         require_strict_gates: true,
         special_requests: specialRequests.trim() || undefined,
         global_discount_type: toBackendDiscountType(globalDiscountType),
@@ -1339,7 +1572,6 @@ export default function QuickBookingModal({
             discount_reason: undefined,
             stay_charges: r.stayCharges,
             amount_paid: 0,
-            payment_method: paymentMethod,
             ktp_path: ktpPath || undefined,
             identity_number: identityNumber.trim() || undefined,
             has_valid_identity: hasValidIdentity || Boolean(selectedCrmGuest?.has_valid_identity || selectedCrmGuest?.identity_number || selectedCrmGuest?.identity_path),
@@ -1364,36 +1596,48 @@ export default function QuickBookingModal({
         })
       };
 
-      const formData = new FormData();
-      formData.append('booking_payload', JSON.stringify(payload));
-      if (buktiBayarFile) {
-        formData.append('payment_evidence', buktiBayarFile);
-      }
-      const res = await authenticatedFetch('/api/bookings', {
-        method: 'POST',
-        body: formData
+      if (activePropertyRef.current !== propertyId) throw new Error('Properti berubah. Periksa kembali isian sebelum mengirim.');
+      const explicitPayload = buildQuickBookingPaymentPayload(payload, {
+        mode: paymentMode, amountPaid, advanceAmount, paymentMethod, otaCollect,
       });
-
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json.message || 'Gagal membuat reservasi.');
-      }
-
-      onBookingSuccess();
-      onClose();
+      const attempt = createQuickBookingAttempt(explicitPayload, buktiBayarFile);
+      rememberQuickBookingAttempt(attempt);
+      attemptRef.current = attempt;
+      setRequestLocked(true);
+      await submitAttempt(attempt);
     } catch (err: any) {
       setErrorMsg(err.message || 'Terjadi kesalahan saat membuat booking.');
     } finally {
+      submitGuardRef.current = false;
       setSubmitting(false);
     }
   };
 
   if (!isOpen) return null;
 
+  // After a modal unmount, recover only the frozen submission; never show a new
+  // editable guest draft as though the prior financial request had disappeared.
+  if (recoveringAttempt && requestLocked && attemptRef.current) {
+    const retained = attemptRef.current;
+    const label = QUICK_BOOKING_PAYMENT_OPTIONS.find(option => option.value === retained.mode)?.label;
+    return <div className="fixed inset-0 z-40 flex items-center justify-center p-5 bg-black/65 backdrop-blur-sm">
+      <div role="dialog" aria-modal="true" aria-labelledby="quick-booking-recovery-title" className="w-full max-w-lg bg-white rounded-2xl shadow-2xl p-6 space-y-4">
+        <h2 id="quick-booking-recovery-title" className="font-bold text-emerald-950">Periksa Pengiriman Reservasi</h2>
+        <p className="text-sm text-stone-700">Pengiriman sebelumnya ({label}) belum terkonfirmasi. Isian sebelumnya tetap disimpan untuk pemeriksaan.</p>
+        {errorMsg && <p role="status" className="text-xs text-amber-900 bg-amber-50 rounded-xl p-3">{errorMsg}</p>}
+        <button type="button" onClick={handleSubmit} disabled={submitting || retained.propertyId !== propertyId}
+          className="w-full py-3 bg-emerald-800 text-white rounded-xl font-semibold disabled:opacity-50">
+          {submitting ? 'Memeriksa Pengiriman...' : 'Coba Lagi — Periksa Pengiriman'}
+        </button>
+        <button type="button" onClick={handleClose} disabled={submitting} className="w-full py-2 text-stone-700 rounded-xl bg-stone-100">Tutup Sementara</button>
+      </div>
+    </div>;
+  }
+
   return (
     <>
       <div className="fixed inset-0 z-40 overflow-y-auto bg-black/65 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5">
-        <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-6xl border border-emerald-900/15 overflow-hidden flex flex-col max-h-[94vh]">
+        <div className="relative bg-white rounded-2xl shadow-2xl w-full max-w-7xl border border-emerald-900/15 overflow-hidden flex flex-col max-h-[94vh]">
           {/* Header */}
           <div className="px-6 py-4 bg-gradient-to-r from-emerald-950 via-emerald-900 to-teal-950 text-white flex items-center justify-between border-b border-emerald-800/40">
             <div className="flex items-center gap-3">
@@ -1413,7 +1657,8 @@ export default function QuickBookingModal({
               </div>
             </div>
             <button
-              onClick={onClose}
+              onClick={handleClose}
+                  disabled={submitting}
               className="text-emerald-300 hover:text-white p-2 rounded-lg hover:bg-emerald-800/40 transition-colors cursor-pointer"
             >
               <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -1425,14 +1670,14 @@ export default function QuickBookingModal({
           {/* Body: 70/30 Grid */}
           <div className="flex-1 overflow-hidden grid grid-cols-1 lg:grid-cols-12 bg-stone-100/60 divide-y lg:divide-y-0 lg:divide-x divide-stone-200">
             {/* Left 70% Form Area */}
-            <div className="lg:col-span-8 p-6 overflow-y-auto space-y-6">
+            <div inert={submitting || requestLocked} className="lg:col-span-8 p-6 overflow-y-auto space-y-6">
               {errorMsg && (
                 <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-3">
                   <svg className="w-4 h-4 text-rose-500 shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
                   <div>
-                    <strong className="font-semibold">Gagal membuat reservasi:</strong>
+                    <strong className="font-semibold">Status reservasi:</strong>
                     <p className="mt-0.5 whitespace-pre-line">{errorMsg}</p>
                   </div>
                 </div>
@@ -1464,24 +1709,30 @@ export default function QuickBookingModal({
                   <button
                     type="button"
                     onClick={() => handleChannelTypeChange('WALKIN')}
-                    className={'py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
+                    className={'h-9 px-3 flex items-center justify-center gap-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
                       channelType === 'WALKIN'
                         ? 'bg-emerald-800 text-white shadow-sm'
                         : 'text-stone-600 hover:text-stone-900'
                     )}
                   >
-                    🚶 WALK-IN / DIRECT
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
+                    </svg>
+                    WALK-IN / DIRECT
                   </button>
                   <button
                     type="button"
                     onClick={() => handleChannelTypeChange('OTA')}
-                    className={'py-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
+                    className={'h-9 px-3 flex items-center justify-center gap-2 text-xs font-bold rounded-lg transition-all cursor-pointer ' + (
                       channelType === 'OTA'
                         ? 'bg-emerald-800 text-white shadow-sm'
                         : 'text-stone-600 hover:text-stone-900'
                     )}
                   >
-                    🌐 ONLINE TRAVEL AGENT (OTA)
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H12M3 12a9 9 0 019-9m-9 9h9m9 0a9 9 0 01-9 9m9-9H12" />
+                    </svg>
+                    OTA
                   </button>
                 </div>
 
@@ -1698,7 +1949,7 @@ export default function QuickBookingModal({
                     </div>
                     <button
                       type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
+                      onClick={() => { setIdentityModalMode('DETAIL'); setIsIdentityModalOpen(true); }}
                       className="text-xs text-emerald-800 underline font-semibold hover:text-emerald-950 cursor-pointer"
                     >
                       Detail
@@ -1711,7 +1962,7 @@ export default function QuickBookingModal({
                     </p>
                     <button
                       type="button"
-                      onClick={() => setIsIdentityModalOpen(true)}
+                      onClick={() => { setIdentityModalMode('UPLOAD'); setIsIdentityModalOpen(true); }}
                       className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 text-white rounded-xl text-xs font-semibold shadow-sm transition-colors cursor-pointer"
                     >
                       Unggah KTP Sekarang
@@ -1834,6 +2085,10 @@ export default function QuickBookingModal({
                                     quoteOk: false,
                                     quotedFingerprint: ''
                                   });
+                                  // QB-R2-01: if clock data is already available, apply the
+                                  // rollover to the draft that just switched to DAY_USE.
+                                  // Protected dates (duDateSeeded=true) are unaffected.
+                                  applyClockToDayUseDraft(roomIdx);
                                 }}
                                 className={'px-2.5 py-1 rounded-md transition-all cursor-pointer ' + (
                                   roomDraft.stayType === 'DAY_USE' ? 'bg-white text-emerald-950 shadow-xs font-bold' : 'text-stone-600'
@@ -1897,21 +2152,37 @@ export default function QuickBookingModal({
                                 type="date"
                                 required
                                 value={roomDraft.checkIn}
-                                onChange={e => handleUpdateRoom(roomIdx, { checkIn: e.target.value, checkOut: e.target.value })}
+                                onChange={e => handleUpdateRoom(roomIdx, { checkIn: e.target.value, checkOut: e.target.value, duDateSeeded: true })}
                                 className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
                               />
                             </div>
                             <div>
                               <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                Jam Mulai (Interval 30 mnt)
+                                Jam Mulai (Interval 15 mnt)
                               </label>
                               <input
                                 type="time"
-                                step={1800}
+                                step={900}
                                 value={roomDraft.dayUseStartTime}
-                                onChange={e => handleUpdateRoom(roomIdx, { dayUseStartTime: e.target.value })}
+                                onChange={e => handleUpdateRoom(roomIdx, { dayUseStartTime: e.target.value, duTimeSeeded: true })}
                                 className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl font-mono"
                               />
+                              {/* QB-R2-04: visible clock status — pending / error */}
+                              {clockState.status === 'pending' && (
+                                <div className="mt-0.5 text-[10px] text-stone-400 italic">
+                                  Menunggu timezone properti…
+                                </div>
+                              )}
+                              {clockState.status === 'error' && (
+                                <div className="mt-0.5 text-[10px] font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded border border-amber-200">
+                                  ⚠ Clock Day Use gagal: {clockState.error || 'timezone tidak tersedia'}.
+                                  Isi jam secara manual untuk melanjutkan.
+                                </div>
+                              )}
+                              {/* QB-R2-04: if the user manually set a time while
+                                  clock is in error/pending, the time is already
+                                  marked duTimeSeeded=true — no extra gate needed.
+                                  OVERNIGHT is never blocked by clock status. */}
                             </div>
                             <div>
                               <label className="block text-[11px] font-semibold text-stone-700 mb-1">
@@ -1938,15 +2209,27 @@ export default function QuickBookingModal({
                                 })}
                               </select>
                               {(() => {
-                                const [hh, mm] = (roomDraft.dayUseStartTime || '10:00').split(':').map(Number);
-                                const totalMin = (hh * 60 + (mm || 0)) + Math.round((roomDraft.dayUseHours || 6) * 60);
-                                const endH = Math.floor(totalMin / 60) % 24;
-                                const endM = totalMin % 60;
-                                const isNextDay = totalMin >= 24 * 60;
-                                const timeStr = `${String(endH).padStart(2, '0')}:${String(endM).padStart(2, '0')}`;
+                                const interval = tryBuildDayUseInterval(
+                                  roomDraft.checkIn,
+                                  roomDraft.dayUseStartTime,
+                                  roomDraft.dayUseHours
+                                );
+                                if (!interval.ok) {
+                                  return (
+                                    <div className="mt-1 text-[10px] font-bold text-amber-800 bg-amber-50 px-2 py-0.5 rounded border border-amber-200 inline-block">
+                                      {interval.error}
+                                    </div>
+                                  );
+                                }
+                                // Extract HH:mm and compare end date vs start date
+                                const [, endTimePart] = interval.end_at.split('T');
+                                const endHM = endTimePart.slice(0, 5);
+                                const endDate = interval.end_at.slice(0, 10);
+                                const startDate = roomDraft.checkIn;
+                                const isNextDay = endDate !== startDate;
                                 return (
                                   <div className="mt-1 text-[10px] font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 inline-block">
-                                    Checkout: {timeStr} {isNextDay ? '(+1 hari)' : '(Hari ini)'}
+                                    Checkout: {endHM} {isNextDay ? `(+1 hari, ${endDate})` : '(Hari ini)'}
                                   </div>
                                 );
                               })()}
@@ -2059,25 +2342,26 @@ export default function QuickBookingModal({
                             <div className="flex items-center justify-between">
                               <div className="flex items-center gap-2">
                                 <span className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                                  <span>🌐</span> Tarif Kamar OTA per Malam (Manual Input)
+                                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H12M3 12a9 9 0 019-9m-9 9h9m9 0a9 9 0 01-9 9m9-9H12" /></svg>
+                                  Total Harga Kamar OTA
                                 </span>
                                 <span className="text-[10px] bg-amber-200/80 text-amber-900 px-2 py-0.5 rounded font-semibold">
                                   Wajib Sesuai Voucher
                                 </span>
                               </div>
                               <span className="text-[11px] text-amber-800 font-medium">
-                                Net / Voucher Rate per Malam
+                                Total Net / Voucher
                               </span>
                             </div>
 
                             <div className="pt-1 border-t border-amber-200/60">
                               <label className="block text-[11px] font-semibold text-stone-700 mb-1">
-                                Tarif Kamar OTA per Malam (Rp) <span className="text-rose-500">*</span>
+                                Total Harga Kamar OTA (Rp) <span className="text-rose-500">*</span>
                               </label>
                               <input
                                 type="text"
                                 inputMode="numeric"
-                                placeholder="Contoh: 350.000"
+                                placeholder="Contoh: 1.000.000"
                                 value={roomDraft.manualOverridePrice > 0 ? roomDraft.manualOverridePrice.toLocaleString('id-ID') : ''}
                                 onChange={e => {
                                   const rawVal = e.target.value;
@@ -2090,14 +2374,18 @@ export default function QuickBookingModal({
                                 }}
                                 className="w-full text-xs px-3 py-2 bg-white border border-amber-300 focus:border-amber-500 focus:ring-1 focus:ring-amber-500 rounded-lg font-mono font-bold text-stone-900"
                               />
-                              {roomDraft.manualOverridePrice > 0 && (
-                                <p className="text-[11px] text-amber-800 mt-1 font-medium">
-                                  Tarif per malam: <strong>Rp {roomDraft.manualOverridePrice.toLocaleString('id-ID')}</strong>
-                                  {roomCalculations[roomIdx]?.nights > 1 && (
-                                    <span> • Total {roomCalculations[roomIdx].nights} malam: <strong>Rp {roomCalculations[roomIdx].roomCharge.toLocaleString('id-ID')}</strong></span>
-                                  )}
-                                </p>
-                              )}
+                              {roomDraft.manualOverridePrice > 0 && (() => {
+                                const nights = roomCalculations[roomIdx]?.nights ?? 1;
+                                const avgRate = nights > 1 ? Math.round(roomDraft.manualOverridePrice / nights) : roomDraft.manualOverridePrice;
+                                return (
+                                  <p className="text-[11px] text-amber-800 mt-1 font-medium">
+                                    <strong>Total OTA: Rp {roomDraft.manualOverridePrice.toLocaleString('id-ID')}</strong>
+                                    {nights > 1 && (
+                                      <span> • Average {nights} malam: <strong>Rp {avgRate.toLocaleString('id-ID')}</strong> / malam</span>
+                                    )}
+                                  </p>
+                                );
+                              })()}
                             </div>
                           </div>
                         ) : (
@@ -2446,22 +2734,83 @@ export default function QuickBookingModal({
                   5. Pembayaran & Bukti Bayar
                 </h3>
 
+                {/* Payment Responsibility Selector (OTA only) */}
+                {channelType === 'OTA' && (
+                  <div className="p-4 bg-amber-50 rounded-xl border border-amber-200 space-y-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-amber-800">
+                      Skema Pembayaran OTA
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handlePaymentResponsibilityChange('HOTEL_COLLECT')}
+                        className={'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center justify-center gap-2 ' + (
+                          paymentResponsibility === 'HOTEL_COLLECT'
+                            ? 'bg-emerald-800 text-white border-emerald-900'
+                            : 'bg-white text-stone-600 border-amber-300 hover:bg-amber-50'
+                        )}
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.055 11H5m2 0h2m2 0h2m2 0h2m2 0h1.945M5 3.6L1.945 9H22.055L19 3.6zM9 21h6m-6 0v-3.3m6 3v-3.3" /></svg> Hotel Collect — Tamu bayar ke hotel
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handlePaymentResponsibilityChange('OTA_COLLECT')}
+                        className={'px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all cursor-pointer flex items-center justify-center gap-2 ' + (
+                          paymentResponsibility === 'OTA_COLLECT'
+                            ? 'bg-amber-700 text-white border-amber-800'
+                            : 'bg-white text-stone-600 border-amber-300 hover:bg-amber-50'
+                        )}
+                      >
+                        <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H12M3 12a9 9 0 019-9m-9 9h9m9 0a9 9 0 01-9 9m9-9H12" /></svg> OTA Collect — Tamu sudah bayar ke OTA
+                      </button>
+                    </div>
+                    {paymentResponsibility === 'OTA_COLLECT' && (
+                      <p className="text-[11px] text-amber-800 font-medium">
+                        <svg className="w-4 h-4 inline-block mr-1 align-[-2px]" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H12M3 12a9 9 0 019-9m-9 9h9m9 0a9 9 0 01-9 9m9-9H12" /></svg>
+                        Tamu sudah membayar seluruh tagihan ke {selectedOtaSourceName || 'OTA'}.
+                        {grandTotal > 0 && (
+                          <span> Total tagihan hotel: <strong>Rp {grandTotal.toLocaleString('id-ID')}</strong> dibayar oleh OTA.</span>
+                        )}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                <div>
+                  <label htmlFor="quick-booking-payment-mode" className="block text-xs font-semibold text-stone-700 mb-1">
+                    Pilihan Pembayaran
+                  </label>
+                  <select id="quick-booking-payment-mode" value={effectivePaymentMode} disabled={otaCollect}
+                    onChange={event => handlePaymentModeChange(event.target.value as QuickBookingPaymentMode)}
+                    className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 outline-none">
+                    {QUICK_BOOKING_PAYMENT_OPTIONS.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
+                  </select>
+                  {effectivePaymentMode === 'ADVANCE_PAYMENT' && <p className="mt-2 text-[11px] text-stone-600">
+                    Uang muka dicatat terpisah. Sisa tagihan berkurang setelah uang muka digunakan untuk membayar tagihan.
+                  </p>}
+                  {effectivePaymentMode === 'UNPAID' && !otaCollect && <p className="mt-2 text-[11px] text-stone-600">
+                    Reservasi dibuat tanpa penerimaan pembayaran. Sisa tagihan tetap terbuka.
+                  </p>}
+                </div>
+
+                {/* Hotel payment fields are hidden for UNPAID and OTA vouchers. */}
+                {!otaCollect && effectivePaymentMode !== 'UNPAID' && (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                  {getFieldMode('payment_method') !== 'HIDDEN' && (
+                  {(effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_method') !== 'HIDDEN') && (
                     <div>
                       <label className="block text-xs font-semibold text-stone-700 mb-1">
                         Metode Pembayaran
-                        {getFieldMode('payment_method') === 'REQUIRED' && (
+                        {(effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_method') === 'REQUIRED') && (
                           <span className="text-rose-500">*</span>
                         )}
-                        {getFieldMode('payment_method') === 'OPTIONAL' && (
+                        {effectivePaymentMode !== 'ADVANCE_PAYMENT' && getFieldMode('payment_method') === 'OPTIONAL' && (
                           <span className="text-stone-400 font-normal ml-1">(opsional)</span>
                         )}
                       </label>
                       <select
                         value={paymentMethod}
                         onChange={e => setPaymentMethod(e.target.value as any)}
-                        required={getFieldMode('payment_method') === 'REQUIRED'}
+                        required={effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_method') === 'REQUIRED'}
                         className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
                       >
                         <option value="">— Pilih Metode Pembayaran —</option>
@@ -2474,33 +2823,36 @@ export default function QuickBookingModal({
                     </div>
                   )}
 
-                  {getFieldMode('payment_amount') !== 'HIDDEN' && (
+                  {(effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_amount') !== 'HIDDEN') && (
                     <div>
                       <div className="flex items-center justify-between mb-1">
                         <label className="block text-xs font-semibold text-stone-700">
-                          Nominal Dibayar (DP / Lunas)
-                          {getFieldMode('payment_amount') === 'REQUIRED' && (
+                          {effectivePaymentMode === 'ADVANCE_PAYMENT' ? 'Nominal Uang Muka (DP)' : 'Nominal Bayar Tagihan'}
+                          {(effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_amount') === 'REQUIRED') && (
                             <span className="text-rose-500">*</span>
                           )}
-                          {getFieldMode('payment_amount') === 'OPTIONAL' && (
+                          {effectivePaymentMode !== 'ADVANCE_PAYMENT' && getFieldMode('payment_amount') === 'OPTIONAL' && (
                             <span className="text-stone-400 font-normal ml-1">(opsional)</span>
                           )}
                         </label>
-                        <button
+                        {effectivePaymentMode === 'PAY_BILL' && <button
                           type="button"
                           onClick={() => { isPaymentTouchedRef.current = true; setAmountPaid(grandTotal); }}
                           className="text-[10px] font-bold text-emerald-800 hover:text-emerald-950 bg-emerald-50 hover:bg-emerald-100 px-2 py-0.5 rounded-lg border border-emerald-200 cursor-pointer transition-colors"
                         >
-                          Bayar Pas / Lunas (Rp {grandTotal.toLocaleString('id-ID')})
-                        </button>
+                          Bayar Penuh (Rp {grandTotal.toLocaleString('id-ID')})
+                        </button>}
                       </div>
                       <input
                         type="number"
-                        required={getFieldMode('payment_amount') === 'REQUIRED'}
-                        min="0"
-                        step="1000"
-                        value={amountPaid}
-                        onChange={e => { isPaymentTouchedRef.current = true; setAmountPaid(Number(e.target.value)); }}
+                        required={effectivePaymentMode === 'ADVANCE_PAYMENT' || getFieldMode('payment_amount') === 'REQUIRED'}
+                        min={effectivePaymentMode === 'ADVANCE_PAYMENT' ? 1 : 0}
+                        step="1"
+                        value={effectivePaymentMode === 'ADVANCE_PAYMENT' ? advanceAmount : amountPaid}
+                        onChange={e => {
+                          if (effectivePaymentMode === 'ADVANCE_PAYMENT') setAdvanceAmount(Number(e.target.value));
+                          else { isPaymentTouchedRef.current = true; setAmountPaid(Number(e.target.value)); }
+                        }}
                         className="w-full text-xs px-3.5 py-2.5 bg-stone-50 border border-stone-300 rounded-xl focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none font-mono font-bold text-emerald-950"
                       />
                     </div>
@@ -2510,8 +2862,7 @@ export default function QuickBookingModal({
                   <div className="sm:col-span-2">
                     {(() => {
                       const _evMode = getFieldMode('payment_evidence');
-                      const _evRequired = _evMode === 'REQUIRED'
-                        && amountPaid > 0;
+                      const _evRequired = _evMode === 'REQUIRED' && cashNow > 0;
                       return (
                         <label className="block text-xs font-semibold text-stone-700 mb-1">
                           Upload Bukti Pembayaran{' '}
@@ -2520,7 +2871,7 @@ export default function QuickBookingModal({
                           ) : (
                             <span className="text-stone-400 font-normal">(opsional)</span>
                           )}
-                          {amountPaid > 0 && String(paymentMethod).toUpperCase() === 'CASH' && _evMode === 'REQUIRED' && (
+                          {cashNow > 0 && String(paymentMethod).toUpperCase() === 'CASH' && _evMode === 'REQUIRED' && (
                             <span className="text-stone-500 font-normal ml-1 text-[10px]">— Foto uang tunai yang diterima</span>
                           )}
                         </label>
@@ -2528,6 +2879,7 @@ export default function QuickBookingModal({
                     })()}
                     <input
                       type="file"
+                      key={channelType + effectivePaymentMode + paymentResponsibility}
                       required={false}
                       accept="image/jpeg,image/png,application/pdf"
                       onChange={handleBuktiBayarChange}
@@ -2541,12 +2893,55 @@ export default function QuickBookingModal({
                   </div>
                   )}
                 </div>
+                )}
+
+                {channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT' && (
+                  <div>
+                    <label className="block text-xs font-semibold text-stone-700 mb-1">
+                      Upload Voucher / Bukti Booking OTA{' '}
+                      <span className="text-rose-500">*</span>
+                      <span className="text-stone-500 font-normal ml-1 text-[10px]">
+                        — Screenshot voucher atau bukti booking yang diterbitkan OTA
+                      </span>
+                    </label>
+                    <input
+                      type="file"
+                      key={channelType + effectivePaymentMode + paymentResponsibility}
+                      required={false}
+                      accept="image/jpeg,image/png,image/webp,application/pdf"
+                      onChange={handleBuktiBayarChange}
+                      className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-xl outline-none file:mr-3 file:py-1 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-800 file:text-white hover:file:bg-emerald-700 cursor-pointer"
+                    />
+                    {buktiBayarFile && (
+                      <span className="text-[11px] text-emerald-800 font-semibold mt-1 block">
+                        ✓ Voucher terpilih: {buktiBayarFile.name}
+                      </span>
+                    )}
+                  </div>
+                )}
+                {/* OTA_COLLECT info panel — shown only for OTA + OTA_COLLECT */}
+                {channelType === 'OTA' && paymentResponsibility === 'OTA_COLLECT' && (
+                  <div className="p-4 bg-emerald-50 rounded-xl border border-emerald-200 space-y-1">
+                    <p className="text-[12px] font-bold text-emerald-900 flex items-center gap-1.5">
+                      <svg className="w-4 h-4 text-emerald-700" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+                      Skema OTA Collect Aktif
+                    </p>
+                    <p className="text-[11px] text-emerald-800">
+                      Tamu telah membayar seluruh tagihan ke {selectedOtaSourceName || 'OTA'}.
+                    </p>
+                    {grandTotal > 0 && (
+                      <p className="text-[11px] text-emerald-800">
+                        Total tagihan hotel: <strong>Rp {grandTotal.toLocaleString('id-ID')}</strong> — dibayar oleh OTA, tidak ada pembayaran hotel.
+                      </p>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
             {/* Right 30% Sticky Financial Summary & Gate Indicator */}
-            <div className="lg:col-span-4 p-6 bg-stone-50/90 flex flex-col justify-between space-y-6">
-              <div className="space-y-5">
+            <div className="lg:col-span-4 p-6 bg-stone-50/90 flex flex-col justify-between space-y-6 overflow-y-auto">
+              <div inert={submitting || requestLocked} className="space-y-5">
                 <div className="p-4 bg-white rounded-2xl border border-stone-200 shadow-xs space-y-3">
                   <div className="flex items-center justify-between border-b border-stone-100 pb-2">
                     <h4 className="text-xs font-bold uppercase tracking-wider text-stone-700">
@@ -2649,10 +3044,14 @@ export default function QuickBookingModal({
                     <div className="flex justify-between text-stone-600 pt-1">
                       <span>Jumlah Dibayar</span>
                       <span className="font-mono font-semibold text-emerald-800">
-                        Rp {amountPaid.toLocaleString('id-ID')}
+                        Rp {paymentSummary.ordinaryPaid.toLocaleString('id-ID')}
                       </span>
                     </div>
 
+                    {effectivePaymentMode === 'ADVANCE_PAYMENT' && <div className="flex justify-between text-stone-600">
+                      <span>Uang Muka Diterima</span>
+                      <span className="font-mono font-semibold text-emerald-800">Rp {paymentSummary.advanceReceived.toLocaleString('id-ID')}</span>
+                    </div>}
                     <div className="flex justify-between text-stone-600">
                       <span>Sisa Tagihan</span>
                       <span className={'font-mono font-bold ' + (remainingBill > 0 ? 'text-amber-800' : 'text-emerald-800')}>
@@ -2713,10 +3112,13 @@ export default function QuickBookingModal({
               </div>
 
               {/* Action Buttons */}
-              <div className="space-y-2 pt-4 border-t border-stone-200">
+              <div className="space-y-2 pt-4 mt-6 border-t border-stone-200 shrink-0">
+                {requestLocked && !submitting && <p role="status" className="text-xs text-amber-900 bg-amber-50 border border-amber-200 rounded-xl p-3">
+                  {errorMsg || 'Pengiriman belum selesai.'} Isian dikunci agar pengiriman yang sama dapat diperiksa dengan aman.
+                </p>}
                 <button
                   type="button"
-                  disabled={!isValid || submitting || rulesLoading || !!rulesLoadError}
+                  disabled={submitting || completedRef.current || (requestLocked ? attemptRef.current?.propertyId !== propertyId : (!isValid || rulesLoading || !!rulesLoadError))}
                   onClick={handleSubmit}
                   className="w-full py-3 px-4 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed"
                 >
@@ -2729,15 +3131,16 @@ export default function QuickBookingModal({
                       Memproses Booking ({roomsList.length} Kamar)...
                     </>
                   ) : (
-                    'Buat Reservasi (' + roomsList.length + ' Kamar)'
+                    completedRef.current ? 'Reservasi Berhasil Dibuat' : requestLocked ? 'Coba Lagi — Periksa Pengiriman' : 'Buat Reservasi (' + roomsList.length + ' Kamar)'
                   )}
                 </button>
                 <button
                   type="button"
-                  onClick={onClose}
+                  onClick={handleClose}
+                  disabled={submitting}
                   className="w-full py-2.5 px-4 bg-stone-200 hover:bg-stone-300 text-stone-700 rounded-xl font-semibold text-xs transition-colors cursor-pointer"
                 >
-                  Batal
+                  {requestLocked ? 'Tutup Sementara' : 'Batal'}
                 </button>
               </div>
             </div>
@@ -2748,13 +3151,15 @@ export default function QuickBookingModal({
       {/* OCR Identity Extraction Review Modal */}
       <IdentityExtractionModal
         isOpen={isIdentityModalOpen}
-        onClose={() => setIsIdentityModalOpen(false)}
+        onClose={() => { setIsIdentityModalOpen(false); setIdentityModalMode('UPLOAD'); }}
         guestName={guestName}
         guestPhone={guestPhone}
         guestId={selectedCrmGuest?.id}
         propertyId={propertyId}
         onScanSuccess={handleIdentityConfirmed}
         onIdentityConfirmed={handleIdentityConfirmed}
+        mode={identityModalMode}
+        initialIdentityData={initialIdentityDataForModal}
       />
 
       {/* OTA Sources Master Manager Modal */}

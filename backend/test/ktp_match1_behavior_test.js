@@ -54,48 +54,39 @@ function api(method, urlPath, body) {
 // ── Fixture setup ────────────────────────────────────────────────────────────
 async function setupFixtures() {
   console.log('\n--- Setting up fixtures ---');
+  const ts = Date.now();
+  fixtures.createdBookingIds = [];
+  fixtures.createdGuestIds = [];
 
-  fixtures.propertyId = 1;
+  const propR = await pool.query(
+    `INSERT INTO properties (name, property_code, address) VALUES ($1, $2, 'Test Address') RETURNING id`,
+    [`KTP_MATCH1_${ts}`, `KM${String(ts).slice(-4)}`]
+  );
+  fixtures.propertyId = Number(propR.rows[0].id);
+  fixtures.createdPropertyId = fixtures.propertyId;
   console.log(`  property=${fixtures.propertyId}`);
 
-  const rtR = await pool.query("SELECT id FROM room_types WHERE property_id=$1 LIMIT 1", [fixtures.propertyId]);
-  fixtures.roomTypeId = rtR.rowCount
-    ? Number(rtR.rows[0].id)
-    : Number((await pool.query(
-      `INSERT INTO room_types (property_id,code,name,base_rate,capacity) VALUES ($1,'DLX','Deluxe KTP',500000,2) RETURNING id`,
-      [fixtures.propertyId]
-    )).rows[0].id);
+  const rtR = await pool.query(
+    `INSERT INTO room_types (property_id,code,name,base_rate,capacity) VALUES ($1,$2,'Deluxe KTP',500000,2) RETURNING id`,
+    [fixtures.propertyId, `DLX_${String(ts).slice(-6)}`]
+  );
+  fixtures.roomTypeId = Number(rtR.rows[0].id);
   console.log(`  room_type=${fixtures.roomTypeId}`);
 
-  // Unique dates — one per test that creates a booking (tests 4–18)
-  // Dynamically query availability_dates for free slots (free > 0).
-  const freeDatesR = await pool.query(`
-    SELECT date::text AS d FROM availability_dates
-    WHERE room_type_id = $1 AND total_rooms - reserved_qty > 0
-      AND date >= CURRENT_DATE
-    ORDER BY date
-    LIMIT 20
-  `, [fixtures.roomTypeId]);
-  if (freeDatesR.rows.length < 16) {
-    throw new Error(`Not enough free dates for room_type ${fixtures.roomTypeId}: found ${freeDatesR.rows.length}`);
-  }
-  const fixtureDates = freeDatesR.rows.slice(0, 16).map(r => {
-    const d = new Date(r.d);
-    return [
-      d.toISOString().slice(0, 10),
-      new Date(d.getTime() + 86400000).toISOString().slice(0, 10)
-    ];
-  });
-  fixtures.dates = fixtureDates;
+  const rpR = await pool.query(
+    `INSERT INTO rate_plans (property_id, room_type_id, code, name, base_rate, rate_type, is_active)
+     VALUES ($1, $2, 'KTP-BASE', 'Standard KTP Plan', 500000, 'OVERNIGHT', true) RETURNING id`,
+    [fixtures.propertyId, fixtures.roomTypeId]
+  );
+  fixtures.ratePlanId = Number(rpR.rows[0].id);
 
-  const ts = Date.now();
   // Create 16 rooms — one per test that creates a booking (tests 4–18 + test 19)
   fixtures.roomIds = [];
   for (let i = 0; i < 16; i++) {
     const rid = Number((await pool.query(
       `INSERT INTO rooms (property_id,room_number,name,room_type_id,status)
-       VALUES ($1,'TKTP${ts}-${i}','TestRoom${i}', $2,'VACANT_CLEAN') RETURNING id`,
-      [fixtures.propertyId, fixtures.roomTypeId]
+       VALUES ($1,$3,'TestRoom' || $4, $2,'VACANT_CLEAN') RETURNING id`,
+      [fixtures.propertyId, fixtures.roomTypeId, `KTP-${i + 1}`, String(i)]
     )).rows[0].id);
     fixtures.roomIds.push(rid);
   }
@@ -104,6 +95,22 @@ async function setupFixtures() {
   fixtures.roomIdC = fixtures.roomIds[2];
   console.log(`  rooms=[${fixtures.roomIds.slice(0,3).join(',')},...]`);
 
+  // Seed 20 future availability_dates for this isolated room_type
+  const baseDate = new Date(Date.UTC(2099, 4, 1));
+  const fixtureDates = [];
+  for (let i = 0; i < 20; i++) {
+    const d1 = new Date(baseDate.getTime() + i * 86400000).toISOString().slice(0, 10);
+    const d2 = new Date(baseDate.getTime() + (i + 1) * 86400000).toISOString().slice(0, 10);
+    await pool.query(
+      `INSERT INTO availability_dates (room_type_id, room_type, date, total_rooms, reserved_qty)
+       VALUES ($1, 'Deluxe KTP', $2, 16, 0)`,
+      [fixtures.roomTypeId, d1]
+    );
+    if (i < 16) {
+      fixtureDates.push([d1, d2]);
+    }
+  }
+  fixtures.dates = fixtureDates;
 
   // Guests A, B with unique 16-digit NIKs; Guest C for concurrent tests
   const nikTs = Date.now();
@@ -114,11 +121,12 @@ async function setupFixtures() {
   const sharedPhone = `08${String(nikTs).slice(-10)}`;
 
   const ga = (await pool.query(
-    `INSERT INTO guests (full_name,phone,normalized_identity_number,identity_number,
-     created_property_id,has_valid_identity) VALUES ($1,$2,$3,$4,$5,FALSE) RETURNING id`,
+    `INSERT INTO guests (full_name,phone,normalized_identity_number,identity_number,identity_path,
+     created_property_id,has_valid_identity) VALUES ($1,$2,$3,$4,'uploads/test-ktp-a.jpg',$5,FALSE) RETURNING id`,
     [`Guest Alpha`, sharedPhone, nikA, nikA, fixtures.propertyId]
   )).rows[0];
   fixtures.guestA = Number(ga.id);
+  fixtures.createdGuestIds.push(fixtures.guestA);
   fixtures.nikA = nikA;
   fixtures.phoneA = sharedPhone;
   console.log(`  guestA=${fixtures.guestA} nik=${nikA} phone=${sharedPhone}`);
@@ -129,6 +137,7 @@ async function setupFixtures() {
     [`Guest Beta`, nikB, nikB, fixtures.propertyId]
   )).rows[0];
   fixtures.guestB = Number(gb.id);
+  fixtures.createdGuestIds.push(fixtures.guestB);
   fixtures.nikB = nikB;
   console.log(`  guestB=${fixtures.guestB} nik=${nikB}`);
 
@@ -138,6 +147,7 @@ async function setupFixtures() {
     [`Guest Charlie`, sharedPhone, nikC, nikC, fixtures.propertyId]
   )).rows[0];
   fixtures.guestC = Number(gc.id);
+  fixtures.createdGuestIds.push(fixtures.guestC);
   fixtures.nikC = nikC;
   console.log(`  guestC=${fixtures.guestC} nik=${nikC} phone=${sharedPhone}`);
 
@@ -148,13 +158,23 @@ async function setupFixtures() {
 
 async function ensureActorUserId() {
   const r = await pool.query("SELECT id FROM users WHERE username='fo_staff' LIMIT 1");
-  fixtures.actorUserId = Number(r.rows[0].id);
+  if (r.rowCount > 0) {
+    fixtures.actorUserId = Number(r.rows[0].id);
+  } else {
+    const u = await pool.query(
+      `INSERT INTO users (property_id, role_id, username, email, password_hash, full_name)
+       VALUES ($1, 2, $2, $3, 'hash', 'Front Desk Staff') RETURNING id`,
+      [fixtures.propertyId, `fo_staff_${Date.now()}`, `fo_${Date.now()}@oaklawang.com`]
+    );
+    fixtures.actorUserId = Number(u.rows[0].id);
+    fixtures.createdUserId = fixtures.actorUserId;
+  }
   console.log(`  actorUserId=${fixtures.actorUserId}`);
 }
 
 // ── Auth (dynamic, no hardcoded JWT) ────────────────────────────────────────
 // The production secret lives in dist/domains/auth/authService.js.
-// We read it at runtime and generate a fresh token for fo_staff (id=2, property_id=1, role_id=2).
+// We read it at runtime and generate a fresh token for fo_staff.
 function getJwtSecret() {
   const src = fs.readFileSync(path.join(__dirname, '..', 'dist', 'domains', 'auth', 'authService.js'), 'utf8');
   const m = src.match(/JWT_SECRET\s*=\s*process\.env\.JWT_SECRET\s*\|\|\s*'([^']+)'/);
@@ -165,7 +185,7 @@ function getJwtSecret() {
 async function dynamicLogin() {
   const secret = getJwtSecret();
   const payload = {
-    id: 2,
+    id: fixtures.actorUserId,
     property_id: fixtures.propertyId,
     role_id: 2,
     username: 'fo_staff',
@@ -221,7 +241,7 @@ async function createBookingViaApi(checkIn, checkOut, options = {}) {
     guest_segment: 'Reguler',
     currency_code: 'IDR',
     has_valid_identity: true,
-    rate_plan_id: 1,
+    rate_plan_id: fixtures.ratePlanId,
     payment_method: 'CASH',
     reservations: [{
       room_id: roomId,
@@ -231,9 +251,11 @@ async function createBookingViaApi(checkIn, checkOut, options = {}) {
       total_price: 500000,
       discount_amount: 0,
       discount_percent: 0,
-      amount_paid: 0,
-      remaining_balance: 500000,
-      payment_status: 'UNPAID',
+      amount_paid: 500000,
+      remaining_balance: 0,
+      payment_status: 'PAID',
+      bukti_bayar_path: 'uploads/test-bukti.jpg',
+      ktp_path: 'uploads/test-ktp.jpg',
       booking_type: 'WALKIN'
     }]
   });
@@ -245,7 +267,16 @@ async function createBookingViaApi(checkIn, checkOut, options = {}) {
   if (Number.isNaN(reservationId)) {
     throw new Error(`Cannot parse reservation ID from response: ${JSON.stringify(data).slice(0, 200)}`);
   }
-  return { bookingId: Number(data.booking_id || data.id), reservationId };
+  const bookingId = Number(data.booking_id || data.id);
+  if (!Number.isNaN(bookingId) && fixtures.createdBookingIds) {
+    fixtures.createdBookingIds.push(bookingId);
+  }
+  await pool.query(
+    `INSERT INTO identity_custody (property_id, reservation_id, scope, document_type, document_holder_name, status, received_by)
+     VALUES ($1, $2, 'ROOM_RESERVATION', 'KTP', 'Guest Alpha', 'HELD', 'fo_staff')`,
+    [fixtures.propertyId, reservationId]
+  );
+  return { bookingId, reservationId };
 }
 
 async function setPrimaryGuest(reservationId, guestId, relationSource = 'MANUAL_ENTRY') {
@@ -286,6 +317,11 @@ async function callConfirmIdentity(uploadId, input) {
 }
 
 async function cleanupReservation(reservationId) {
+  await pool.query('DELETE FROM identity_custody WHERE reservation_id=$1', [reservationId]).catch(() => {});
+  await pool.query('DELETE FROM payment_evidences WHERE reservation_id=$1', [reservationId]).catch(() => {});
+  await pool.query('DELETE FROM payment_transactions WHERE reservation_id=$1', [reservationId]).catch(() => {});
+  await pool.query('DELETE FROM folio_entries WHERE reservation_id=$1', [reservationId]).catch(() => {});
+  await pool.query('DELETE FROM reservation_nightly_rates WHERE reservation_id=$1', [reservationId]).catch(() => {});
   await pool.query('DELETE FROM reservation_guests WHERE reservation_id=$1', [reservationId]).catch(() => {});
   await pool.query("DELETE FROM audit_logs WHERE entity='RESERVATION' AND record_id=$1", [String(reservationId)]).catch(() => {});
   await pool.query("DELETE FROM audit_logs WHERE entity='RESERVATION_GUEST' AND record_id=$1", [String(reservationId)]).catch(() => {});
@@ -298,7 +334,12 @@ async function cleanupReservation(reservationId) {
 }
 
 async function cleanupUploads() {
+  const STORAGE_BASE_DIR = path.resolve(__dirname, '..', 'storage');
   for (const id of uuidsToCleanup) {
+    const r = await pool.query('SELECT storage_key FROM identity_document_uploads WHERE id=$1', [id]).catch(() => ({ rows: [] }));
+    if (r.rows[0]?.storage_key) {
+      try { fs.unlinkSync(path.join(STORAGE_BASE_DIR, r.rows[0].storage_key)); } catch {}
+    }
     await pool.query('DELETE FROM identity_document_uploads WHERE id=$1', [id]).catch(() => {});
   }
 }
@@ -308,6 +349,28 @@ async function fullCleanup() {
     await cleanupReservation(fixtures.tmpResId);
   }
   await cleanupUploads();
+  if (fixtures.createdPropertyId) {
+    const pId = fixtures.createdPropertyId;
+    await pool.query('DELETE FROM identity_custody WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM payment_evidences WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id=$1))', [pId]).catch(() => {});
+    await pool.query('DELETE FROM payment_transactions WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id=$1))', [pId]).catch(() => {});
+    await pool.query('DELETE FROM folio_entries WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM reservation_nightly_rates WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id=$1))', [pId]).catch(() => {});
+    await pool.query('DELETE FROM reservation_guests WHERE reservation_id IN (SELECT id FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id=$1))', [pId]).catch(() => {});
+    await pool.query('DELETE FROM reservations WHERE booking_id IN (SELECT id FROM bookings WHERE property_id=$1)', [pId]).catch(() => {});
+    await pool.query('DELETE FROM bookings WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM availability_dates WHERE room_type_id IN (SELECT id FROM room_types WHERE property_id=$1)', [pId]).catch(() => {});
+    await pool.query('DELETE FROM rooms WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM rate_plans WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM room_types WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM identity_document_uploads WHERE property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM guests WHERE created_property_id=$1', [pId]).catch(() => {});
+    await pool.query('DELETE FROM audit_logs WHERE property_id=$1', [pId]).catch(() => {});
+    if (fixtures.createdUserId) {
+      await pool.query('DELETE FROM users WHERE id=$1', [fixtures.createdUserId]).catch(() => {});
+    }
+    await pool.query('DELETE FROM properties WHERE id=$1', [pId]).catch(() => {});
+  }
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -402,23 +465,34 @@ async function test2_no_phone_fallback() {
   pass('2: Returned guest has NIK_B2');
 }
 
-// Test 3: CRM_EDIT phone fallback still resolves A when explicitly allowed
+// Test 3: CRM_EDIT phone fallback blocks cross-person overwrite and allows same-person unverified CRM update
 async function test3_crm_edit_phone_fallback() {
-  console.log('\n--- Test 3: CRM_EDIT phone fallback resolves existing guest ---');
-  // Use a FRESH NIK_CRM that does NOT belong to any guest, paired with PHONE_A.
-  // In CRM_EDIT context, skipPhoneFallback=false, so phone fallback runs.
+  console.log('\n--- Test 3: CRM_EDIT phone fallback guards cross-person & allows same-person ---');
   const nikCrm = '32' + String(Date.now() + 7000).padStart(14, '0').slice(-14);
-  const uploadId = await createUploadRow(nikCrm, 'Guest Beta CRM KTP');
-  const r = await callConfirmIdentity(uploadId, {
+  const uploadCrossId = await createUploadRow(nikCrm, 'Guest Beta CRM KTP');
+  const rCross = await callConfirmIdentity(uploadCrossId, {
     guest_id: null,
     name: 'Guest Beta CRM',
-    nik: nikCrm,           // not in DB — NIK lookup returns null
-    phone: fixtures.phoneA, // matches Guest A — phone fallback finds A
-    context: 'CRM_EDIT'     // skipPhoneFallback=false, phone IS consulted
+    nik: nikCrm,
+    phone: fixtures.phoneA,
+    context: 'CRM_EDIT'
   });
-  assert.strictEqual(r.status, 200, `Expected 200, got ${r.status}: ${JSON.stringify(r.body).slice(0,200)}`);
-  assert.strictEqual(Number(r.body.data.id), fixtures.guestA, '3: CRM_EDIT resolves Guest A via phone');
-  pass('3: CRM_EDIT phone fallback resolves existing guest');
+  assert.strictEqual(rCross.status, 409, `Expected 409 for cross-person phone fallback, got ${rCross.status}`);
+  assert.strictEqual(rCross.body.code, 'GUEST_IDENTITY_TARGET_MISMATCH', '3a: Cross-person phone fallback rejected');
+  pass('3a: Cross-person CRM_EDIT phone fallback rejected with 409 GUEST_IDENTITY_TARGET_MISMATCH');
+
+  // Positive case: unverified Guest Alpha with same person name is resolved via phone in CRM_EDIT
+  const uploadSameId = await createUploadRow(fixtures.nikA, 'Guest Alpha CRM KTP');
+  const rSame = await callConfirmIdentity(uploadSameId, {
+    guest_id: null,
+    name: 'Guest Alpha',
+    nik: '',
+    phone: fixtures.phoneA,
+    context: 'CRM_EDIT'
+  });
+  assert.strictEqual(rSame.status, 200, `Expected 200 for same-person CRM_EDIT, got ${rSame.status}: ${JSON.stringify(rSame.body).slice(0,200)}`);
+  assert.strictEqual(Number(rSame.body.data.id), fixtures.guestA, '3b: CRM_EDIT resolves Guest A via phone when same person');
+  pass('3b: CRM_EDIT phone fallback resolves same-person unverified guest');
 }
 
 // ── Test 4–10: PRIMARY_GUEST replacement ────────────────────────────────────
@@ -706,7 +780,7 @@ async function test11_checkin_cas_success_matching() {
     const r = await api('POST', `/api/reservations/${reservationId}/checkin`, {
       property_id: fixtures.propertyId,
       actor_user_id: fixtures.actorUserId,
-      force: false,
+      force: true,
       expected_primary_guest_id: fixtures.guestA
     });
     assert.strictEqual(r.status, 200, `11: Expected 200, got ${r.status}: ${JSON.stringify(r.body).slice(0, 200)}`);
@@ -968,8 +1042,10 @@ async function main() {
   } finally {
     await fullCleanup();
     await pool.end();
-    server.close();
+    if (server && server.closeAllConnections) server.closeAllConnections();
+    if (server) server.close();
   }
+  process.exit(results.fail > 0 ? 1 : 0);
 }
 
 main().catch(e => { console.error('Fatal:', e); process.exit(1); });

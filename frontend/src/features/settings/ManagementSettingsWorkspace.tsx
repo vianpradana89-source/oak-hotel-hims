@@ -5,11 +5,15 @@ import { HousekeepingSettingsTab } from '../housekeeping/HousekeepingSettingsTab
 import { AttendanceSettingsTab } from './AttendanceSettingsTab';
 import { HrdRolePolicyTab } from './HrdRolePolicyTab';
 import { FrontOfficeSettingsTab } from './FrontOfficeSettingsTab';
+import { PaymentInstructionsSettingsTab } from './PaymentInstructionsSettingsTab';
+import { PosCommunicationSettingsTab } from './PosCommunicationSettingsTab';
+import { PosPricingSettingsTab } from './PosPricingSettingsTab';
 import { PropertyManagementTab } from './PropertyManagementTab';
 import { RolePermissionsTab } from '../hrd/RolePermissionsTab';
 import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab';
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { uploadPropertyLogo, deletePropertyLogo } from '../propertySettings/propertyBrandingApi';
 
 export type SettingsCategoryKey =
   | 'property'
@@ -52,6 +56,8 @@ export interface ManagementSettingsWorkspaceProps {
   onSelectProperty?: (propertyId: number) => void;
   onRefreshProperties?: () => void;
   onPermissionsUpdated?: (newMatrixMap: Record<string, string[]>) => void;
+  onFeatureFlagUpdated?: (featureKey: string, enabled: boolean) => void;
+  onLogoUploaded?: () => void;
 }
 
 export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspaceProps> = ({
@@ -65,6 +71,8 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   apiBaseUrl = '/api',
   onSelectProperty,
   onRefreshProperties,
+  onFeatureFlagUpdated,
+  onLogoUploaded,
 }) => {
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryKey>(initialCategory);
   const [featureFlags, setFeatureFlags] = useState<Record<string, boolean>>({});
@@ -73,6 +81,8 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [hrSubTab, setHrSubTab] = useState<'STAFF' | 'ATTENDANCE' | 'ROLE_POLICY'>('STAFF');
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [isDeletingLogo, setIsDeletingLogo] = useState(false);
 
   // Sync initialCategory if changed externally (e.g. from HK shortcut)
   useEffect(() => {
@@ -86,9 +96,9 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     setIsLoading(true);
     try {
       const [featuresRes, hkSetRes, hkTplRes] = await Promise.all([
-        fetch(`${apiBaseUrl}/properties/${propertyId}/features`),
-        fetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`),
-        fetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`)
+        authenticatedFetch(`${apiBaseUrl}/properties/${propertyId}/features`),
+        authenticatedFetch(`${apiBaseUrl}/housekeeping/settings?property_id=${propertyId}`),
+        authenticatedFetch(`${apiBaseUrl}/housekeeping/templates?property_id=${propertyId}`)
       ]);
 
       if (featuresRes.ok) {
@@ -127,6 +137,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
         throw new Error(err.message || 'Gagal mengubah status fitur');
       }
       setFeatureFlags((prev) => ({ ...prev, [featureKey]: enabled }));
+      onFeatureFlagUpdated?.(featureKey, enabled);
       setFeedback({
         type: 'success',
         message: `Status fitur '${featureKey}' berhasil disimpan (${enabled ? 'Aktif' : 'Nonaktif'}).`
@@ -168,6 +179,46 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
         message: err.message || 'Gagal menyimpan pengaturan housekeeping'
       });
       throw err;
+    }
+  };
+
+  // Handle Logo Upload
+  const handleLogoUpload = async (file: File) => {
+    setIsUploadingLogo(true);
+    try {
+      await uploadPropertyLogo(propertyId, file);
+      setFeedback({
+        type: 'success',
+        message: 'Logo properti berhasil diunggah.',
+      });
+      onLogoUploaded?.();
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err.message || 'Gagal mengunggah logo.',
+      });
+    } finally {
+      setIsUploadingLogo(false);
+    }
+  };
+
+  // Handle Logo Delete
+  const handleLogoDelete = async () => {
+    setIsDeletingLogo(true);
+    try {
+      await deletePropertyLogo(propertyId);
+      setFeedback({
+        type: 'success',
+        message: 'Logo properti berhasil dihapus.',
+      });
+      onLogoUploaded?.();
+    } catch (err: any) {
+      setFeedback({
+        type: 'error',
+        message: err.message || 'Gagal menghapus logo.',
+      });
+    } finally {
+      setIsDeletingLogo(false);
     }
   };
 
@@ -266,10 +317,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
     {
       key: 'pos',
       label: 'POS & F&B',
-      description: 'Pengaturan outlet restoran, printer kasir, dan integrasi bill-to-room.',
-      status: 'CONFIGURED',
-      badgeLabel: 'Terkonfigurasi',
-      isImplemented: false,
+      description: 'Metode pembayaran POS, QRIS resmi, rekening Transfer, dan terminal Debit / EDC.',
+      status: 'ACTIVE',
+      badgeLabel: 'Pembayaran',
+      isImplemented: true,
       icon: ({ className }) => (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -635,6 +686,44 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
                     </div>
                   </div>
 
+                  {/* Module Group: Dokumen & Print */}
+                  <div className="space-y-3 pt-4 border-t border-neutral-200">
+                    <div className="text-xs font-bold text-neutral-900 uppercase tracking-wider">
+                      Modul Dokumen & Print
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-1 gap-3">
+                      {[
+                        { key: 'documents.enabled', label: 'Dokumen & Print', desc: 'Kuisioner, Kwitansi, Invoice, Nota, dan cetak dokumen reservasi' },
+                      ].map((mod) => {
+                        const isEnabled = featureFlags[mod.key] !== false;
+                        return (
+                          <div
+                            key={mod.key}
+                            className={`p-3 rounded-xl border flex items-center justify-between gap-3 ${
+                              isEnabled ? 'bg-emerald-50/30 border-emerald-200' : 'bg-neutral-50 border-neutral-200'
+                            }`}
+                          >
+                            <div>
+                              <div className="text-xs font-bold text-neutral-800">{mod.label}</div>
+                              <div className="text-[11px] text-neutral-500">{mod.desc}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleUpdateFeatureFlag(mod.key, !isEnabled)}
+                              className={`px-2.5 py-1 text-xs font-bold rounded-lg shrink-0 cursor-pointer ${
+                                isEnabled
+                                  ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                                  : 'bg-neutral-200 text-neutral-600'
+                              }`}
+                            >
+                              {isEnabled ? 'AKTIF' : 'NONAKTIF'}
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
                   {/* Module Group: Roadmap Modules */}
                   <div className="space-y-3 pt-4 border-t border-neutral-200">
                     <div className="flex items-center gap-2">
@@ -674,6 +763,10 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
               propertyId={propertyId}
               initialBranding={activeBranding || getFallbackPropertyBranding(propertyId, activeProperty?.name, activeProperty?.property_code)}
               onSaveBranding={onSaveBranding}
+              onUploadLogo={handleLogoUpload}
+              onDeleteLogo={handleLogoDelete}
+              isUploading={isUploadingLogo}
+              isDeleting={isDeletingLogo}
             />
           )}
 
@@ -771,6 +864,14 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <FrontOfficeSettingsTab propertyId={propertyId} apiBaseUrl={apiBaseUrl} />
           )}
 
+          {activeCategory === 'pos' && (
+            <>
+              <PaymentInstructionsSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+              <PosPricingSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+              <PosCommunicationSettingsTab propertyId={propertyId} activeProperty={activeProperty} apiBaseUrl={apiBaseUrl} />
+            </>
+          )}
+
           {activeCategory === 'transactions' && (
             <PurchaseOperationalSettingsTab propertyId={propertyId} />
           )}
@@ -780,7 +881,7 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
           )}
 
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'users_permissions'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'pos', 'users_permissions'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

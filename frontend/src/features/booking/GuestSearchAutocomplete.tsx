@@ -53,7 +53,7 @@ export default function GuestSearchAutocomplete({
       return;
     }
 
-    if (!query || query.trim().length < 2) {
+    if (!query || query.trim().length < 1) {
       setResults([]);
       return;
     }
@@ -161,7 +161,7 @@ export default function GuestSearchAutocomplete({
       </div>
 
       {/* Autocomplete Dropdown */}
-      {isOpen && query.trim().length >= 2 && (
+      {isOpen && query.trim().length >= 1 && (
         <div className="absolute z-50 left-0 right-0 mt-1 bg-white border border-emerald-900/15 rounded-xl shadow-xl overflow-hidden max-h-72 overflow-y-auto divide-y divide-stone-100 animate-in fade-in slide-in-from-top-1 duration-150">
           <div className="px-3 py-2 bg-stone-50 border-b border-stone-200/60 text-[11px] font-semibold text-stone-500 uppercase tracking-wider flex justify-between items-center">
             <span>Database Tamu Hotel</span>

@@ -6,9 +6,10 @@ import {
   hashPassword,
   comparePassword,
   completeInitialPassword,
-  getOnboardingStatus
+  getOnboardingStatus,
+  getUserEffectivePermissions
 } from './authService';
-import { requireAuth, type AuthenticatedRequest } from './authMiddleware';
+import { requireAuth, requirePmsAccess, type AuthenticatedRequest } from './authMiddleware';
 import { enrollFace } from './faceEnrollmentService';
 
 export function createAuthRouter(pool: Pool): Router {
@@ -93,6 +94,36 @@ export function createAuthRouter(pool: Pool): Router {
         status: 'ERROR',
         code: 'INTERNAL_ERROR',
         message: err.message
+      });
+    }
+  });
+
+  // 2b. GET /api/auth/permissions (Protected - returns effective granular permission keys)
+  router.get('/permissions', requireAuth, requirePmsAccess, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const userId = req.user?.id;
+      if (!userId) {
+        return res.status(401).json({
+          status: 'ERROR',
+          code: 'UNAUTHORIZED',
+          message: 'User ID tidak ditemukan.'
+        });
+      }
+      const permKeys = await getUserEffectivePermissions(pool, userId);
+      return res.json({
+        status: 'OK',
+        data: {
+          permissions: permKeys
+        }
+      });
+    } catch (err: any) {
+      const statusCode = err.statusCode || 500;
+      const code = err.code || 'INTERNAL_ERROR';
+      const message = err.message || 'Gagal mengambil permissions.';
+      return res.status(statusCode).json({
+        status: 'ERROR',
+        code,
+        message
       });
     }
   });

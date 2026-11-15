@@ -75,12 +75,16 @@ function replayPool({ actualType, depositId = 10, replayDepositId = 10 }) {
       if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') return { rows: [], rowCount: 0 };
       if (text.includes('pg_advisory_xact_lock')) return { rows: [{}], rowCount: 1 };
       if (text.includes('FROM reservations r')) return { rows: [{ id: 20, booking_property_id: 1 }], rowCount: 1 };
+      // refundDeposit scope-preview (advisory, non-locking) — room-scope refund.
+      if (text.includes('SELECT scope, booking_id, reservation_id FROM deposits')) {
+        return { rows: [{ scope: 'ROOM_RESERVATION', booking_id: null, reservation_id: 20 }], rowCount: 1 };
+      }
       if (text.includes('SELECT * FROM deposits') && text.includes('FOR UPDATE')) {
-        return { rows: [{ id: depositId, property_id: 1, reservation_id: 20, original_amount: 500, deposit_number: 'DEP-OAK-00001' }], rowCount: 1 };
+        return { rows: [{ id: depositId, property_id: 1, reservation_id: 20, original_amount: 500, deposit_number: 'DEP-OAK-00001', purpose: 'ADVANCE_PAYMENT' }], rowCount: 1 };
       }
       if (text.includes('WHERE e.property_id') && text.includes('idempotency_key')) return { rows: [replayEvent], rowCount: 1 };
       if (text === 'SELECT * FROM deposits WHERE id = $1') {
-        return { rows: [{ id: replayDepositId, property_id: 1, reservation_id: 20, original_amount: 500, deposit_number: 'DEP-OAK-00001' }], rowCount: 1 };
+        return { rows: [{ id: replayDepositId, property_id: 1, reservation_id: 20, original_amount: 500, deposit_number: 'DEP-OAK-00001', purpose: 'ADVANCE_PAYMENT' }], rowCount: 1 };
       }
       if (text.includes('FROM deposit_events e') && text.includes('ORDER BY e.id')) return { rows: events, rowCount: 1 };
       throw new Error(`Unexpected query: ${text}`);
@@ -101,7 +105,8 @@ async function expectReplay(operation, type, input) {
 async function main() {
   const { applyDeposit, receiveDeposit, refundDeposit, reverseDeposit } = loadService();
   const actor = { userId: '7', name: 'Front Desk', role: 'Front Office' };
-  const base = { propertyId: 1, reservationId: 20, idempotencyKey: 'stable-key', actor };
+  // DEPOSIT-PURPOSE-PHASE-A: purpose now mandatory on create; fixtures carry it.
+  const base = { propertyId: 1, reservationId: 20, idempotencyKey: 'stable-key', actor, purpose: 'ADVANCE_PAYMENT' };
 
   await test('receive replay returns the existing deposit without mutation', () => expectReplay(receiveDeposit, 'RECEIVED', {
     ...base, amount: 500, paymentMethod: 'cash'

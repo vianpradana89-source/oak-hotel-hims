@@ -112,6 +112,12 @@ export const SYSTEM_AVAILABLE_MENUS: MenuItemMeta[] = [
     label: 'Pengaturan Properti',
     group: 'Manajemen',
     description: 'Identitas hotel, branding, konfigurasi durasi day use, dan kebijakan properti.'
+  },
+  {
+    key: 'Dokumen & Print',
+    label: 'Dokumen & Print',
+    group: 'Manajemen',
+    description: 'Manajemen kuitansi, invoice, kwitansi, dan cetak dokumen reservasi/tamu.'
   }
 ];
 
@@ -128,6 +134,7 @@ export const ROLE_PERMISSIONS: Record<StandardRole, MainNavKey[]> = {
     'Laporan',
     'Employee Mobile',
     'Pengaturan',
+    'Dokumen & Print',
   ],
   'General Manager': [
     'Kalender',

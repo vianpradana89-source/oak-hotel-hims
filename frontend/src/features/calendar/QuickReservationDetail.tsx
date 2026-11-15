@@ -1,13 +1,18 @@
-import { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { normalizeHotelDate } from './calendarDates';
 import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
+import { ComplimentaryActionModal } from './ComplimentaryActionModal';
+import { getComplimentaryRequest, type ComplimentaryRequest, ComplimentaryApiError } from './complimentaryApi';
 import { useAuth } from '../auth/AuthContext';
 import DepositGuaranteeSection from '../deposits/DepositGuaranteeSection';
+import POSOrderPanel from '../pos/POSOrderPanel';
+import { getPosAccess } from '../pos/posPermissions';
 import {
   formatReservationRatePlanLabel,
   formatReservationSourceLabel,
+  isOtaReservation,
   reservationSpecialRequestsText,
 } from './reservationContextMetadata';
 
@@ -15,7 +20,14 @@ import {
   CANONICAL_CHECKIN_REQUIREMENT_LABELS,
   getMissingRequirementLabel,
   evaluatePrecheckinReadiness,
+  resolveAuthoritativeReservationFinancials,
 } from './precheckinGateUi';
+import { useWhatsAppQuickAction } from './useWhatsAppQuickAction';
+import WhatsAppQuickActionModal from './WhatsAppQuickActionModal';
+import ThermalReceiptModal from '../thermalReceipt/ThermalReceiptModal';
+import RegistrationFormModal from '../print/registration/RegistrationFormModal';
+import type { PropertyBrandingConfig } from '../propertySettings/propertyBrandingTypes';
+import { Tooltip } from '../../design-system/Tooltip';
 
 export { CANONICAL_CHECKIN_REQUIREMENT_LABELS };
 
@@ -31,6 +43,27 @@ export interface QuickReservationDetailProps {
   onCancel?: (reservationId: number) => void;
   onOpenStayChange?: (reservation: any) => void;
   onRefresh?: () => void;
+  // COMPLIMENTARY REALTIME: parent-owned refresh signal for complimentary changes.
+  complimentaryRefreshVersion?: number;
+  complimentaryRefreshReservationId?: number | null;
+  // Print: property branding & info for ThermalReceiptModal (optional; modal uses defaults when null)
+  propertyBranding?: PropertyBrandingConfig | null;
+  propertyInfo?: { id?: number; name?: string; address?: string | null; phone?: string | null } | null;
+  /** Buka PosModal scoped ke reservation ini (dipanggil dari POSOrderPanel "Tambah Order") */
+  onOpenPosModal?: (
+    propertyId: number,
+    reservationId: number,
+    context?: {
+      guestName?: string | null;
+      roomNumber?: string | null;
+      reservationStatus?: string | null;
+    },
+  ) => void;
+  /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */
+  posOrdersRefreshVersion?: number;
+  posOrdersRefreshReservationId?: number | null;
+  /** Buka modal pembayaran CASH untuk order POS (forward ke App). */
+  onOpenCashPayment?: (ctx: import('../pos/PosPayCashModal').PosPayCashOrderContext) => void;
 }
 
 export default function QuickReservationDetail({
@@ -44,16 +77,30 @@ export default function QuickReservationDetail({
   onCheckout,
   onCancel,
   onOpenStayChange,
-  onRefresh
+  onRefresh,
+  complimentaryRefreshVersion,
+  complimentaryRefreshReservationId,
+  propertyBranding,
+  propertyInfo,
+  onOpenPosModal,
+  posOrdersRefreshVersion,
+  posOrdersRefreshReservationId,
+  onOpenCashPayment,
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [isMoreActionsOpen, setIsMoreActionsOpen] = useState<boolean>(false);
+  const [isThermalModalOpen, setIsThermalModalOpen] = useState<boolean>(false);
+  const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState<boolean>(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [bidCopied, setBidCopied] = useState<boolean>(false);
   const [requestingInspection, setRequestingInspection] = useState<boolean>(false);
   const [inspectionFeedback, setInspectionFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-  const { authFetch } = useAuth();
+  const { authFetch, hasGranularPermission, effectiveAccess } = useAuth();
+  const posAccess = useMemo(
+    () => getPosAccess(effectiveAccess, hasGranularPermission),
+    [effectiveAccess, hasGranularPermission],
+  );
 
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number }>({ top: 100, left: 100 });
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -173,9 +220,18 @@ export default function QuickReservationDetail({
   }, [updatePosition]);
 
   // Close on Escape or outside click
+  // POS overlay di atas reservasi: skip close logic saat POS terbuka
+  // agar reservasi tetap terbuka di belakang dan fokus/Escape di POS.
+  // Overlay pembayaran CASH (data-pos-cash-payment-overlay) juga skip close —
+  // pembayaran punya guard close-nya sendiri di PosPayCashModal.
   useEffect(() => {
+    const topOverlayPresent = () =>
+      !!document.querySelector('[data-pos-modal-overlay="true"]') ||
+      !!document.querySelector('[data-pos-cash-payment-overlay="true"]');
+
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
+        if (topOverlayPresent()) return; // Overlay teratas — jangan tutup reservasi
         if (isMoreActionsOpen) {
           setIsMoreActionsOpen(false);
         } else {
@@ -189,6 +245,11 @@ export default function QuickReservationDetail({
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         if ((target as Element).closest?.('[data-portal-overlay]')) return;
         if ((target as Element).closest?.('[role="dialog"]')) return;
+        // Klik di dalam POS / pembayaran overlay → skip close reservasi
+        if (
+          (target as Element).closest?.('[data-pos-modal-overlay]') ||
+          (target as Element).closest?.('[data-pos-cash-payment-overlay]')
+        ) return;
         onClose();
       }
       if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
@@ -218,26 +279,41 @@ export default function QuickReservationDetail({
   const roomTypeName = data.room_type_name || data.room_type || data.room_variant || 'Standard Room';
   const bid = String(data.bid || data.booking_bid || data.booking_number || `#${data.id}`);
 
+  // ── GUEST-COMM-WA: WhatsApp quick action hook ────────────────────────────
+  const waHooks = useWhatsAppQuickAction({
+    activePropId,
+    guestPhone,
+    primaryGuestId: data?.primary_guest?.primary_guest_id ?? null,
+    reservationId: data?.id ?? null,
+  });
+
   const checkIn = normalizeHotelDate(data.check_in) || String(data.check_in || '').slice(0, 10);
   const checkOut = normalizeHotelDate(data.check_out) || String(data.check_out || '').slice(0, 10);
   const nights = Number(data.nights || data.num_nights || 1);
   const isDayUse = data.stay_type === 'DAY_USE';
   const sourceLabel = formatReservationSourceLabel(data);
   const ratePlanLabel = formatReservationRatePlanLabel(data);
+  // Rate Plan information is hidden for OTA reservations for display clarity.
+  // The data is preserved; only the UI cell is omitted.
+  const hideRatePlan = isOtaReservation(data);
   const specialRequestsNote = reservationSpecialRequestsText(data);
 
-  // Financial status & values
-  const totalPrice = Number(data.total_price || 0);
-  const amountPaid = Number(data.amount_paid || 0);
-  const appliedDeposit = Number(data.applied_deposit || 0);
-  const remainingBalance = Math.max(0, Number(data.remaining_balance ?? Math.max(0, totalPrice - amountPaid - appliedDeposit)));
+  // Financial status & values (uses authoritative_financials when available)
+  const {
+    totalPrice,
+    amountPaid,
+    remainingBalance,
+    paymentStatus: canonicalPaymentStatus,
+  } = resolveAuthoritativeReservationFinancials(data, undefined, {
+    isCancelled,
+    activePropertyId: activePropId,
+  });
 
   const getPaymentStatus = () => {
-    const pStatus = String(data.payment_status || '').toUpperCase();
-    if (pStatus === 'PAID' || pStatus === 'LUNAS' || (totalPrice > 0 && amountPaid >= totalPrice)) {
+    if (canonicalPaymentStatus === 'PAID') {
       return { label: 'Lunas', badgeClass: 'bg-emerald-50 text-emerald-800 border-emerald-200' };
     }
-    if (pStatus === 'PARTIAL' || pStatus === 'SEBAGIAN' || (amountPaid > 0 && amountPaid < totalPrice)) {
+    if (canonicalPaymentStatus === 'PARTIAL') {
       return { label: 'Sebagian', badgeClass: 'bg-amber-50 text-amber-800 border-amber-200' };
     }
     return { label: 'Belum Bayar', badgeClass: 'bg-rose-50 text-rose-800 border-rose-200' };
@@ -300,6 +376,87 @@ export default function QuickReservationDetail({
 
   const isMobile = typeof window !== 'undefined' && window.innerWidth < 640;
 
+
+  // COMPLIMENTARY HOOKS
+  const complimentaryLoadSeqRef = useRef(0);
+  const [complimentaryRequest, setComplimentaryRequest] = useState<ComplimentaryRequest | null>(null);
+  const [complimentaryLoading, setComplimentaryLoading] = useState(false);
+  const [complimentaryError, setComplimentaryError] = useState<string | null>(null);
+  const [selectedComplimentaryAction, setSelectedComplimentaryAction] = useState<'REQUEST' | 'APPROVE' | 'REJECT' | 'REVOKE' | null>(null);
+  const [complimentaryModalOpen, setComplimentaryModalOpen] = useState(false);
+
+  const complimentaryReservationId = data?.id ?? null;
+  const hasViewPermission = hasGranularPermission('reservations.complimentary.view');
+  const hasRequestPermission = hasGranularPermission('reservations.complimentary.request');
+  const hasApprovePermission = hasGranularPermission('reservations.complimentary.approve');
+  const hasRevokePermission = hasGranularPermission('reservations.complimentary.revoke');
+
+  const loadComplimentary = useCallback(async () => {
+    const seq = ++complimentaryLoadSeqRef.current;
+    if (!complimentaryReservationId || !activePropId || !hasViewPermission) {
+      setComplimentaryRequest(null);
+      setComplimentaryError(null);
+      setComplimentaryLoading(false);
+      return;
+    }
+    setComplimentaryLoading(true);
+    setComplimentaryError(null);
+    setComplimentaryRequest(null);
+    try {
+      const req = await getComplimentaryRequest(complimentaryReservationId, activePropId, authFetch);
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      setComplimentaryRequest(req);
+    } catch (err) {
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      if (err instanceof ComplimentaryApiError && (err.httpStatus === 404 || err.backendCode === 'NOT_FOUND')) {
+        setComplimentaryRequest(null);
+        return;
+      }
+      if (err instanceof ComplimentaryApiError && (err.httpStatus === 403 || err.backendCode === 'FORBIDDEN')) {
+        setComplimentaryRequest(null);
+        setComplimentaryError(null);
+        return;
+      }
+      setComplimentaryError(err instanceof Error ? err.message : String(err));
+      setComplimentaryRequest(null);
+    } finally {
+      if (seq !== complimentaryLoadSeqRef.current) return;
+      setComplimentaryLoading(false);
+    }
+  }, [complimentaryReservationId, activePropId, authFetch, hasViewPermission]);
+
+  useEffect(() => {
+    void loadComplimentary();
+  }, [loadComplimentary]);
+
+  useEffect(() => {
+    return () => {
+      complimentaryLoadSeqRef.current += 1;
+    };
+  }, []);
+
+  const handleComplimentarySuccess = useCallback(async () => {
+    if (!complimentaryReservationId) return;
+    await loadComplimentary();
+    await Promise.resolve(handleRefresh());
+  }, [complimentaryReservationId, loadComplimentary, handleRefresh]);
+
+  // COMPLIMENTARY REALTIME: refetch complimentary section when parent signals
+  // a ComplimentaryUpdated SSE event for the SAME reservation this panel is showing.
+  // - version 0 / absent signal is ignored
+  // - only fires when the signaled reservation id matches this panel's id
+  const _complimentaryRefreshVersionNum = Number(complimentaryRefreshVersion) || 0;
+  const _complimentaryRefreshSignalResId = Number(complimentaryRefreshReservationId);
+  const _currentComplimentaryResId = Number(complimentaryReservationId);
+  useEffect(() => {
+    if (_complimentaryRefreshVersionNum <= 0) return;
+    if (!Number.isInteger(_complimentaryRefreshSignalResId) || _complimentaryRefreshSignalResId <= 0) return;
+    if (!Number.isInteger(_currentComplimentaryResId) || _currentComplimentaryResId <= 0) return;
+    if (_complimentaryRefreshSignalResId !== _currentComplimentaryResId) return;
+    void loadComplimentary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [_complimentaryRefreshVersionNum, _complimentaryRefreshSignalResId, _currentComplimentaryResId, loadComplimentary]);
+
   return (
     <>
       {/* Context Backdrop: transparent/subtle click-catcher to preserve calendar visibility */}
@@ -353,14 +510,32 @@ export default function QuickReservationDetail({
             </h3>
           </div>
 
-          <button
-            type="button"
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 text-base font-bold transition-colors cursor-pointer shrink-0"
-            aria-label="Tutup Ringkasan"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-1 shrink-0">
+            {/* Printer action — opens the same print picker as the full drawer */}
+            <Tooltip content="Dokumen &amp; Cetak" position="bottom" className="!left-auto !right-0 !translate-x-0">
+              <button
+                type="button"
+                onClick={() => setIsThermalModalOpen(true)}
+                aria-label="Dokumen &amp; Cetak"
+                className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-500 hover:text-stone-800 hover:bg-stone-200 transition-colors cursor-pointer"
+              >
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+                  <rect x="3" y="7" width="10" height="6" rx="1" />
+                  <path d="M5 7V3.5A1.5 1.5 0 0 1 6.5 2h3A1.5 1.5 0 0 1 11 3.5V7" />
+                  <path d="M5 11h6" strokeLinecap="round" />
+                  <path d="M11 11h2a1 1 0 0 1 1 1v2a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1v-2a1 1 0 0 1 1-1h2" strokeLinecap="round" />
+                </svg>
+              </button>
+            </Tooltip>
+            <button
+              type="button"
+              onClick={onClose}
+              className="w-7 h-7 flex items-center justify-center rounded-lg text-stone-400 hover:text-stone-700 hover:bg-stone-200 text-base font-bold transition-colors cursor-pointer shrink-0"
+              aria-label="Tutup Ringkasan"
+            >
+              ✕
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Content Body (flex-1 min-h-0 overflow-y-auto) */}
@@ -402,25 +577,113 @@ export default function QuickReservationDetail({
 
           {/* Compact reservation context metadata */}
           <div className="p-2.5 bg-white rounded-xl border border-stone-200 space-y-2">
-            <div className="grid grid-cols-2 gap-2">
+            <div className={`grid gap-2 ${hideRatePlan ? 'grid-cols-1' : 'grid-cols-2'}`}>
               <div>
                 <span className="text-[11px] text-stone-500 block font-medium">Sumber</span>
                 <strong className="text-xs font-semibold text-stone-800">{sourceLabel}</strong>
               </div>
-              <div>
-                <span className="text-[11px] text-stone-500 block font-medium">Rate Plan</span>
-                <strong className="text-xs font-semibold text-stone-800">{ratePlanLabel}</strong>
-              </div>
+              {!hideRatePlan && (
+                <div>
+                  <span className="text-[11px] text-stone-500 block font-medium">Rate Plan</span>
+                  <strong className="text-xs font-semibold text-stone-800">{ratePlanLabel}</strong>
+                </div>
+              )}
             </div>
             {specialRequestsNote ? (
               <div className="pt-1 border-t border-stone-100">
                 <span className="text-[11px] text-stone-500 block font-medium">Catatan</span>
-                <p className="text-xs text-stone-800 line-clamp-2" title={specialRequestsNote}>
+                <p className="text-xs text-rose-700 font-semibold line-clamp-2" title={specialRequestsNote}>
                   {specialRequestsNote}
                 </p>
               </div>
             ) : null}
           </div>
+
+          {/* COMPLIMENTARY SECTION */}
+          {hasViewPermission && (
+            <div className="mt-2 p-2.5 bg-amber-50/50 rounded-xl border border-amber-200">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[11px] font-medium text-amber-700">Komplementer</span>
+                {!complimentaryRequest && !complimentaryLoading && !complimentaryError && hasRequestPermission && (
+                  <button
+                    type="button"
+                    onClick={() => { setSelectedComplimentaryAction('REQUEST'); setComplimentaryModalOpen(true); }}
+                    className="text-[11px] px-2 py-0.5 bg-amber-100 hover:bg-amber-200 text-amber-800 rounded transition-colors cursor-pointer"
+                    disabled={complimentaryLoading}
+                  >
+                    Ajukan
+                  </button>
+                )}
+              </div>
+              {complimentaryLoading && !complimentaryRequest && (
+                <div className="text-[11px] text-stone-500">Memuat...</div>
+              )}
+              {complimentaryError && (
+                <div className="mt-1 text-[11px] text-red-600">{complimentaryError}</div>
+              )}
+              {!complimentaryRequest && !complimentaryLoading && !complimentaryError && (
+                <div className="text-[11px] text-stone-500">Belum ada permintaan.</div>
+              )}
+              {complimentaryRequest && (
+                <>
+                  <div className="text-[11px] text-stone-600">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && <span className="text-amber-600">Menunggu persetujuan</span>}
+                    {complimentaryRequest.status === 'APPROVED' && (
+                      <span className="text-emerald-600">
+                        Disetujui
+                        {complimentaryRequest.applied_adjustment_amount != null && (
+                          <> - {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR' }).format(complimentaryRequest.applied_adjustment_amount)}</>
+                        )}
+                      </span>
+                    )}
+                    {complimentaryRequest.status === 'REJECTED' && <span className="text-red-600">Ditolak</span>}
+                    {complimentaryRequest.status === 'REVOKED' && <span className="text-stone-500">Dicabut</span>}
+                  </div>
+                  {complimentaryRequest.category && (
+                    <div className="text-[11px] text-stone-500">Kategori: <span className="text-stone-700">{complimentaryRequest.category}</span></div>
+                  )}
+                  {complimentaryRequest.reason && (
+                    <div className="text-[11px] text-stone-500">Alasan: <span className="text-stone-700">{complimentaryRequest.reason}</span></div>
+                  )}
+                  {complimentaryRequest.requestor_name_snapshot && complimentaryRequest.requested_at && (
+                    <div className="text-[11px] text-stone-500">Pemohon: {complimentaryRequest.requestor_name_snapshot} - {new Date(complimentaryRequest.requested_at).toLocaleDateString('id-ID')}</div>
+                  )}
+                  {complimentaryRequest.status === 'APPROVED' && complimentaryRequest.approver_name_snapshot && complimentaryRequest.approved_at && (
+                    <div className="text-[11px] text-stone-500">Penyetujui: {complimentaryRequest.approver_name_snapshot} - {new Date(complimentaryRequest.approved_at).toLocaleDateString('id-ID')}</div>
+                  )}
+                  <div className="mt-1 flex gap-1.5">
+                    {complimentaryRequest.status === 'PENDING_APPROVAL' && hasApprovePermission && (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('APPROVE'); setComplimentaryModalOpen(true); }}
+                          className="text-[11px] px-2 py-0.5 bg-emerald-100 hover:bg-emerald-200 text-emerald-800 rounded transition-colors cursor-pointer"
+                        >
+                          Approve
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => { setSelectedComplimentaryAction('REJECT'); setComplimentaryModalOpen(true); }}
+                          className="text-[11px] px-2 py-0.5 bg-red-100 hover:bg-red-200 text-red-800 rounded transition-colors cursor-pointer"
+                        >
+                          Reject
+                        </button>
+                      </>
+                    )}
+                    {complimentaryRequest.status === 'APPROVED' && hasRevokePermission && (
+                      <button
+                        type="button"
+                        onClick={() => { setSelectedComplimentaryAction('REVOKE'); setComplimentaryModalOpen(true); }}
+                        className="text-[11px] px-2 py-0.5 bg-stone-100 hover:bg-stone-200 text-stone-700 rounded transition-colors cursor-pointer"
+                      >
+                        Revoke
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           {/* Stay Dates & Duration */}
           <div className="grid grid-cols-2 gap-2 p-2.5 bg-white rounded-xl border border-stone-200">
@@ -442,12 +705,27 @@ export default function QuickReservationDetail({
           <div className="flex items-center justify-between px-3 py-2 bg-stone-50/80 rounded-xl border border-stone-200 text-xs">
             <span className="text-stone-500 font-medium">No. Telepon:</span>
             {guestPhone ? (
-              <a
-                href={`tel:${guestPhone}`}
-                className="font-mono font-bold text-emerald-800 hover:text-emerald-700 hover:underline"
-              >
-                {guestPhone}
-              </a>
+              <div className="flex items-center gap-1">
+                <a
+                  href={`tel:${guestPhone}`}
+                  className="font-mono font-bold text-emerald-800 hover:text-emerald-700 hover:underline"
+                >
+                  {guestPhone}
+                </a>
+                {guestPhone && data?.primary_guest?.primary_guest_id && !isCancelled && !isCheckedOut && (
+                  <button
+                    type="button"
+                    onClick={waHooks.handleOpenWhatsAppModal}
+                    title="WhatsApp Tamu"
+                    aria-label="WhatsApp Tamu"
+                    className="ml-1 inline-flex items-center justify-center w-5 h-5 rounded bg-emerald-600 hover:bg-emerald-700 text-white transition-colors cursor-pointer"
+                  >
+                    <svg className="w-3 h-3" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                    </svg>
+                  </button>
+                )}
+              </div>
             ) : (
               <span className="text-stone-400 italic font-medium">Belum terisi</span>
             )}
@@ -506,6 +784,24 @@ export default function QuickReservationDetail({
               compact
               isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
               onRefresh={handleRefresh}
+            />
+          )}
+
+          {/* POS Orders — daftar pesanan + tambah order scoped ke reservasi ini */}
+          {data?.id && activePropId && onOpenPosModal && posAccess.canViewPos && (
+            <POSOrderPanel
+              propertyId={activePropId}
+              reservationId={Number(data.id)}
+              onOpenPosModal={onOpenPosModal}
+              canViewPos={posAccess.canViewPos}
+              canEditPos={posAccess.canEditPos}
+              guestName={data?.guest_name || data?.booker_name || undefined}
+              roomNumber={data?.room_number || undefined}
+              reservationLabel={data?.reservation_code ? `#${data.reservation_code}` : undefined}
+              posOrdersRefreshVersion={posOrdersRefreshVersion}
+              posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+              onOpenCashPayment={onOpenCashPayment}
+              reservationStatus={data?.status}
             />
           )}
 
@@ -778,6 +1074,24 @@ export default function QuickReservationDetail({
             )}
           </div>
 
+
+          {/* COMPLIMENTARY MODAL */}
+          {complimentaryModalOpen && complimentaryReservationId && activePropId && (
+            <ComplimentaryActionModal
+              isOpen={complimentaryModalOpen}
+              onClose={() => {
+                setComplimentaryModalOpen(false);
+                setSelectedComplimentaryAction(null);
+              }}
+              action={selectedComplimentaryAction || 'REQUEST'}
+              reservationId={complimentaryReservationId}
+              propertyId={activePropId}
+              requestId={complimentaryRequest?.id}
+              authFetch={authFetch}
+              onSuccess={handleComplimentarySuccess}
+            />
+          )}
+
           {/* Primary "Buka Detail Lengkap" link */}
           <button
             type="button"
@@ -803,6 +1117,60 @@ export default function QuickReservationDetail({
             onClose();
           }}
         />
+      )}
+
+      {/* GUEST-COMM-WA: WhatsApp Quick Action Modal */}
+      <WhatsAppQuickActionModal
+        isOpen={waHooks.isWhatsAppModalOpen}
+        guestName={guestName}
+        guestPhone={guestPhone}
+        hooks={waHooks}
+      />
+
+      {/* Print: Thermal Receipt + Registration Form (same modals as the full drawer)
+          Rendered in a local layer above the quick-summary card (z-60).
+          The shared Modal inside uses z-50; this wrapper lifts the whole print layer
+          to z-[70] so both the print picker/preview and the registration form sit
+          above the card. Only rendered when one of the print modals is open; no
+          backdrop handler added here — the shared Modal's own backdrop/close
+          behaviour is preserved. */}
+      {(isThermalModalOpen || isRegistrationModalOpen) && activePropId && (
+        <div className="fixed inset-0 z-[70]">
+          {isThermalModalOpen && (
+            <ThermalReceiptModal
+              isOpen={isThermalModalOpen}
+              onClose={() => setIsThermalModalOpen(false)}
+              reservationId={Number(reservation.id)}
+              propertyId={activePropId}
+              reservation={data}
+              propertyBranding={propertyBranding ?? null}
+              propertyInfo={propertyInfo}
+              authFetch={authFetch}
+              onOpenRegistrationForm={() => {
+                setIsThermalModalOpen(false);
+                setIsRegistrationModalOpen(true);
+              }}
+            />
+          )}
+
+          {isRegistrationModalOpen && (
+            <RegistrationFormModal
+              isOpen={isRegistrationModalOpen}
+              onClose={() => setIsRegistrationModalOpen(false)}
+              reservationId={Number(reservation.id)}
+              propertyId={activePropId}
+              reservation={data}
+              propertyBranding={propertyBranding ?? undefined}
+              propertyInfo={propertyInfo ? {
+                id: propertyInfo.id,
+                name: propertyInfo.name,
+                address: propertyInfo.address ?? undefined,
+                phone: propertyInfo.phone ?? undefined,
+              } : undefined}
+              authFetch={authFetch}
+            />
+          )}
+        </div>
       )}
     </>
   );

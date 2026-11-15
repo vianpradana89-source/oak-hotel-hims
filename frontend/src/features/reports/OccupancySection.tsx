@@ -13,20 +13,46 @@ import {
   getKpiLabels,
 } from './occupancyDateHelpers.ts';
 
-interface OccupancySectionProps {
+export interface OccupancySectionProps {
   propertyId: number | null;
   refreshTrigger?: number;
+  /**
+   * When true (default), this component owns the period state and renders the
+   * preset buttons. When false, the parent controls `period` and `customStart`
+   * / `customEnd` so a shared period filter can drive multiple sections.
+   */
+  controlled?: {
+    period: OccupancyPeriodPreset;
+    customStart: string;
+    customEnd: string;
+    onPeriodChange: (p: OccupancyPeriodPreset) => void;
+    onCustomStartChange: (v: string) => void;
+    onCustomEndChange: (v: string) => void;
+  };
+  /** When true, suppress the internal preset selector UI (parent renders its own). */
+  hidePeriodSelector?: boolean;
+  /** Render a compact KPI row instead of the full 7-card grid. */
+  compact?: boolean;
 }
 
 export const OccupancySection: React.FC<OccupancySectionProps> = ({
   propertyId,
   refreshTrigger = 0,
+  controlled,
+  hidePeriodSelector = false,
+  compact = false,
 }) => {
-  const [period, setPeriod] = useState<OccupancyPeriodPreset>('today');
+  const [internalPeriod, setInternalPeriod] = useState<OccupancyPeriodPreset>('today');
   const todayHotelDate = hotelDateFromInstant(new Date());
+  const [internalCustomStart, setInternalCustomStart] = useState<string>(todayHotelDate);
+  const [internalCustomEnd, setInternalCustomEnd] = useState<string>(todayHotelDate);
 
-  const [customStart, setCustomStart] = useState<string>(todayHotelDate);
-  const [customEnd, setCustomEnd] = useState<string>(todayHotelDate);
+  const period = controlled?.period ?? internalPeriod;
+  const customStart = controlled?.customStart ?? internalCustomStart;
+  const customEnd = controlled?.customEnd ?? internalCustomEnd;
+  const setPeriod = controlled ? controlled.onPeriodChange : setInternalPeriod;
+  const setCustomStart = controlled ? controlled.onCustomStartChange : setInternalCustomStart;
+  const setCustomEnd = controlled ? controlled.onCustomEndChange : setInternalCustomEnd;
 
   const [data, setData] = useState<OccupancyReportData | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
@@ -34,6 +60,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
 
   const [showDailyTable, setShowDailyTable] = useState<boolean>(true);
   const [showRoomTypeTable, setShowRoomTypeTable] = useState<boolean>(true);
+  const [showFinCard, setShowFinCard] = useState<boolean>(true);
 
   const requestVersionRef = useRef<number>(0);
 
@@ -109,7 +136,9 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
   const isSingleDay = data ? data.nights === 1 : period === 'today' || (period === 'custom' && customStart === customEnd);
   const kpiLabels = getKpiLabels(isSingleDay);
 
-  const renderPeriodSelector = () => (
+  const renderPeriodSelector = () => {
+    if (hidePeriodSelector) return null;
+    return (
     <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
       <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
         <button
@@ -125,6 +154,17 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         </button>
         <button
           type="button"
+          onClick={() => setPeriod('yesterday')}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+            period === 'yesterday'
+              ? 'bg-white text-emerald-800 shadow-xs'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+          }`}
+        >
+          Kemarin
+        </button>
+        <button
+          type="button"
           onClick={() => setPeriod('7days')}
           className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
             period === '7days'
@@ -133,6 +173,17 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
           }`}
         >
           7 Hari
+        </button>
+        <button
+          type="button"
+          onClick={() => setPeriod('last_month')}
+          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+            period === 'last_month'
+              ? 'bg-white text-emerald-800 shadow-xs'
+              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+          }`}
+        >
+          Bulan Lalu
         </button>
         <button
           type="button"
@@ -187,7 +238,8 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         </div>
       )}
     </div>
-  );
+    );
+  };
 
   const renderError = () => {
     if (!error) return null;
@@ -236,9 +288,95 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
     );
   };
 
+  const renderFinCard = () => {
+    if (!data) return null;
+    const fin = data.financials;
+    if (!fin) return null;
+    const revenueByType = Object.entries(fin.room_revenue_by_type || {});
+    const topType = revenueByType.length > 0 ? revenueByType[0] : null;
+
+    return (
+      <div className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setShowFinCard((prev) => !prev)}
+          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors"
+        >
+          <span>Metrik Finansial Kamar (ADR / RevPAR / ALOS)</span>
+          <span className="text-slate-400">{showFinCard ? '▲ Tutup' : '▼ Tampilkan'}</span>
+        </button>
+        {showFinCard && (
+          <div className="p-4 space-y-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div className="bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                <div className="text-[10px] uppercase font-bold text-emerald-700">Room Revenue</div>
+                <div className="text-lg font-extrabold text-emerald-900 mt-0.5">
+                  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(fin.room_revenue)}
+                </div>
+                <div className="text-[10px] text-emerald-600 mt-0.5">
+                  {fin.paid_room_nights} malam berbayar • {fin.complimentary_room_nights} malam comp
+                </div>
+              </div>
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <div className="text-[10px] uppercase font-bold text-blue-700">ADR</div>
+                <div className="text-lg font-extrabold text-blue-900 mt-0.5">
+                  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(fin.adr)}
+                </div>
+                <div className="text-[10px] text-blue-600 mt-0.5">Room revenue / malam berbayar</div>
+              </div>
+              <div className="bg-teal-50 border border-teal-200 rounded-lg p-3">
+                <div className="text-[10px] uppercase font-bold text-teal-700">RevPAR</div>
+                <div className="text-lg font-extrabold text-teal-900 mt-0.5">
+                  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(fin.revpar)}
+                </div>
+                <div className="text-[10px] text-teal-600 mt-0.5">Revenue per kamar sellable</div>
+              </div>
+              <div className="bg-amber-50 border border-amber-200 rounded-lg p-3">
+                <div className="text-[10px] uppercase font-bold text-amber-700">ALOS</div>
+                <div className="text-lg font-extrabold text-amber-900 mt-0.5">{fin.alos.toFixed(2)} malam</div>
+                <div className="text-[10px] text-amber-600 mt-0.5">Rata-rata lama menginap</div>
+              </div>
+            </div>
+            {topType ? (
+              <div className="text-xs text-slate-600">
+                Tipe kamar terkontribusi: <span className="font-semibold text-slate-900">{topType[0]}</span>{' '}
+                <span className="font-semibold text-emerald-800">
+                  {new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(topType[1])}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   const renderKpiCards = () => {
     if (!data) return null;
     const { totals } = data;
+
+    if (compact) {
+      return (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div className="bg-emerald-900 text-white rounded-xl p-3 shadow-sm">
+            <div className="text-[10px] uppercase font-bold text-emerald-200">{kpiLabels.occupancy}</div>
+            <div className="text-xl font-extrabold mt-0.5 text-emerald-50">{Number(totals.occupancy_pct || 0).toFixed(2)}%</div>
+          </div>
+          <div className="bg-white border border-blue-200 rounded-xl p-3 shadow-sm">
+            <div className="text-[10px] uppercase font-bold text-blue-800">{kpiLabels.sold}</div>
+            <div className="text-xl font-bold text-blue-900 mt-0.5">{totals.sold_room_nights}</div>
+          </div>
+          <div className="bg-white border border-teal-200 rounded-xl p-3 shadow-sm">
+            <div className="text-[10px] uppercase font-bold text-teal-800">{kpiLabels.sellable}</div>
+            <div className="text-xl font-bold text-teal-900 mt-0.5">{totals.sellable_room_nights}</div>
+          </div>
+          <div className="bg-white border border-rose-200 rounded-xl p-3 shadow-sm">
+            <div className="text-[10px] uppercase font-bold text-rose-800">{kpiLabels.ooo} + {kpiLabels.oos}</div>
+            <div className="text-xl font-bold text-rose-900 mt-0.5">{totals.blocked_room_nights}</div>
+          </div>
+        </div>
+      );
+    }
 
     return (
       <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
@@ -459,6 +597,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
       {renderPeriodSelector()}
       {renderError()}
       {renderKpiCards()}
+      {renderFinCard()}
       {renderDailyTable()}
       {renderRoomTypeBreakdown()}
     </div>

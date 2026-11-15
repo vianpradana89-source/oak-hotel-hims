@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
   formatReservationStayType,
+  formatTransactionBusinessDate,
   stayTypeBadgeClass,
   getPurchaseReceivingClass,
-  getPurchaseWorkflowClass,
   isTransactionEditable,
   isTransactionVerificationEditable
 } from './transactionDomainTypes';
@@ -11,7 +11,6 @@ import type {
   TransactionRecord,
   TransactionAttachment,
   VerificationStatus,
-  ReceivingStatus,
   AttachmentPurpose
 } from './transactionDomainTypes';
 import {
@@ -20,11 +19,11 @@ import {
   deleteTransactionAttachmentApi,
   settleTransactionPaymentApi,
   updatePurchaseLifecycleApi,
-  updateExpenseLifecycleApi,
   verifyTransactionApi,
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 
 function TransactionAttachmentPreview({
   transactionId,
@@ -97,9 +96,12 @@ interface TransactionDetailDrawerProps {
   onOpenSoftDeleteModal?: (tx: TransactionRecord) => void;
   /** EDIT-1B: Open expense editor in edit mode */
   onEditExpense?: (tx: TransactionRecord) => void;
+  /** Open purchase editor in edit mode */
+  onEditPurchase?: (tx: TransactionRecord) => void;
   onNavigateToReservation?: (reservationId: number) => void;
   onNavigateToFolio?: (reservationId: number) => void;
   onTransactionUpdated?: () => void;
+  onNavigateToInventory?: () => void;
 }
 
 export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = ({
@@ -112,9 +114,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   onOpenVoidModal,
   onOpenSoftDeleteModal,
   onEditExpense,
+  onEditPurchase,
   onNavigateToReservation,
   onNavigateToFolio,
-  onTransactionUpdated
+  onTransactionUpdated,
+  onNavigateToInventory
 }) => {
   const [data, setData] = useState<TransactionRecord | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -133,11 +137,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const [verifyNote, setVerifyNote] = useState('');
   const [isVerifying, setIsVerifying] = useState(false);
 
-  // Receiving Status Form State
-  const [isUpdatingReceiving, setIsUpdatingReceiving] = useState(false);
-
   // Workflow Status Form State
   const [isUpdatingWorkflow, setIsUpdatingWorkflow] = useState(false);
+
+  // Approval Status Form State
+  const [isUpdatingApproval, setIsUpdatingApproval] = useState(false);
 
   // Attachment Upload
   const [uploadingPurpose, setUploadingPurpose] = useState<AttachmentPurpose>('RECEIPT');
@@ -196,6 +200,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const lines = data?.lines || [];
   const attachments = data?.attachments || [];
   const payments = data?.linked_payments || [];
+  type LinkedPayment = NonNullable<TransactionRecord['linked_payments']>[number];
+  // Detect POS transaction
+  const txSourceType = String(tx?.source_type || '').toUpperCase();
+  const isPosTx = txSourceType === 'POS_ORDER' || txSourceType === 'POS';
 
   const formatIdr = (val: number | undefined | string) => {
     if (val === undefined || val === null) return 'Rp 0';
@@ -209,10 +217,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     const map: Record<string, string> = {
       RECEIPT: 'Bukti Nota / Struk',
       PAYMENT_PROOF: 'Bukti Bayar / Transfer',
-      INVOICE: 'Invoice',
-      OTHER: 'Lainnya',
+      INVOICE: 'Faktur Tagihan',
+      OTHER: 'Dokumen Lain',
     };
-    return map[purpose ?? ''] || purpose || 'BUKTI';
+    return map[purpose ?? ''] || purpose || 'Dokumen Lain';
   };
 
   // PURCHASE-2C3: Copy bank account with toast
@@ -228,6 +236,10 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const handleSettleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!tx) return;
+    if (!canSettle || settleCeiling <= 0) {
+      setShowSettleForm(false);
+      return;
+    }
     const numAmt = Math.round(Number(settleAmount) || 0);
     if (numAmt <= 0) {
       alert('Nominal pelunasan harus lebih dari Rp 0');
@@ -281,55 +293,50 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     }
   };
 
-  const handleReceivingChange = async (newStatus: ReceivingStatus) => {
-    if (!tx || isUpdatingReceiving) return;
-    setIsUpdatingReceiving(true);
+  const handleArchiveToggle = async () => {
+    if (!tx || isUpdatingWorkflow || tx.transaction_type !== 'PURCHASE') return;
+    const isArchived = Boolean(tx.archived_at) || String(tx.workflow_status || '').toUpperCase() === 'ARCHIVED';
+    setIsUpdatingWorkflow(true);
     try {
       await updatePurchaseLifecycleApi(tx.id, {
         property_id: propertyId,
-        action: 'SET_RECEIVING',
-        receiving_status: newStatus,
-        actor_name: currentStaffName
+        action: isArchived ? 'UNARCHIVE' : 'ARCHIVE',
+        actor_name: currentStaffName,
+        actor_user_id: currentUserId || undefined,
       });
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui status penerimaan');
+      alert(err.message || 'Gagal memperbarui status arsip pembelian');
     } finally {
-      setIsUpdatingReceiving(false);
+      setIsUpdatingWorkflow(false);
     }
   };
 
-  const handleWorkflowChange = async (newWorkflow: string) => {
-    if (!tx || isUpdatingWorkflow) return;
-    setIsUpdatingWorkflow(true);
+  const handleApprovalChange = async (newApproval: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED') => {
+    if (!tx || isUpdatingApproval || tx.transaction_type !== 'PURCHASE') return;
+    let reason: string | null = null;
+    if (newApproval === 'REJECTED') {
+      const input = window.prompt('Masukkan alasan penolakan persetujuan pembelian:');
+      if (!input || !input.trim()) return;
+      reason = input.trim();
+    }
+    setIsUpdatingApproval(true);
     try {
-      // BLOCKER 3 FIX: route only for types that support lifecycle workflow mutations.
-      // Only EXPENSE and PURCHASE have workflow_status columns; other types (SALE, INCOME)
-      // must not fall through to purchase endpoint.
-      if (tx.transaction_type === 'EXPENSE') {
-        await updateExpenseLifecycleApi(tx.id, {
-          property_id: propertyId,
-          action: 'SET_WORKFLOW',
-          workflow_status: newWorkflow,
-          actor_name: currentStaffName
-        });
-      } else if (tx.transaction_type === 'PURCHASE') {
-        await updatePurchaseLifecycleApi(tx.id, {
-          property_id: propertyId,
-          action: 'SET_WORKFLOW',
-          workflow_status: newWorkflow,
-          actor_name: currentStaffName
-        });
-      } else {
-        return; // No workflow mutation for other transaction types
-      }
+      await updatePurchaseLifecycleApi(tx.id, {
+        property_id: propertyId,
+        action: 'SET_APPROVAL',
+        approval_status: newApproval,
+        reason,
+        actor_name: currentStaffName,
+        actor_user_id: currentUserId || undefined
+      });
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui status alur');
+      alert(err.message || 'Gagal memperbarui status persetujuan pembelian');
     } finally {
-      setIsUpdatingWorkflow(false);
+      setIsUpdatingApproval(false);
     }
   };
 
@@ -375,7 +382,29 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
 
   const isVerified = tx?.verification_status === 'VERIFIED';
   const outstanding = Number(tx?.outstanding_amount) || 0;
-  const isPaid = tx?.payment_status === 'PAID';
+  // UI-3: Canonical OTA collectible balance
+  const hotelCollectibleTotal = Number(tx?.hotel_collectible_total || 0);
+  const hotelCollectibleRemaining = Number(tx?.hotel_collectible_remaining_balance || 0);
+  const canonicalAmountPaid = Number(tx?.canonical_amount_paid || 0);
+  const canonicalAppliedDeposit = Number(tx?.canonical_applied_deposit || 0);
+  const isReservationLinked = tx?.reservation_id != null && Number(tx.reservation_id) > 0;
+  // UI-3: Derive display status from canonical fields for reservation-linked transactions.
+  // Non-reservation falls back to legacy tx.payment_status.
+  const displayPaymentStatus = isReservationLinked
+    ? hotelCollectibleRemaining > 0
+      ? (canonicalAmountPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID')
+      : 'PAID'
+    : (tx?.payment_status || 'UNPAID');
+  // Can settle when reservation-linked with remaining collectible, or non-reservation with outstanding.
+  // Use canonical displayPaymentStatus (not legacy tx.payment_status) so OTA_COLLECT rooms
+  // with hotelCollectibleRemaining=0 don't get blocked from UI by an old UNPAID status.
+  const canSettle = displayPaymentStatus !== 'PAID' && !isSettling
+    ? (isReservationLinked ? hotelCollectibleRemaining > 0 : outstanding > 0)
+    : false;
+  // For OTA_COLLECT and HOTEL_COLLECT reservations, settlement ceiling is canonical remaining.
+  const settleCeiling = isReservationLinked
+    ? hotelCollectibleRemaining > 0 ? hotelCollectibleRemaining : 0
+    : outstanding;
 
   return (
     <div className="fixed inset-0 z-50 flex justify-end bg-slate-900/50 backdrop-blur-xs transition-opacity animate-in fade-in">
@@ -391,7 +420,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base font-bold text-slate-900">
-                  {tx ? tx.transaction_no : 'Detail Transaksi'}
+                  {tx ? (isPosTx ? (formatPosOrderDisplayRef(tx.source_id) || tx.transaction_no) : tx.transaction_no) : 'Detail Transaksi'}
                 </h3>
                 {tx && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
@@ -405,7 +434,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 )}
               </div>
               <p className="text-xs text-slate-500 mt-0.5">
-                {tx ? `${tx.transaction_date} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
+                {tx ? `${formatTransactionBusinessDate(tx.transaction_date)} • Dibuat oleh: ${tx.created_by || 'Staff'}` : 'Memuat data transaksi...'}
               </p>
             </div>
           </div>
@@ -478,21 +507,22 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 <div>
                   <span className="text-[10px] text-slate-400 font-bold uppercase block">Status Pelunasan</span>
                   <span className={`inline-flex items-center text-xs font-bold mt-1 ${
-                    tx.payment_status === 'PAID' ? 'text-emerald-700' : 'text-amber-700'
+                    displayPaymentStatus === 'PAID' ? 'text-emerald-700' : 'text-amber-700'
                   }`}>
-                    {tx.payment_status}
+                    {displayPaymentStatus}
                   </span>
                 </div>
 
                 <div>
-                  <span className="text-[10px] text-slate-400 font-bold uppercase block">Verifikasi Audit</span>
+                  <span className="text-[10px] text-slate-400 font-bold uppercase block">Pemeriksaan</span>
                   <div className="flex items-center gap-1.5 mt-1">
-                    <span className={`text-xs font-bold ${
-                      tx.verification_status === 'VERIFIED' ? 'text-emerald-700' :
-                      tx.verification_status === 'REJECTED' ? 'text-rose-700' : 'text-amber-700'
-                    }`}>
-                      {tx.verification_status || 'UNVERIFIED'}
-                    </span>
+                  <span className={`text-xs font-bold ${
+                    tx.verification_status === 'VERIFIED' ? 'text-emerald-700' :
+                    tx.verification_status === 'REJECTED' ? 'text-rose-700' : 'text-amber-700'
+                  }`}>
+                    {tx.verification_status === 'VERIFIED' ? 'Terverifikasi' :
+                     tx.verification_status === 'REJECTED' ? 'Perlu Koreksi' : 'Belum Diperiksa'}
+                  </span>
                     <button
                       type="button"
                       onClick={() => setShowVerifyModal(true)}
@@ -507,46 +537,119 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {tx.transaction_type === 'PURCHASE' && (
                   <>
                     <div>
-                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Fisik</span>
-                      {(() => {
-                        const rc = getPurchaseReceivingClass(tx.receiving_status || 'BELUM_DITERIMA');
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Otorisasi PO</span>
+                      {tx.po_id ? (
+                        <div className="mt-1 flex flex-col gap-0.5">
+                          <span className="inline-flex items-center text-xs font-bold px-2 py-0.5 rounded-lg border bg-emerald-50 border-emerald-200 text-emerald-800 w-fit">
+                            Disetujui via PO
+                          </span>
+                          <span className="text-[10px] font-mono font-bold text-slate-600">
+                            {tx.po_number || `PO #${tx.po_id}`}
+                          </span>
+                        </div>
+                      ) : (() => {
+                        const appStatus = tx.approval_status || 'PENDING_APPROVAL';
+                        const appClass =
+                          appStatus === 'APPROVED'
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                            : appStatus === 'REJECTED'
+                            ? 'bg-rose-50 border-rose-200 text-rose-800'
+                            : 'bg-amber-50 border-amber-200 text-amber-800';
                         return (
-                          <select
-                            value={tx.receiving_status || 'BELUM_DITERIMA'}
-                            onChange={(e) => handleReceivingChange(e.target.value as ReceivingStatus)}
-                            disabled={isUpdatingReceiving || !isTransactionEditable(tx)}
-                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${rc.bg} ${rc.border} ${rc.text} border hover:bg-opacity-80 disabled:opacity-60`}
-                          >
-                            <option value="BELUM_DITERIMA">Belum Diterima</option>
-                            <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                            <option value="DITERIMA">Diterima</option>
-                            <option value="DITERIMA_LENGKAP">Diterima Lengkap</option>
-                          </select>
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <select
+                              value={appStatus}
+                              onChange={(e) => handleApprovalChange(e.target.value as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED')}
+                              disabled={isUpdatingApproval || tx.transaction_status !== 'POSTED'}
+                              className={`text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer border ${appClass} disabled:opacity-60`}
+                            >
+                              <option value="PENDING_APPROVAL">Menunggu</option>
+                              <option value="APPROVED">Disetujui</option>
+                              <option value="REJECTED">Ditolak</option>
+                            </select>
+                          </div>
                         );
                       })()}
                     </div>
                     <div>
-                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Status Alur</span>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Penerimaan Barang</span>
                       {(() => {
-                        const ws = tx.operational_sheet || 'PROSES';
-                        const wc = getPurchaseWorkflowClass(ws);
-                        if (ws === 'BATAL' || ws === 'HAPUS') {
-                          return (
-                            <span className={`inline-flex items-center text-xs font-bold mt-1 ${wc.bg} ${wc.border} ${wc.text} border rounded-md px-2 py-0.5 cursor-default`}>
-                              {ws === 'BATAL' ? 'Batal' : 'Dihapus'}
-                            </span>
-                          );
-                        }
+                        const recvStatus = tx.receiving_status || 'BELUM_DITERIMA';
+                        const isFullReceived = recvStatus === 'DITERIMA' || recvStatus === 'DITERIMA_LENGKAP';
+                        const rc = getPurchaseReceivingClass(recvStatus);
+                        const label = isFullReceived
+                          ? 'Diterima Lengkap'
+                          : recvStatus === 'DITERIMA_SEBAGIAN'
+                          ? 'Diterima Sebagian'
+                          : 'Belum Diterima';
                         return (
-                          <select
-                            value={ws}
-                            onChange={(e) => handleWorkflowChange(e.target.value)}
-                            disabled={isUpdatingWorkflow}
-                            className={`mt-1 text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer ${wc.bg} ${wc.border} ${wc.text} border hover:bg-opacity-80 disabled:opacity-60`}
-                          >
-                            <option value="PROSES">Proses</option>
-                            <option value="SELESAI">Selesai</option>
-                          </select>
+                          <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                            <span
+                              className={`inline-flex items-center text-xs font-bold rounded-lg px-2.5 py-0.5 border ${rc.bg} ${rc.border} ${rc.text}`}
+                              title="Status penerimaan barang stok mengikuti dokumen Penerimaan Barang (GRN) yang di-Post"
+                            >
+                              {label}
+                            </span>
+                            {tx.approval_status === 'APPROVED' && !isFullReceived && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  try {
+                                    sessionStorage.setItem('oak_hims_pending_grn_purchase_tx_id', String(tx.id));
+                                  } catch { /* ignore */ }
+                                  onClose();
+                                  if (onNavigateToInventory) onNavigateToInventory();
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white rounded-md transition-colors cursor-pointer"
+                              >
+                                Terima Barang
+                              </button>
+                            )}
+                            {isFullReceived && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  try {
+                                    sessionStorage.setItem(
+                                      'oak_hims_pending_grn_search',
+                                      String(tx.po_number || tx.transaction_no || '')
+                                    );
+                                  } catch { /* ignore */ }
+                                  onClose();
+                                  if (onNavigateToInventory) onNavigateToInventory();
+                                }}
+                                className="px-2 py-0.5 text-[10px] font-bold bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-300 rounded-md transition-colors cursor-pointer"
+                              >
+                                Lihat Penerimaan
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    <div>
+                      <span className="text-[10px] text-slate-400 font-bold uppercase block">Arsip Dokumen</span>
+                      {(() => {
+                        const isArchived = Boolean(tx.archived_at) || String(tx.workflow_status || '').toUpperCase() === 'ARCHIVED';
+                        return (
+                          <div className="flex items-center gap-1.5 mt-1">
+                            <span className={`inline-flex items-center text-[11px] font-bold px-2 py-0.5 rounded-md border ${
+                              isArchived ? 'bg-slate-200 text-slate-700 border-slate-300' : 'bg-white text-slate-700 border-slate-200'
+                            }`}>
+                              {isArchived ? 'Diarsipkan' : 'Aktif'}
+                            </span>
+                            {tx.transaction_status === 'POSTED' && (
+                              <button
+                                type="button"
+                                disabled={isUpdatingWorkflow}
+                                onClick={() => void handleArchiveToggle()}
+                                className="text-[10px] font-bold text-slate-600 hover:text-emerald-800 underline cursor-pointer disabled:opacity-50"
+                                title="Tindakan administratif penyimpanan arsip (bukan pembatalan, pelunasan, atau penerimaan)"
+                              >
+                                {isArchived ? 'Buka Arsip' : 'Arsipkan'}
+                              </button>
+                            )}
+                          </div>
                         );
                       })()}
                     </div>
@@ -558,7 +661,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
               {tx.verification_status && tx.verification_status !== 'UNVERIFIED' && (
                 <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-1">
                   <div className="text-[11px] font-bold text-slate-800 flex items-center justify-between">
-                    <span>Diverifikasi oleh: {tx.verified_by_name_snapshot || 'Auditor'}</span>
+                    <span>Pemeriksaan Tagihan oleh: {tx.verified_by_name_snapshot || 'Auditor'}</span>
                     <span className="text-slate-400 font-normal">
                       {tx.verified_at ? new Date(tx.verified_at).toLocaleString('id-ID') : ''}
                     </span>
@@ -566,6 +669,110 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   {tx.verification_note && (
                     <div className="text-[11px] text-slate-600 italic">"{tx.verification_note}"</div>
                   )}
+                </div>
+              )}
+
+              {/* Tahap 1A: PO Variance Alert & Linked Goods Receipts */}
+              {tx.transaction_type === 'PURCHASE' && tx.has_po_variance && (
+                <div className="p-3.5 bg-amber-50 border border-amber-300 rounded-xl space-y-1.5 text-amber-900">
+                  <div className="text-xs font-bold flex items-center gap-1.5">
+                    <span>⚠</span>
+                    <span>Selisih terhadap PO Terdeteksi ({tx.po_number || `PO #${tx.po_id}`})</span>
+                  </div>
+                  {typeof tx.po_variance_summary === 'string' && tx.po_variance_summary.trim() !== '' ? (
+                    <div className="text-[11px] text-amber-800">{tx.po_variance_summary}</div>
+                  ) : tx.po_variance_summary &&
+                    typeof tx.po_variance_summary === 'object' &&
+                    Array.isArray((tx.po_variance_summary as any).variances) &&
+                    (tx.po_variance_summary as any).variances.length > 0 ? (
+                    <ul className="text-[11px] text-amber-800 list-disc pl-4 space-y-0.5">
+                      {(tx.po_variance_summary as any).variances.map((v: any, idx: number) => (
+                        <li key={idx}>
+                          {v.type === 'LINE_VARIANCE' ? (
+                            <>
+                              <strong>{v.description || `Baris #${v.line_index}`}</strong>:{' '}
+                              {Number(v.po_unit_price) !== Number(v.invoice_unit_price) && (
+                                <span>
+                                  Harga PO {formatIdr(Number(v.po_unit_price || 0))} &rarr; Nota{' '}
+                                  {formatIdr(Number(v.invoice_unit_price || 0))}
+                                  {Number(v.po_qty) !== Number(v.invoice_qty) ? ' • ' : ''}
+                                </span>
+                              )}
+                              {Number(v.po_qty) !== Number(v.invoice_qty) && (
+                                <span>
+                                  Qty PO {v.po_qty} &rarr; Nota {v.invoice_qty}
+                                </span>
+                              )}
+                            </>
+                          ) : (
+                            <span>{v.message || v.description || 'Selisih baris tagihan terhadap PO'}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <div className="text-[11px] text-amber-800">
+                      Terdapat perbedaan harga satuan atau kuantitas antara PO dan Nota tagihan aktual.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {tx.transaction_type === 'PURCHASE' && tx.linked_goods_receipts && tx.linked_goods_receipts.length > 0 && (
+                <div className="bg-white border border-slate-200 rounded-xl p-4 space-y-2.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      Dokumen Penerimaan Barang (GRN Terkait: {tx.linked_goods_receipts.length})
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        try {
+                          sessionStorage.setItem(
+                            'oak_hims_pending_grn_search',
+                            String(tx.po_number || tx.transaction_no || '')
+                          );
+                        } catch { /* ignore */ }
+                        onClose();
+                        if (onNavigateToInventory) onNavigateToInventory();
+                      }}
+                      className="text-[11px] font-bold text-emerald-700 hover:underline cursor-pointer"
+                    >
+                      Lihat Penerimaan di Inventori &rarr;
+                    </button>
+                  </div>
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="py-2 px-3">No. GRN</th>
+                          <th className="py-2 px-2">Tanggal</th>
+                          <th className="py-2 px-2">Status</th>
+                          <th className="py-2 px-3 text-right">Petugas</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {tx.linked_goods_receipts.map((grn) => (
+                          <tr key={grn.id} className="hover:bg-slate-50/60">
+                            <td className="py-2 px-3 font-mono font-bold text-[#1b4332]">{grn.grn_number}</td>
+                            <td className="py-2 px-2 text-slate-600">{formatTransactionBusinessDate(grn.receipt_date)}</td>
+                            <td className="py-2 px-2">
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                                grn.status === 'POSTED' || grn.status === 'COMPLETED'
+                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                  : grn.status === 'DRAFT'
+                                  ? 'bg-amber-50 text-amber-800 border-amber-200'
+                                  : 'bg-rose-50 text-rose-700 border-rose-200'
+                              }`}>
+                                {grn.status === 'POSTED' || grn.status === 'COMPLETED' ? 'Diposting' : grn.status}
+                              </span>
+                            </td>
+                            <td className="py-2 px-3 text-right text-slate-600">{grn.received_by || grn.posted_by || '-'}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               )}
 
@@ -585,9 +792,12 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {tx.supplier_phone && (
                   <div className="text-slate-500">Telepon: {tx.supplier_phone}</div>
                 )}
-                {tx.source_reference && (
+                {(tx.source_reference || (isPosTx && tx.source_id)) && (
                   <div className="text-slate-600">
-                    Referensi / Faktur: <span className="font-mono font-bold">{tx.source_reference}</span>
+                    {isPosTx ? 'Nomor Order POS:' : 'Referensi / Faktur:'}{' '}
+                    <span className="font-mono font-bold">
+                      {isPosTx ? (formatPosOrderDisplayRef(tx.source_id) || tx.source_reference) : tx.source_reference}
+                    </span>
                   </div>
                 )}
                 {/* PURCHASE-2C3: Supplier Bank Information */}
@@ -659,6 +869,14 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     <span className="font-mono font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200">
                       {tx.booking_bid}
                     </span>
+                    {tx.ota_source_name && (
+                      <span className="text-xs font-semibold bg-sky-100 text-sky-800 px-2 py-0.5 rounded-md border border-sky-200">
+                        OTA — {tx.ota_source_name}
+                      </span>
+                    )}
+                    {tx.booking_channel && tx.booking_channel !== 'WALK_IN' && (
+                      <span className="text-xs text-slate-500">Channel: {tx.booking_channel}</span>
+                    )}
                     {formatReservationStayType(tx.stay_type) !== '-' && (
                       <span className="inline-flex items-center gap-1 text-slate-500">
                         <span>Tipe Stay:</span>
@@ -755,7 +973,21 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       <tbody className="divide-y divide-slate-100 font-medium">
                         {lines.map((l) => (
                           <tr key={l.id} className="hover:bg-slate-50/60">
-                            <td className="py-2 px-3 font-semibold text-slate-800">{l.description_snapshot}</td>
+                            <td className="py-2 px-3 font-semibold text-slate-800">
+                              <div>{l.description_snapshot}</div>
+                              {l.product_id && (
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className="text-[10px] font-mono bg-emerald-50 text-emerald-800 border border-emerald-200 px-1.5 py-0.2 rounded">
+                                    Produk #{l.product_id}
+                                  </span>
+                                  {Number(l.received_quantity || 0) > 0 && (
+                                    <span className="text-[10px] font-mono bg-sky-50 text-sky-800 border border-sky-200 px-1.5 py-0.2 rounded">
+                                      Diterima: {Number(l.received_quantity)}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </td>
                             <td className="py-2 px-2 text-right font-mono font-bold">{l.quantity}</td>
                             <td className="py-2 px-2 text-slate-500">{l.unit}</td>
                             <td className="py-2 px-2 text-right font-mono">{formatIdr(l.unit_price)}</td>
@@ -767,6 +999,55 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                             </td>
                           </tr>
                         ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {isPosTx && Array.isArray(tx.pos_order_items) && tx.pos_order_items.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      Informasi Pembelian Produk POS ({tx.pos_order_items.length})
+                    </span>
+                  </div>
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="py-2.5 px-3">Kode</th>
+                          <th className="py-2.5 px-3">Nama Produk / Menu</th>
+                          <th className="py-2.5 px-2 text-center">Qty</th>
+                          <th className="py-2.5 px-2 text-right">Harga Satuan</th>
+                          <th className="py-2.5 px-2 text-right">Diskon</th>
+                          <th className="py-2.5 px-3 text-right">Subtotal</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium">
+                        {tx.pos_order_items.map((pi) => {
+                          const qty = Number(pi.quantity || 0);
+                          const unitPrice = Number(pi.unit_price || 0);
+                          const disc = Number(pi.discount_amount || 0);
+                          const lineTotal = Math.max(0, qty * unitPrice - disc);
+                          return (
+                            <tr key={pi.id} className="hover:bg-slate-50/60">
+                              <td className="py-2 px-3 font-mono text-slate-500">{pi.item_code || '-'}</td>
+                              <td className="py-2 px-3 font-semibold text-slate-800">
+                                <div>{pi.item_name}</div>
+                                {pi.notes && <div className="text-[10px] font-normal text-slate-400">Catatan: {pi.notes}</div>}
+                              </td>
+                              <td className="py-2 px-2 text-center font-mono font-bold">{qty}</td>
+                              <td className="py-2 px-2 text-right font-mono">{formatIdr(unitPrice)}</td>
+                              <td className="py-2 px-2 text-right font-mono text-rose-600">
+                                {disc > 0 ? formatIdr(disc) : '-'}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">
+                                {formatIdr(lineTotal)}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>
@@ -792,38 +1073,79 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   </div>
                 )}
                 <div className="pt-2 border-t border-slate-200 flex justify-between items-center text-sm font-bold text-slate-900">
-                  <span>Total Tagihan / Nilai Net:</span>
+                  <span>{isReservationLinked ? 'Nilai Penjualan / Net:' : 'Total Tagihan / Nilai Net:'}</span>
                   <span className="text-base text-emerald-800 font-mono">{formatIdr(tx.net_amount)}</span>
                 </div>
 
-                <div className="pt-2 border-t border-slate-200/80 grid grid-cols-2 gap-2 text-xs">
-                  <div className="p-2 bg-white rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
-                    <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
-                  </div>
-                  <div className="p-2 bg-white rounded-xl border border-slate-200">
-                    <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
-                    <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
-                      {formatIdr(outstanding)}
-                    </span>
-                  </div>
-                </div>
+                 <div className="pt-2 border-t border-slate-200/80 grid grid-cols-2 gap-2 text-xs">
+                   {isPosTx ? (
+                     <>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar (POS)</span>
+                         <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
+                       </div>
+                       <div className={`p-2 rounded-xl border ${outstanding > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                         <span className="text-[10px] font-bold block">Sisa Tagihan (POS)</span>
+                         <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                           {formatIdr(outstanding)}
+                         </span>
+                       </div>
+                     </>
+                   ) : !isReservationLinked ? (
+                     <>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Telah Dibayar</span>
+                         <span className="font-mono font-bold text-emerald-700">{formatIdr(tx.paid_amount)}</span>
+                       </div>
+                       <div className="p-2 bg-white rounded-xl border border-slate-200">
+                         <span className="text-[10px] text-slate-400 font-bold block">Sisa Tagihan / Hutang</span>
+                         <span className={`font-mono font-bold ${outstanding > 0 ? 'text-rose-700' : 'text-slate-700'}`}>
+                           {formatIdr(outstanding)}
+                         </span>
+                       </div>
+                     </>
+                   ) : (
+                     <>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Ditagih Hotel</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(hotelCollectibleTotal)}</span>
+                       </div>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Dibayar ke Hotel</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAmountPaid)}</span>
+                       </div>
+                       <div className="p-2 bg-amber-50 rounded-xl border border-amber-200">
+                         <span className="text-[10px] text-amber-600 font-bold block">Deposit Digunakan</span>
+                         <span className="font-mono font-bold text-amber-700">{formatIdr(canonicalAppliedDeposit)}</span>
+                       </div>
+                       <div className={`p-2 rounded-xl border ${hotelCollectibleRemaining > 0 ? 'bg-rose-50 border-rose-200' : 'bg-emerald-50 border-emerald-200'}`}>
+                         <span className="text-[10px] font-bold block">Sisa Tagihan Hotel</span>
+                         <span className={`font-mono font-bold ${hotelCollectibleRemaining > 0 ? 'text-rose-700' : 'text-emerald-700'}`}>
+                           {formatIdr(hotelCollectibleRemaining)}
+                         </span>
+                       </div>
+                     </>
+                   )}
+                 </div>
               </div>
 
               {/* Settlement History & Actions */}
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
-                    Riwayat Pembayaran & Pelunasan ({payments.length})
+                    {isPosTx
+                      ? `Pembayaran POS (${payments.length})`
+                      : `Pembayaran Sebelumnya (${payments.length})`}
                   </span>
-                  {!isPaid && !showSettleForm && (
+                  {!showSettleForm && canSettle && !isPosTx && (
                     <button
                       type="button"
                       onClick={() => {
-                        setSettleAmount(outstanding);
+                        setSettleAmount(canSettle ? String(settleCeiling) : '0');
                         setShowSettleForm(true);
                       }}
-                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs transition-colors"
+                      className="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl shadow-xs transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                      disabled={!canSettle}
                     >
                       + Catat Pelunasan
                     </button>
@@ -831,7 +1153,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 </div>
 
                 {/* Settle Form */}
-                {showSettleForm && (
+                {showSettleForm && canSettle && !isPosTx && (
                   <form onSubmit={handleSettleSubmit} className="p-4 bg-emerald-50/50 border border-emerald-200 rounded-2xl space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="font-bold text-emerald-900 text-xs">Form Pelunasan Pembayaran</span>
@@ -850,7 +1172,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                         <input
                           type="number"
                           min="1"
-                          max={outstanding}
+                          max={settleCeiling}
                           step="1"
                           required
                           value={settleAmount}
@@ -906,7 +1228,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {/* Payments Table */}
                 {payments.length === 0 ? (
                   <div className="p-3 text-center text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
-                    Belum ada riwayat pembayaran yang tercatat
+                    {isPosTx ? 'Belum ada pembayaran POS yang tercatat' : 'Belum ada riwayat pembayaran yang tercatat'}
                   </div>
                 ) : (
                   <div className="border border-slate-200 rounded-xl overflow-hidden">
@@ -914,19 +1236,54 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       <thead className="bg-slate-50 border-b border-slate-200 text-slate-400 uppercase text-[10px]">
                         <tr>
                           <th className="py-2 px-3">Waktu</th>
-                          <th className="py-2 px-2">No. Bayar</th>
+                          {isPosTx ? (
+                            <>
+                              <th className="py-2 px-2">Referensi</th>
+                              <th className="py-2 px-2">Sumber</th>
+                            </>
+                          ) : (
+                            <th className="py-2 px-2">No. Bayar</th>
+                          )}
                           <th className="py-2 px-2">Metode</th>
                           <th className="py-2 px-3 text-right">Nominal</th>
                           <th className="py-2 px-2 text-center">Status</th>
+                          <th className="py-2 px-2 text-right">Pencatat</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100 font-medium">
-                        {payments.map((p) => (
+                        {payments.map((p: LinkedPayment) => (
                           <tr key={p.id} className="hover:bg-slate-50/60">
                             <td className="py-2 px-3 text-slate-500 whitespace-nowrap">
-                              {new Date(p.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}
+                              {p.created_at ? new Date(p.created_at).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' }) : '-'}
                             </td>
-                            <td className="py-2 px-2 font-mono font-semibold text-slate-800">{p.reference_code || (p as any).payment_no || '-'}</td>
+                            {isPosTx ? (
+                              <>
+                                <td className="py-2 px-2 font-mono text-slate-600">
+                                  {p.source === 'POS_SETTLEMENT'
+                                    ? `PS-${p.settlement_id ?? p.id}`
+                                    : p.source === 'PAYMENT_TRANSACTION'
+                                      ? `PT-${p.payment_id ?? p.id}`
+                                      : String(p.id)}
+                                </td>
+                                <td className="py-2 px-2">
+                                  {p.source === 'POS_SETTLEMENT' ? (
+                                    <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-1.5 py-0.5 rounded border border-indigo-200">
+                                      Pembayaran POS
+                                    </span>
+                                  ) : p.source === 'PAYMENT_TRANSACTION' ? (
+                                    <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded border border-emerald-200">
+                                      Pembayaran Sebelumnya
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-500">-</span>
+                                  )}
+                                </td>
+                              </>
+                            ) : (
+                              <td className="py-2 px-2 font-mono text-slate-600">
+                                {p.reference_code || p.payment_no || '-'}
+                              </td>
+                            )}
                             <td className="py-2 px-2 text-slate-700">{p.payment_method}</td>
                             <td className="py-2 px-3 text-right font-mono font-bold text-emerald-800">
                               {formatIdr(p.amount)}
@@ -935,6 +1292,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200">
                                 {p.status}
                               </span>
+                            </td>
+                            <td className="py-2 px-2 text-right text-slate-500">
+                              {p.created_by || '-'}
                             </td>
                           </tr>
                         ))}
@@ -1066,6 +1426,20 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 </button>
               )}
 
+            {/* Edit/Revisi button for PURCHASE when editable */}
+            {tx &&
+              tx.transaction_type === 'PURCHASE' &&
+              isTransactionEditable(tx) &&
+              onEditPurchase && (
+                <button
+                  type="button"
+                  onClick={() => onEditPurchase(tx)}
+                  className="px-3.5 py-2 text-xs font-bold text-emerald-700 hover:bg-emerald-100 bg-emerald-50 border border-emerald-200 rounded-xl transition-colors cursor-pointer"
+                >
+                  Edit/Revisi
+                </button>
+              )}
+
             {tx &&
               !tx.deleted_at &&
               ['PURCHASE', 'EXPENSE'].includes(tx.transaction_type) &&
@@ -1104,7 +1478,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
       {showVerifyModal && (
         <div className="fixed inset-0 z-60 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
           <div className="bg-white rounded-2xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
-            <h4 className="text-sm font-bold text-slate-900">Ubah Status Verifikasi Audit</h4>
+            <h4 className="text-sm font-bold text-slate-900">Ubah Status Pemeriksaan</h4>
             <div className="space-y-2">
               <label className="block text-xs font-semibold text-slate-700">Status</label>
               <div className="grid grid-cols-3 gap-2">
@@ -1117,7 +1491,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ✓ Sah
+                  Terverifikasi
                 </button>
                 <button
                   type="button"
@@ -1128,7 +1502,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ✕ Tolak
+                  Perlu Koreksi
                 </button>
                 <button
                   type="button"
@@ -1139,7 +1513,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       : 'bg-white border-slate-200 text-slate-600'
                   }`}
                 >
-                  ○ Belum
+                  Belum Diperiksa
                 </button>
               </div>
             </div>

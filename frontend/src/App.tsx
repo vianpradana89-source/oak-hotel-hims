@@ -41,19 +41,25 @@ import type {
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
 import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorkspace.tsx';
+import DocumentCenter from './features/documents/DocumentCenter.tsx';
 import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeMobileManagementWorkspace.tsx';
 import { HrdWorkspace } from './features/hrd/HrdWorkspace.tsx';
-import { OccupancySection } from './features/reports/OccupancySection.tsx';
+import { LaporanWorkspace } from './features/reports/laporan/LaporanWorkspace';
 import ProductInventorySection from './features/productInventory/ProductInventorySection';
 import RoomMasterPage from './features/roomMaster/RoomMasterPage';
 import ProductMasterPage from './features/products/ProductMasterPage';
-import PosWorkspace from './features/pos/PosWorkspace';
+import GoodsReceiptSection from './features/posInventory/GoodsReceiptSection';
+import FoodCostOverviewSection from './features/posInventory/FoodCostOverviewSection';
+import PosModal from './features/pos/PosModal';
+import PosPayCashModal, { type PosPayCashOrderContext } from './features/pos/PosPayCashModal';
+import type { PosOrderPaidSignal } from './features/pos/PosWorkspace';
+import { getPosAccess } from './features/pos/posPermissions';
 import { GlobalOperationsBar } from './features/shell/GlobalOperationsBar.tsx';
 import { AppSidebar } from './features/shell/AppSidebar.tsx';
 import type { MainNavKey } from './features/shell/shellTypes.ts';
 import { AuthProvider, useAuth } from './features/auth/AuthContext';
 import { ProtectedRoute } from './features/auth/ProtectedRoute';
-import { getDefaultNavKey, isNavAllowed } from './features/auth/accessControl';
+import { getDefaultNavKey, isNavAllowed, getVisibleNavKeys } from './features/auth/accessControl';
 import { ManagementSettingsWorkspace, type SettingsCategoryKey } from './features/settings/ManagementSettingsWorkspace.tsx';
 import { getFallbackPropertyBranding, type PropertyBrandingConfig } from './features/propertySettings/propertyBrandingTypes.ts';
 import { fetchPropertyBranding, savePropertyBranding } from './features/propertySettings/propertyBrandingApi.ts';
@@ -68,13 +74,14 @@ import QuickBookingModal from './features/booking/QuickBookingModal';
 import ReservationDetailDrawer from './features/calendar/ReservationDetailDrawer';
 import QuickReservationDetail from './features/calendar/QuickReservationDetail';
 import { OperationalSummaryDrawer } from './features/calendar/OperationalSummaryDrawer';
-import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchTapechart, fetchUnresolvedGuarantees, parseAvailabilityKey } from './features/calendar/calendarApi';
-import type { DailyKpiData, DailyKpiDrilldownData } from './features/calendar/calendarApi';
+import { buildAvailabilityRequest, fetchDailyKpiDrilldown as fetchDailyKpiDrilldownApi, fetchDailyKpis as fetchDailyKpisApi, fetchDailyKpiHistory as fetchDailyKpiHistoryApi, fetchTapechart, fetchUnresolvedGuarantees, parseAvailabilityKey } from './features/calendar/calendarApi';
+import type { DailyKpiData, DailyKpiDrilldownData, DailyKpiHistoryData, DailyKpiDrilldownType } from './features/calendar/calendarApi';
 import type { UnresolvedGuaranteeItem } from './features/calendar/calendarTypes';
 import GuaranteeQueuePanel from './features/calendar/GuaranteeQueuePanel';
 import { CheckoutGuaranteeConfirmationModal } from './features/deposits/CheckoutGuaranteeConfirmationModal';
 import { buildDailyKpiCards, DRAWER_TYPE_TO_KPI_DRILLDOWN } from './features/calendar/dailyKpiFormat';
 import { DailyKpiDrilldownList } from './features/calendar/DailyKpiDrilldownList';
+import { TrendSparkline } from './features/calendar/TrendSparkline';
 import {
   addHotelDays,
   buildHotelDateWindow,
@@ -141,7 +148,7 @@ function localDateISO(value: Date | string | undefined) {
 }
 
 function AppContent() {
-  const { user, logout, authFetch, effectiveAccess } = useAuth();
+  const { user, logout, authFetch, effectiveAccess, hasGranularPermission } = useAuth();
   const [propertyId, setPropertyId] = useState<number | null>(null);
   const [properties, setProperties] = useState<any[]>([]);
   const [reservations, setReservations] = useState<any[]>([]);
@@ -154,6 +161,17 @@ function AppContent() {
     version: number;
     reservationId: number | null;
   }>({ version: 0, reservationId: null });
+  // COMPLIMENTARY REALTIME: parent-owned invalidation signal. Bumped on each
+  // ComplimentaryUpdated SSE event; the open drawer/refetches its own detail
+  // only when the signaled reservation id matches the component it is showing.
+  const [complimentaryRefresh, setComplimentaryRefresh] = useState<{
+    version: number;
+    reservationId: number | null;
+  }>({ version: 0, reservationId: null });
+  // REALTIME-3B: canonical transaction-domain invalidation counter. Bumped on each
+  // TransactionUpdated SSE event; passed to TransactionWorkspace which refetches
+  // its own /api/transactions list without remounting or resetting local filters.
+  const [transactionRefreshVersion, setTransactionRefreshVersion] = useState(0);
   const [quickReservation, setQuickReservation] = useState<{
     reservation: any;
     anchorRect: DOMRect | null;
@@ -260,10 +278,16 @@ function AppContent() {
   const [summaryDrawerType, setSummaryDrawerType] = useState<string | null>(null);
   const [posOrders, setPosOrders] = useState<any[]>([]);
   const [posMenu, setPosMenu] = useState<any[]>([]);
-  const [financeSummary, setFinanceSummary] = useState<any>(null);
+  const [, setFinanceSummary] = useState<any>(null);
   const [employees, setEmployees] = useState<any[]>([]);
   const [payroll, setPayroll] = useState<any[]>([]);
-  const [selectedMenu, setSelectedMenu] = useState<MainNavKey>('Kalender');
+  const [selectedMenu, setSelectedMenu] = useState<MainNavKey>(() => {
+    try {
+      const saved = localStorage.getItem('oak_selected_menu');
+      if (saved) return saved as MainNavKey;
+    } catch {}
+    return 'Kalender';
+  });
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState<boolean>(() => {
     try {
       return localStorage.getItem('oak_sidebar_collapsed') === 'true';
@@ -273,6 +297,72 @@ function AppContent() {
   });
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState<boolean>(false);
   const [propertyBrandings, setPropertyBrandings] = useState<Record<number, PropertyBrandingConfig>>({});
+
+  // State POS modal (dibuka dari tombol header, bukan halaman penuh).
+  const [showPosModal, setShowPosModal] = useState<boolean>(false);
+  const [posCartHasItems, setPosCartHasItems] = useState<boolean>(false);
+  const [posBusy, setPosBusy] = useState<boolean>(false);
+  // Ref sinkron untuk guard in-flight (cegah submit ganda & close saat request berjalan).
+  // Ref diperbarui di jalur yang sama dengan state agar guard selalu sinkron di tick yang sama.
+  const posBusyRef = useRef<boolean>(false);
+  const setPosBusySync = (v: boolean) => {
+    posBusyRef.current = v;
+    setPosBusy(v);
+  };
+  // reservation_id untuk scope POS order ke reservasi tertentu (dari detail view).
+  const [posModalReservationId, setPosModalReservationId] = useState<number | null>(null);
+  // property_id scope POS modal — TIDAK mengikuti propertyId aktif bila berbeda
+  // (multi-property belum didukung: modal menampilkan menu properti scope, menolak bila
+  // scope prop berbeda dari properti aktif karena menu yang muat = properti aktif).
+  const [posModalPropertyId, setPosModalPropertyId] = useState<number | null>(null);
+  // Identitas reservasi untuk menginisialisasi field PosWorkspace SAAT DRAFT BARU.
+  // Tidak menyentuh draft yang sudah ada, snapshot pending, atau snapshot unresolved.
+  // Di-set null saat buka dari header (konteks umum) atau saat modal ditutup/pindah properti.
+  const [posModalGuestName, setPosModalGuestName] = useState<string | null>(null);
+  const [posModalRoomNumber, setPosModalRoomNumber] = useState<string | null>(null);
+
+  // Ref sinkron status PosWorkspace — dipakai guard close/pindah konteks SEMUA jalur.
+  // - pendingRef: request POST in-flight (saving) — cegah close/switch (draft akan dibuang).
+  // - unresolvedRef: snapshot ambigu dipertahankan — cegah close/switch yang membuang snapshot,
+  //   TAPI TIDAK memblokir tombol Retry di dalam PosWorkspace (Retry hanya dicek oleh saving lokal).
+  const posRequestPendingRef = useRef<boolean>(false);
+  const posUnresolvedRef = useRef<boolean>(false);
+
+  // ── State & refs KHUSUS modal pembayaran CASH (PosPayCashModal) ──────
+  // Dipisahkan dari refs create-order (posRequestPendingRef/posUnresolvedRef).
+  // Ref pending/unresolved untuk pembayaran dipakai guard close/switch.
+  const [showPosCashPayment, setShowPosCashPayment] = useState<boolean>(false);
+  const [posCashPaymentContext, setPosCashPaymentContext] =
+    useState<PosPayCashOrderContext | null>(null);
+  const posCashPaymentPendingRef = useRef<boolean>(false);
+  const posCashPaymentUnresolvedRef = useRef<boolean>(false);
+  /**
+   * Signal pembayaran sukses: propertyId + orderId dari settlement terverifikasi.
+   * Diisi oleh callback onPaid PosPayCashModal; diteruskan ke PosModal → PosWorkspace
+   * untuk mengubah status order lokal menjadi PAID.
+   */
+  const [paidPosOrder, setPaidPosOrder] = useState<PosOrderPaidSignal | null>(null);
+
+  // Scoped refresh POS daftar: App menerbitkan version bump + scope, detail view
+  // meneruskannya ke POSOrderPanel; panel refetch hanya bila scope cocok.
+  const [posOrdersRefreshVersion, setPosOrdersRefreshVersion] = useState<number>(0);
+  const [posOrdersRefreshReservationId, setPosOrdersRefreshReservationId] = useState<number | null>(null);
+
+  // Permission POS (pola getPosAccess — sama dengan enforcement backend).
+  const posAccess = useMemo(
+    () => getPosAccess(effectiveAccess, hasGranularPermission),
+    [effectiveAccess, hasGranularPermission],
+  );
+
+  // Izin untuk GuestPicker di POS header: user harus punya Kalender:view.
+  // Pola sama dengan getPosAccess: effective grid + fallback granular.
+  const canPickGuest = useMemo(() => {
+    if (effectiveAccess?.is_platform_super_admin) return true;
+    const cell = effectiveAccess?.effective?.['Kalender']?.view;
+    if (cell) return cell.allowed;
+    // Fallback granular (bila grid efektif belum termuat):
+    return hasGranularPermission('reservations.view') && hasGranularPermission('rooms.view');
+  }, [effectiveAccess, hasGranularPermission]);
 
   const handleToggleSidebarCollapse = () => {
     setIsSidebarCollapsed((prev) => {
@@ -292,6 +382,12 @@ function AppContent() {
     }
   }, [user, selectedMenu, effectiveAccess]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('oak_selected_menu', selectedMenu);
+    } catch {}
+  }, [selectedMenu]);
+
   const handleSelectMenu = (menu: MainNavKey) => {
     if (!isNavAllowed(effectiveAccess?.effective, menu)) {
       return;
@@ -299,13 +395,208 @@ function AppContent() {
     setSelectedMenu(menu);
   };
 
+  // Guard close POS modal (dipakai X, Escape, backdrop, dan tombol navigasi).
+  // Batal close → cart & properti tetap; setuju → tutup & buang draft.
+  // Cek ref sinkron (bukan state) agar guard aman di tick yang sama.
+  // Ref pending/unresolved dipisahkan:
+  //  - pending: request in-flight → cegah close/switch (draft akan dibuang).
+  //  - unresolved: snapshot ambigu → CEGAH close/switch (snapshot tidak boleh
+  //    dibuang sebelum replay sukses terverifikasi); TIDAK memblokir Retry.
+  const requestClosePosModal = () => {
+    if (posRequestPendingRef.current) return; // request sedang berjalan — cegah close yang berisiko
+    if (posUnresolvedRef.current) {
+      // Snapshot ambigu aktif — close/switch akan membuang draft & key yang
+      // belum terverifikasi. Tidak ada jalur confirm: tolak dan kembalikan.
+      window.alert(
+        'Tutup POS ditolak: order sebelumnya belum terselesaikan. ' +
+        'Gunakan "Coba Lagi" di panel POS untuk memverifikasi hasil sebelum menutup.'
+      );
+      return;
+    }
+    // Guard: modal pembayaran CASH masih terbuka → TOLAK close POS asal.
+    // Jangan menutup modal pembayaran otomatis dari handler parent —
+    // user harus tutup pembayaran dahulu (pending/unresolved/aksi sukses).
+    if (showPosCashPayment) {
+      window.alert(
+        'Tutup POS ditolak: modal pembayaran CASH sedang terbuka. ' +
+        'Tutup modal pembayaran dahulu.',
+      );
+      return;
+    }
+    if (posCartHasItems) {
+      const ok = window.confirm('Tutup POS? Draft pesanan yang belum tersimpan akan dibuang.');
+      if (!ok) return;
+    }
+    setShowPosModal(false);
+    setPosCartHasItems(false);
+    setPosBusySync(false);
+    posRequestPendingRef.current = false;
+    posUnresolvedRef.current = false;
+    setPosModalReservationId(null);
+    setPosModalPropertyId(null);
+    setPosModalGuestName(null);
+    setPosModalRoomNumber(null);
+    setPaidPosOrder(null);
+  };
+
+  // Buka POS dari header (permission view dari getPosAccess, sama dengan enforcement backend).
+  // Konteks umum: tanpa reservation_id, tanpa identitas reservasi.
+  const openPosModal = () => {
+    if (!posAccess.canViewPos) return;
+    setPosModalReservationId(null);
+    setPosModalPropertyId(null); // konteks umum — mengikuti properti aktif
+    setPosModalGuestName(null);   // tidak ada identitas reservasi
+    setPosModalRoomNumber(null);
+    setShowPosModal(true);
+  };
+
+  // Buka POS dari reservation detail (scoped ke property_id + reservation_id).
+  // propId adalah properti reservasi tersebut; TIDAK mengabaikan sebagai _propId.
+  // Bila propId berbeda dari properti aktif, menu yang dimuat masih milik properti
+  // aktif (App memuat posMenu untuk propertyId aktif) — tolak dengan pesan jelas,
+  // jangan switch diam-diam (multi-property belum didukung).
+  // context berisi identitas reservasi (nama tamu, nomor kamar, status reservasi
+  // terkini) yang hanya dipakai untuk menginisialisasi field PosWorkspace saat
+  // draft baru — tidak menyentuh draft/snapshot yang sudah ada.
+  // Gate "Tambah Order": izin edit POS + status reservasi aktif (BOOKED/CHECKED_IN).
+  // Status di-validasi dari context (data terkini dari view), bukan dari state lama.
+  // Status null/undefined/kosong/tidak dikenal = TOLAK.
+  const openPosModalForReservation = (
+    propId: number,
+    resId: number,
+    context?: {
+      guestName?: string | null;
+      roomNumber?: string | null;
+      reservationStatus?: string | null;
+    },
+  ) => {
+    if (!posAccess.canViewPos) return;
+    // "Tambah Order" = aksi edit di policy backend (pos.create / pos.edit).
+    // Tolak bila user tidak punya izin edit POS — sama dengan gate di panel.
+    if (!posAccess.canEditPos) return;
+    // Validasi status reservasi terkini dari context (ditransfer dari view).
+    // Hanya reservasi aktif (BOOKED / CHECKED_IN) yang boleh menambah order.
+    // Status null/undefined/kosong/tidak dikenal → tolak.
+    const resStatus = context?.reservationStatus;
+    if (resStatus !== 'BOOKED' && resStatus !== 'CHECKED_IN') {
+      window.alert(
+        `Tambah order tidak tersedia — reservasi berstatus ${resStatus ?? 'tidak diketahui'}. ` +
+        'Hanya reservasi BOOKED atau CHECKED_IN yang dapat menambah order.'
+      );
+      return;
+    }
+    if (propId !== propertyId) {
+      window.alert(
+        `POS untuk reservasi di properti #${propId} belum didukung — properti aktif adalah #${propertyId}. ` +
+        'Pindah ke properti tersebut dahulu, lalu coba lagi.'
+      );
+      return;
+    }
+    setPosModalReservationId(resId);
+    setPosModalPropertyId(propId);
+    setPosModalGuestName(context?.guestName ?? null);
+    setPosModalRoomNumber(context?.roomNumber ?? null);
+    setShowPosModal(true);
+  };
+
+  // ── Helper: buka modal pembayaran CASH (PosPayCashModal) ──────────────
+  // Gate izin edit POS + validasi propertyId sesuai properti aktif.
+  // Tolak penggantian context jika modal pembayaran sudah terbuka —
+  // jangan menimpa atau remount pembayaran aktif.
+  const openPosCashPayment = (ctx: PosPayCashOrderContext) => {
+    // Gate: izin edit POS existing
+    if (!posAccess.canEditPos) return;
+    // Validasi propertyId sesuai properti aktif (multi-property belum didukung)
+    if (ctx.propertyId !== propertyId) {
+      window.alert(
+        `Pembayaran untuk properti #${ctx.propertyId} belum didukung — ` +
+        `properti aktif adalah #${propertyId}. Pindah ke properti tersebut dahulu.`,
+      );
+      return;
+    }
+    // Jika modal pembayaran sudah terbuka, TOLAK penggantian context
+    // (jangan menimpa snapshot/keadaan pembayaran aktif).
+    if (showPosCashPayment && posCashPaymentContext) {
+      window.alert(
+        'Modal pembayaran sedang terbuka — tutup dahulu sebelum membuka pembayaran lain.',
+      );
+      return;
+    }
+    setPosCashPaymentContext(ctx);
+    setShowPosCashPayment(true);
+  };
+
+  // ── Helper: tutup modal pembayaran CASH ───────────────────────────────
+  // Menolak close saat pending/unresolved (sinkron ref).
+  // Sukses pembayaran TIDAK otomatis menutup — modal receipt tetap tampil.
+  const requestClosePosCashPayment = () => {
+    if (posCashPaymentPendingRef.current) return;
+    if (posCashPaymentUnresolvedRef.current) {
+      window.alert(
+        'Tutup ditolak: hasil pembayaran belum diketahui. ' +
+        'Gunakan "Coba Lagi" untuk memverifikasi sebelum menutup.',
+      );
+      return;
+    }
+    setShowPosCashPayment(false);
+    setPosCashPaymentContext(null);
+    posCashPaymentPendingRef.current = false;
+    posCashPaymentUnresolvedRef.current = false;
+  };
+
   const handleSelectProperty = (val: number) => {
     if (Number.isInteger(val) && val > 0) {
+      // Pindah properti saat modal POS terbuka → guard SEMUA jalur (sinkron ref).
+      if (showPosModal) {
+        if (posRequestPendingRef.current) {
+          // Request sedang berjalan — cegah ganti properti yang membatalkan/berisiko.
+          window.alert('Menunggu proses POS selesai. Coba lagi setelahnya.');
+          return;
+        }
+        if (posUnresolvedRef.current) {
+          // Snapshot ambigu aktif — pindah properti membuang draft & key yang
+          // belum terverifikasi. Tidak ada jalur confirm: tolak dan kembalikan.
+          window.alert(
+            'Ganti properti ditolak: order POS sebelumnya belum terselesaikan. ' +
+            'Gunakan "Coba Lagi" di panel POS untuk memverifikasi hasil dahulu.'
+          );
+          return;
+        }
+        if (posCartHasItems) {
+          const ok = window.confirm(
+            'Ganti properti? Draft POS yang belum tersimpan akan dibuang karena tiap properti punya menu berbeda.'
+          );
+          if (!ok) return;
+        }
+      }
+      // Guard modal pembayaran CASH saat pindah properti:
+      // TOLAK pindah properti selagi modal pembayaran terbuka (pending,
+      // unresolved, ATAU success receipt) — jangan tutup otomatis dari
+      // handler parent. User harus tutup pembayaran dahulu.
+      if (showPosCashPayment) {
+        window.alert(
+          'Ganti properti ditolak: modal pembayaran CASH sedang terbuka. ' +
+          'Tutup modal pembayaran dahulu, lalu pindah properti.',
+        );
+        return;
+      }
       setTransactionReservations([]);
       setTransactionError(null);
       setDailyOperations(null);
       transactionRequestVersionRef.current++;
       dailyOperationsRequestVersionRef.current++;
+      operationsRequestVersionRef.current++; // invalidasi in-flight fetch operasi/POS properti lama
+      // Buang draft POS saat pindah properti agar cart tidak bercampur lintas properti.
+      setShowPosModal(false);
+      setPosCartHasItems(false);
+      setPosBusySync(false);
+      posRequestPendingRef.current = false;
+      posUnresolvedRef.current = false;
+      setPosModalReservationId(null);
+      setPosModalPropertyId(null);
+      setPosModalGuestName(null);
+      setPosModalRoomNumber(null);
+      setPaidPosOrder(null);
       setPropertyId(val);
     }
   };
@@ -341,6 +632,7 @@ function AppContent() {
 
   const [propertyFeatures, setPropertyFeatures] = useState<Record<string, boolean>>({});
   const [initialSettingsCategory, setInitialSettingsCategory] = useState<SettingsCategoryKey>('housekeeping');
+  const [docCenterInit, setDocCenterInit] = useState<{ reservationId: number | null; kind: 'confirmation' | 'quotation' | 'folio' }>({ reservationId: null, kind: 'confirmation' });
 
   useEffect(() => {
     if (!propertyId) return;
@@ -358,12 +650,40 @@ function AppContent() {
     };
   }, [propertyId]);
 
+  // Redirect away from Dokumen & Print if feature flag is disabled.
+  useEffect(() => {
+    if (selectedMenu !== 'Dokumen & Print') return;
+    if (propertyFeatures['documents.enabled'] !== false) return;
+    if (!effectiveAccess) return;
+
+    const visible = getVisibleNavKeys(effectiveAccess.effective);
+    const nextMenu = visible.find(k => {
+      if (k === 'Dokumen & Print') return false;
+      if (k === 'Housekeeping') return propertyFeatures['housekeeping.enabled'] !== false;
+      return true;
+    });
+    if (nextMenu) {
+      setSelectedMenu(nextMenu);
+    }
+  }, [propertyFeatures, selectedMenu, effectiveAccess]);
+
   const handleSaveBranding = async (updated: PropertyBrandingConfig) => {
     const saved = await savePropertyBranding(updated.propertyId, updated);
     setPropertyBrandings((prev) => ({
       ...prev,
       [saved.propertyId]: saved,
     }));
+  };
+
+  // Refresh branding after logo upload/delete
+  const handleLogoUploaded = async () => {
+    if (propertyId) {
+      const refreshed = await fetchPropertyBranding(propertyId);
+      setPropertyBrandings((prev) => ({
+        ...prev,
+        [propertyId]: refreshed,
+      }));
+    }
   };
   const [calendarSearch, setCalendarSearch] = useState('');
   const [calendarRoomSearch, setCalendarRoomSearch] = useState('');
@@ -438,6 +758,16 @@ function AppContent() {
   // Refetch after the ReservationDetailDrawer closes (mutations may have
   // settled a deposit / returned KTP). Guarded to avoid loops.
   const handleGuaranteeQueueDrawerClose = useCallback(() => {
+    // Guard: modal pembayaran CASH masih terbuka → TOLAK close drawer asal.
+    // Jangan tutup modal pembayaran otomatis dari handler parent —
+    // user harus tutup pembayaran dahulu (pending / unresolved / success receipt).
+    if (showPosCashPayment) {
+      window.alert(
+        'Tolak menutup detail reservasi: modal pembayaran CASH sedang terbuka. ' +
+        'Tutup modal pembayaran dahulu.',
+      );
+      return;
+    }
     setSelectedRes(null);
     setSelectedFolio(null);
     setPaymentDraft('');
@@ -482,14 +812,18 @@ function AppContent() {
 
   const [dailyKpis, setDailyKpis] = useState<DailyKpiData | null>(null);
   const dailyKpiRequestVersionRef = useRef(0);
+  const [dailyKpiHistory, setDailyKpiHistory] = useState<DailyKpiHistoryData | null>(null);
+  const dailyKpiHistoryRequestVersionRef = useRef(0);
   const [kpiDrilldown, setKpiDrilldown] = useState<DailyKpiDrilldownData | null>(null);
   const [kpiDrilldownLoading, setKpiDrilldownLoading] = useState(false);
   const [kpiDrilldownError, setKpiDrilldownError] = useState<string | null>(null);
   const kpiDrilldownRequestVersionRef = useRef(0);
-  const [dailyOperations, setDailyOperations] = useState<any | null>(null);
-  const [dailyOperationsLoading, setDailyOperationsLoading] = useState<boolean>(false);
+  const [, setDailyOperations] = useState<any | null>(null);
+  const [, setDailyOperationsLoading] = useState<boolean>(false);
   const dailyOperationsRequestVersionRef = useRef(0);
-  const [occupancyRefreshTrigger, setOccupancyRefreshTrigger] = useState<number>(0);
+  // Versi request operasi (incl. data POS) — cegah respons properti lama menimpa properti baru.
+  const operationsRequestVersionRef = useRef(0);
+  // const [, setOccupancyRefreshTrigger] = useState<number>(0);
   const selectedMenuRef = useRef(selectedMenu);
   selectedMenuRef.current = selectedMenu;
   const [quickBooking, setQuickBooking] = useState({
@@ -1052,7 +1386,7 @@ function AppContent() {
     };
   }, [reservations, roomStatuses, rooms, calendarSearchQuery]);
 
-  const dailyKpiCards = useMemo(() => buildDailyKpiCards(dailyKpis), [dailyKpis]);
+  const dailyKpiCards = useMemo(() => buildDailyKpiCards(dailyKpis, dailyKpiHistory), [dailyKpis, dailyKpiHistory]);
 
   const openReservationEditor = (reservation: any) => {
     const checkIn = normalizeHotelDate(reservation.check_in);
@@ -1207,22 +1541,45 @@ function AppContent() {
     const propId = targetPropId !== undefined ? targetPropId : propertyId;
     if (propId === null || propId === undefined) {
       setDailyKpis(null);
+      setDailyKpiHistory(null);
+      ++dailyKpiHistoryRequestVersionRef.current;
       return;
     }
+    // Invalidate any in-flight history request BEFORE starting the new load,
+    // so stale history responses from a prior call cannot overwrite the UI.
+    ++dailyKpiHistoryRequestVersionRef.current;
+    setDailyKpiHistory(null);
+
     const requestVersion = ++dailyKpiRequestVersionRef.current;
+    let kpiData: DailyKpiData | null = null;
     try {
-      const data = await fetchDailyKpisApi(propId, undefined, authFetch);
+      kpiData = await fetchDailyKpisApi(propId, undefined, authFetch);
       if (requestVersion !== dailyKpiRequestVersionRef.current) return;
-      setDailyKpis(data);
+      setDailyKpis(kpiData);
     } catch (err) {
       if (requestVersion !== dailyKpiRequestVersionRef.current) return;
       console.error('Error fetching daily KPIs', err);
+    }
+
+    // Fetch history for trend data (anchored to same date as main KPI)
+    if (!kpiData?.business_date) {
+      // Primary KPI failed or returned no date — history already nulled above.
+      return;
+    }
+    const historyRequestVersion = ++dailyKpiHistoryRequestVersionRef.current;
+    try {
+      const historyData = await fetchDailyKpiHistoryApi(propId, 7, authFetch, kpiData.business_date);
+      if (historyRequestVersion !== dailyKpiHistoryRequestVersionRef.current) return;
+      setDailyKpiHistory(historyData);
+    } catch (err) {
+      if (historyRequestVersion !== dailyKpiHistoryRequestVersionRef.current) return;
+      console.error('Error fetching daily KPI history', err);
     }
   };
   loadDailyKpisRef.current = loadDailyKpis;
 
   useEffect(() => {
-    const apiType = summaryDrawerType ? DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] : undefined;
+    const apiType = summaryDrawerType ? (DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] as DailyKpiDrilldownType | undefined) : undefined;
     if (!apiType || propertyId === null) {
       kpiDrilldownRequestVersionRef.current += 1;
       setKpiDrilldown(null);
@@ -1258,15 +1615,19 @@ function AppContent() {
 
   const fetchOperationsData = async () => {
     if (propertyId === null) {
+      operationsRequestVersionRef.current++;
       setPosMenu([]);
       setPosOrders([]);
       setFinanceSummary(null);
       return;
     }
     const targetPropertyId = propertyId;
+    const requestVersion = ++operationsRequestVersionRef.current;
     setPosMenu([]);
     setPosOrders([]);
     setFinanceSummary(null);
+    const isStale = () =>
+      operationsRequestVersionRef.current !== requestVersion || targetPropertyId !== propertyId;
     try {
       const [housekeepingRes, maintenanceRes, posMenuRes, posOrderRes, financeRes, employeesRes, payrollRes, checkoutRes] = await Promise.all([
         authFetch(`/api/housekeeping/tasks?property_id=${targetPropertyId}`),
@@ -1278,6 +1639,7 @@ function AppContent() {
         authFetch('/api/hr/payroll'),
         authFetch(`/api/housekeeping/checkout-inspections?property_id=${targetPropertyId}`)
       ]);
+      if (isStale()) return; // properti berganti atau request lebih baru — abaikan respons lama
 
       const housekeepingData = await housekeepingRes.json();
       const maintenanceData = await maintenanceRes.json();
@@ -1288,7 +1650,7 @@ function AppContent() {
       const payrollData = await payrollRes.json();
       const checkoutData = await checkoutRes.json();
 
-      if (targetPropertyId !== propertyId) return;
+      if (isStale()) return; // cegah data properti lama menimpa properti baru
       if (housekeepingData?.status === 'OK') setHousekeepingTasks(housekeepingData.data || []);
       if (checkoutData?.status === 'OK') {
         setCheckoutInspections(checkoutData.data?.inspections || []);
@@ -1417,26 +1779,6 @@ function AppContent() {
     } catch (error) {
       console.error('Failed to fetch room audit', error);
       return [];
-    }
-  };
-
-  const createPosOrder = async () => {
-    if (propertyId === null) return;
-    const sampleItems = posMenu.slice(0, 2).map((item: any) => ({ menu_item_id: item.id, quantity: 1 }));
-
-    try {
-      const res = await authFetch('/api/pos/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ property_id: propertyId, table_number: '101', guest_name: 'Walk In Guest', items: sampleItems })
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.message || 'Failed to create POS order');
-      fetchOperationsData();
-      alert('POS order created');
-    } catch (error) {
-      console.error('Create POS order failed', error);
-      alert(`Gagal buat POS order: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
   };
 
@@ -2358,10 +2700,23 @@ function AppContent() {
           'BookingCompleted',
           'RoomStatusUpdated',
           'CheckoutInspectionUpdated',
+          'TransactionUpdated',
         ]);
 
         const handleEvent = (eventName: string, data: any) => {
           console.log(`SSE ${eventName}`, data);
+          // COMPLIMENTARY-RT: targeted-only event - must run BEFORE the generic
+          // calendarEvents guard so it is not silently dropped.
+          if (eventName === 'ComplimentaryUpdated') {
+            const signaledResId = Number(data?.reservation_id);
+            if (Number.isInteger(signaledResId) && signaledResId > 0) {
+              setComplimentaryRefresh((prev) => ({
+                version: prev.version + 1,
+                reservationId: signaledResId,
+              }));
+            }
+            return;
+          }
           if (!calendarEvents.has(eventName)) {
             return;
           }
@@ -2380,6 +2735,9 @@ function AppContent() {
                 reservationId: signaledResId,
               }));
             }
+          }
+          if (eventName === 'TransactionUpdated') {
+            setTransactionRefreshVersion((v) => v + 1);
           }
         };
 
@@ -3669,6 +4027,32 @@ function AppContent() {
 
   return (
     <div className="hotel-app">
+      {import.meta.env.VITE_UAT_PREVIEW === 'true' && (
+        <div
+          data-testid="uat-isolated-copy-banner"
+          style={{
+            backgroundColor: '#064e3b',
+            color: '#fef08a',
+            fontSize: '13px',
+            fontWeight: '600',
+            padding: '6px 16px',
+            textAlign: 'center',
+            letterSpacing: '0.02em',
+            borderBottom: '1px solid #047857',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: '8px',
+            zIndex: 9999,
+          }}
+        >
+          <span>🛡️</span>
+          <span>UAT Inventory Tahap A R1 - Salinan Terisolasi</span>
+          <span style={{ color: '#d1fae5', fontWeight: 'normal', fontSize: '12px' }}>
+            {`(Port ${import.meta.env.VITE_UAT_PREVIEW_PORT || '44197'} • DB ${import.meta.env.VITE_UAT_PREVIEW_DB || '55457'} terisolasi • Mode Baca Terjaga)`}
+          </span>
+        </div>
+      )}
       <GlobalOperationsBar
         activeProperty={properties.find((p: any) => p.id === propertyId) || null}
         properties={properties}
@@ -3694,7 +4078,7 @@ function AppContent() {
             .slice(0, 2) || 'OP',
         }}
         onLogout={logout}
-        onOpenPos={() => handleSelectMenu('POS')}
+        onOpenPos={isNavAllowed(effectiveAccess?.effective, 'POS') ? openPosModal : undefined}
         propertyBranding={activeBranding}
       />
 
@@ -3732,7 +4116,7 @@ function AppContent() {
                   {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
                 </div>
               </div>
-              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-8">
+              <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
                 {dailyKpiCards.map((card) => (
                   <StatCard
                     key={card.key}
@@ -3747,6 +4131,10 @@ function AppContent() {
                       setSummaryDrawerType(card.drawerType);
                     }}
                     badge={card.key === 'checkoutCheck' ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
+                    trendData={card.trendData}
+                    trendDelta={card.trendDelta}
+                    isOccupancy={card.key === 'occupancy'}
+                    occupancyPct={card.occupancyPct}
                   />
                 ))}
               </div>
@@ -4177,155 +4565,59 @@ function AppContent() {
             getPaymentStatusLabel={getPaymentStatusLabel}
             getPaymentBadgeClass={getPaymentBadgeClass}
             onNavigateToReservation={(resId) => {
-              const target = reservations.find((r) => Number(r.id) === Number(resId));
-              if (target) {
-                setSelectedRes(target);
-                fetchReservationFolio(Number(resId));
+              void (async () => {
+                const targetId = Number(resId);
+                if (!targetId || propertyId === null) return;
+                // 1) Prefer already-loaded data (transaction list or tape-chart)
+                const cached =
+                  transactionReservations.find((r: any) => Number(r.id ?? r.reservation_id) === targetId) ||
+                  reservations.find((r: any) => Number(r.id ?? r.reservation_id) === targetId);
+                if (cached) setSelectedRes(cached);
+                // 2) Authoritative fetch so the drawer renders with full data
+                try {
+                  const response = await authFetch(`/api/reservations/${targetId}?property_id=${propertyId}`);
+                  const json = await response.json().catch(() => null);
+                  if (response.ok && json?.data) {
+                    const fullDto = json.data;
+                    setSelectedRes((prev: any) =>
+                      !prev || Number(prev.id) !== targetId
+                        ? fullDto
+                        : { ...prev, ...fullDto, room_number: prev.room_number ?? fullDto.room_number }
+                    );
+                    // refresh folio alongside so drawer content stays consistent
+                    await fetchReservationFolio(targetId);
+                  } else if (cached) {
+                    // cache hit but API failed: fall back to folio only
+                    await fetchReservationFolio(targetId);
+                  } else {
+                    console.error('Gagal memuat detail reservasi dari transksi:', json?.message || response.status);
+                  }
+                } catch (error) {
+                  console.error('Gagal memuat detail reservasi:', error);
+                }
+              })();
+            }}
+            realtimeRefreshVersion={transactionRefreshVersion}
+            onNavigateToInventory={() => {
+              if (!isNavAllowed(effectiveAccess?.effective, 'Penerimaan Barang')) {
+                try {
+                  sessionStorage.removeItem('oak_hims_pending_grn_po_id');
+                  sessionStorage.removeItem('oak_hims_pending_grn_purchase_tx_id');
+                  sessionStorage.removeItem('oak_hims_pending_grn_search');
+                } catch {
+                  /* ignore */
+                }
+                window.alert('Akses ke menu Penerimaan Barang memerlukan izin tampilan Produk & Inventori.');
+                return;
               }
+              setSelectedMenu('Penerimaan Barang');
+              window.dispatchEvent(new Event('oak_hims_pending_grn_bridge'));
             }}
           />
         )}
 
         {selectedMenu === 'Laporan' && (
-          <div className="space-y-6">
-            <div className="flex items-center justify-between">
-              <div>
-                <div className="text-xs uppercase tracking-wider text-emerald-800 font-bold">Laporan & Analitik Operasional</div>
-                <h3 className="text-xl font-bold text-gray-900 mt-0.5">Ringkasan Operasional Harian</h3>
-                <p className="text-xs text-gray-500 mt-1">Tanggal Hotel: <span className="font-semibold text-slate-700">{dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}</span> (Asia/Jakarta)</p>
-              </div>
-              <button
-                type="button"
-                onClick={() => {
-                  fetchDailyOperations(propertyId);
-                  setOccupancyRefreshTrigger((prev) => prev + 1);
-                }}
-                className="hotel-action-btn text-xs font-semibold px-3 py-1.5"
-              >
-                {dailyOperationsLoading ? 'Memuat...' : '⟳ Segarkan'}
-              </button>
-            </div>
-
-            {/* Section 1: Metrik Berdasarkan Tanggal Operasional */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Operasional Tanggal {dailyOperations?.business_date || dailyOperations?.date || hotelDateFromInstant(new Date())}
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kedatangan (Arrivals)</div>
-                  <div className="text-2xl font-bold text-blue-700 mt-1">
-                    {dailyOperations?.business_date_metrics?.arrivals ?? dailyOperations?.lifecycle?.arrivals_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Check-in pada tanggal ini</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Keberangkatan (Departures)</div>
-                  <div className="text-2xl font-bold text-amber-700 mt-1">
-                    {dailyOperations?.business_date_metrics?.departures ?? dailyOperations?.lifecycle?.departures_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Check-out pada tanggal ini</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-emerald-600">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Kas Masuk Tanggal Ini</div>
-                  <div className="text-2xl font-bold text-emerald-800 mt-1">
-                    {formatCurrency(dailyOperations?.business_date_metrics?.cash_collected ?? dailyOperations?.financials?.cash_collected_today ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Pembayaran sukses WIB</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section 2: Status Operasional Saat Ini (Live Snapshot) */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Status Operasional Saat Ini (Live Snapshot)
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Tamu In-House Saat Ini</div>
-                  <div className="text-2xl font-bold text-emerald-700 mt-1">
-                    {dailyOperations?.live_snapshot?.in_house_current ?? dailyOperations?.lifecycle?.in_house ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Kamar aktif berstatus Checked-In</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Booking Aktif Berjalan</div>
-                  <div className="text-2xl font-bold text-slate-800 mt-1">
-                    {dailyOperations?.live_snapshot?.booked_active ?? dailyOperations?.lifecycle?.booked_future_or_today ?? 0}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Reservasi berstatus Booked</div>
-                </div>
-                <div className="bg-white border rounded-xl p-4 shadow-sm border-l-4 border-l-amber-500">
-                  <div className="text-[11px] uppercase font-bold text-slate-500 tracking-wide">Piutang Tamu Berjalan</div>
-                  <div className="text-2xl font-bold text-amber-800 mt-1">
-                    {formatCurrency(dailyOperations?.live_snapshot?.outstanding_guest_balance_current ?? dailyOperations?.financials?.outstanding_guest_balance ?? 0)}
-                  </div>
-                  <div className="text-[11px] text-slate-400 mt-1">Sisa tagihan reservasi non-cancelled</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section 3: Room Status Real-Time */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2">
-                Status Kamar Real-Time ({dailyOperations?.live_snapshot?.total_active_rooms ?? dailyOperations?.rooms?.total_active_rooms ?? 0} Kamar Aktif)
-              </div>
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-                <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-emerald-800 tracking-wide">Siap Huni (Ready)</div>
-                  <div className="text-2xl font-bold text-emerald-900 mt-1">{dailyOperations?.rooms?.vacant_ready ?? 0}</div>
-                </div>
-                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-amber-800 tracking-wide">Kotor (Dirty)</div>
-                  <div className="text-2xl font-bold text-amber-900 mt-1">{dailyOperations?.rooms?.vacant_dirty ?? 0}</div>
-                </div>
-                <div className="bg-blue-50 border border-blue-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-blue-800 tracking-wide">Pembersihan</div>
-                  <div className="text-2xl font-bold text-blue-900 mt-1">{dailyOperations?.rooms?.cleaning ?? 0}</div>
-                </div>
-                <div className="bg-purple-50 border border-purple-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-purple-800 tracking-wide">Inspeksi</div>
-                  <div className="text-2xl font-bold text-purple-900 mt-1">{dailyOperations?.rooms?.waiting_inspection ?? 0}</div>
-                </div>
-                <div className="bg-indigo-50 border border-indigo-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-indigo-800 tracking-wide">Terisi (Occupied)</div>
-                  <div className="text-2xl font-bold text-indigo-900 mt-1">{dailyOperations?.rooms?.occupied ?? 0}</div>
-                </div>
-                <div className="bg-red-50 border border-red-200 rounded-xl p-3.5 shadow-sm">
-                  <div className="text-[10px] uppercase font-bold text-red-800 tracking-wide">Out of Order / Svc</div>
-                  <div className="text-2xl font-bold text-red-900 mt-1">{dailyOperations?.rooms?.out_of_order_or_service ?? 0}</div>
-                </div>
-              </div>
-            </div>
-
-            {/* Section: Kinerja Kamar (Occupancy Engine) */}
-            <div className="border-t border-slate-200 pt-2">
-              <OccupancySection
-                propertyId={propertyId}
-                refreshTrigger={occupancyRefreshTrigger}
-              />
-            </div>
-
-            {/* Section 4: Akuntansi Ringkasan */}
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wider text-slate-500 mb-2.5">Ringkasan Buku Besar Akuntansi</div>
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Hutang Vendor</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_payable || 0).toLocaleString('id-ID')}</div>
-                </div>
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Piutang Tamu (Buku Besar)</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">Rp {Number(financeSummary?.total_receivable || 0).toLocaleString('id-ID')}</div>
-                </div>
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-xs p-4">
-                  <div className="text-[11px] uppercase text-slate-500 font-bold tracking-wider">Jumlah Jurnal</div>
-                  <div className="text-2xl font-extrabold mt-1.5 text-slate-900">{financeSummary?.entries?.length || 0}</div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <LaporanWorkspace propertyId={propertyId} />
         )}
 
         {selectedMenu === 'Housekeeping' && propertyId !== null && (
@@ -4382,13 +4674,9 @@ function AppContent() {
           />
         )}
 
-        {selectedMenu === 'POS' && (
-          <PosWorkspace
+        {selectedMenu === 'Penerimaan Barang' && propertyId !== null && (
+          <GoodsReceiptSection
             propertyId={propertyId}
-            posMenu={posMenu}
-            posOrders={posOrders}
-            onCreateDemoOrder={createPosOrder}
-            onRefresh={() => void fetchOperationsData()}
           />
         )}
 
@@ -4397,12 +4685,30 @@ function AppContent() {
             propertyId={propertyId}
             posMenuCount={posMenu.length}
             posOrderCount={posOrders.length}
+            onNavigateToProcurement={() => setSelectedMenu('Transaksi')}
             onViewReservation={viewRoomMasterReservation}
+          />
+        )}
+
+        {selectedMenu === 'Analisis Food Cost' && propertyId !== null && (
+          <FoodCostOverviewSection
+            propertyId={propertyId}
           />
         )}
 
         {selectedMenu === 'Pelanggan' && (
           <GuestCrmWorkspace propertyId={propertyId} />
+        )}
+
+        {selectedMenu === 'Dokumen & Print' && propertyId !== null && (propertyFeatures['documents.enabled'] !== false) && (
+          <DocumentCenter
+            propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+            propertyBranding={activeBranding}
+            propertyId={propertyId}
+            authFetch={authFetch}
+            initialReservationId={docCenterInit.reservationId}
+            initialKind={docCenterInit.kind}
+          />
         )}
 
         {selectedMenu === 'Pengaturan' && propertyId !== null && (
@@ -4411,15 +4717,90 @@ function AppContent() {
             activeProperty={properties.find((p: any) => p.id === propertyId)}
             activeBranding={activeBranding || getFallbackPropertyBranding(propertyId, properties.find((p: any) => p.id === propertyId)?.name, properties.find((p: any) => p.id === propertyId)?.property_code)}
             onSaveBranding={handleSaveBranding}
+            onLogoUploaded={handleLogoUploaded}
             employees={employees}
             payroll={payroll}
             initialCategory={initialSettingsCategory}
             onSelectProperty={(id) => setPropertyId(id)}
             onRefreshProperties={fetchProperties}
+            onFeatureFlagUpdated={(featureKey, enabled) => setPropertyFeatures(prev => ({ ...prev, [featureKey]: enabled }))}
           />
         )}
         </main>
       </div>
+
+      {/* POS Modal (dibuka dari tombol header; mengikuti permission POS) */}
+      <PosModal
+        open={showPosModal}
+        propertyId={posModalPropertyId ?? propertyId}
+        posMenu={posMenu}
+        posOrders={posOrders}
+        onRefresh={() => void fetchOperationsData()}
+        onRequestClose={requestClosePosModal}
+        cartHasItems={posCartHasItems}
+        busy={posBusy}
+        onCartChange={setPosCartHasItems}
+        authFetch={authFetch}
+        reservationId={posModalReservationId}
+        reservationLabel={
+          posModalReservationId != null ? `Reservasi #${posModalReservationId}` : undefined
+        }
+        canEditPos={posAccess.canEditPos}
+        canDiscountPos={posAccess.canDiscountPos}
+        guestNameInitial={posModalGuestName}
+        roomNumberInitial={posModalRoomNumber}
+        onOrderCreated={(order) => {
+          const resId = order?.reservation_id ?? null;
+          setPosOrdersRefreshReservationId(resId);
+          setPosOrdersRefreshVersion((v) => v + 1);
+        }}
+        onOrderEdited={(edited) => {
+          // POS-EDIT-1B.4: setelah PUT edit sukses, bump refresh panel reservasi
+          // scoped sesuai reservationId order yang di-edit (ON clause WHERE IN).
+          // TIDAK membuat order baru; TIDAK menjalankan pembayaran.
+          const resId = edited?.reservationId ?? null;
+          setPosOrdersRefreshReservationId(resId);
+          setPosOrdersRefreshVersion((v) => v + 1);
+        }}
+        canPickGuest={canPickGuest}
+        onRequestPending={(pending) => { posRequestPendingRef.current = pending; }}
+        onUnresolvedChange={(unresolved) => { posUnresolvedRef.current = unresolved; }}
+        onOpenCashPayment={openPosCashPayment}
+        payCashModalPresent={showPosCashPayment && posCashPaymentContext !== null}
+        paidOrderId={paidPosOrder}
+      />
+
+      {/* Modal pembayaran CASH POS — dimiliki App, bukan consumer. */}
+      {showPosCashPayment && posCashPaymentContext && (
+        <PosPayCashModal
+          order={posCashPaymentContext}
+          authFetch={authFetch}
+          canEditPos={posAccess.canEditPos}
+          onRequestClose={requestClosePosCashPayment}
+          onRequestPending={(pending) => { posCashPaymentPendingRef.current = pending; }}
+          onUnresolvedChange={(unresolved) => { posCashPaymentUnresolvedRef.current = unresolved; }}
+          onPaid={(result) => {
+            // Simpan signal pembayaran sukses (propertyId + orderId dari settlement terverifikasi)
+            // untuk diteruskan ke PosWorkspace → status lokal PAID.
+            const ctx = posCashPaymentContext;
+            if (ctx) {
+              setPaidPosOrder({ propertyId: ctx.propertyId, orderId: ctx.orderId });
+            }
+            // Refresh panel reservasi sesuai reservationId pada context pembayaran.
+            const resId = ctx?.reservationId ?? null;
+            setPosOrdersRefreshReservationId(resId);
+            setPosOrdersRefreshVersion((v) => v + 1);
+            // Success TIDAK otomatis menutup modal receipt.
+            void result;
+          }}
+          onRefresh={() => {
+            // Refresh daftar order terkait (dipanggil setelah sukses terverifikasi).
+            const resId = posCashPaymentContext?.reservationId ?? null;
+            setPosOrdersRefreshReservationId(resId);
+            setPosOrdersRefreshVersion((v) => v + 1);
+          }}
+        />
+      )}
 
       {/* Checkout Room Inspection Modal */}
       {selectedCheckoutInspection && (
@@ -4619,22 +5000,40 @@ function AppContent() {
           anchorRect={quickReservation.anchorRect}
           anchorPoint={quickReservation.anchorPoint}
           propertyId={propertyId ?? quickReservation.reservation?.property_id ?? null}
-          onClose={() => setQuickReservation(null)}
+          onClose={() => {
+            // Guard: modal pembayaran CASH masih terbuka → tolak close quick detail asal.
+            if (showPosCashPayment) {
+              window.alert(
+                'Tolak menutup detail cepat: modal pembayaran CASH sedang terbuka. ' +
+                'Tutup modal pembayaran dahulu.',
+              );
+              return;
+            }
+            setQuickReservation(null);
+          }}
           onOpenFullDetail={(res) => {
             const target = res || quickReservation.reservation;
             setQuickReservation(null);
             setSelectedRes(target);
             fetchReservationFolio(Number(target.id));
           }}
-           onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
-           onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
-           onCancel={(resId) => handleReservationCancel(resId)}
-           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
-           onRefresh={() => {
-             fetchData();
-            fetchOperationsData();
-          }}
-        />
+          onCheckin={(resId, expectedPrimaryGuestId) => handleReservationAction(resId, 'checkin', expectedPrimaryGuestId)}
+            onCheckout={(resId) => openCheckoutConfirmation(resId, quickReservation.reservation)}
+            onCancel={(resId) => handleReservationCancel(resId)}
+            onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
+            onRefresh={() => {
+              fetchData();
+              fetchOperationsData();
+            }}
+            complimentaryRefreshVersion={complimentaryRefresh.version}
+            complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
+             propertyBranding={activeBranding || null}
+             propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+            onOpenPosModal={openPosModalForReservation}
+            posOrdersRefreshVersion={posOrdersRefreshVersion}
+            posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+            onOpenCashPayment={openPosCashPayment}
+          />
       )}
 
       {selectedRes && (
@@ -4656,8 +5055,32 @@ function AppContent() {
           onOpenStayChange={(res) => openStayChangePrompt(Number(res.id), undefined, res)}
           checkoutInspectionRefreshVersion={checkoutInspectionRefresh.version}
           checkoutInspectionRefreshReservationId={checkoutInspectionRefresh.reservationId}
-        />
-      )}
+          complimentaryRefreshVersion={complimentaryRefresh.version}
+          complimentaryRefreshReservationId={complimentaryRefresh.reservationId}
+           propertyBranding={activeBranding || null}
+           propertyInfo={properties.find((p: any) => p.id === propertyId) || undefined}
+            onOpenPosModal={openPosModalForReservation}
+            posOrdersRefreshVersion={posOrdersRefreshVersion}
+            posOrdersRefreshReservationId={posOrdersRefreshReservationId}
+            onOpenCashPayment={openPosCashPayment}
+            onOpenGuestFolio={
+              propertyFeatures['documents.enabled'] !== false &&
+              (!effectiveAccess || getVisibleNavKeys(effectiveAccess.effective).includes('Dokumen & Print'))
+                ? (resId) => {
+                    if (showPosCashPayment) {
+                      window.alert(
+                        'Tolak menutup detail reservasi: modal pembayaran CASH sedang terbuka. Tutup modal pembayaran dahulu.',
+                      );
+                      return;
+                    }
+                    setDocCenterInit({ reservationId: resId, kind: 'folio' });
+                    setSelectedRes(null);
+                    setSelectedMenu('Dokumen & Print');
+                  }
+                : undefined
+            }
+            />
+       )}
 
       <CheckoutGuaranteeConfirmationModal
         isOpen={checkoutConfirmOpen}
@@ -5572,11 +5995,11 @@ function AppContent() {
 
 
 
-function StatCard({ title, value, secondary, color, onClick, isActive, badge }: any) {
+function StatCard({ title, value, secondary, color, onClick, isActive, badge, trendData, trendDelta, isOccupancy, occupancyPct }: any) {
   const isClickable = typeof onClick === 'function';
   return (
     <div
-      className={`hotel-stat-card ${color} ${isClickable ? 'hotel-stat-card--clickable' : ''} ${isActive ? 'hotel-stat-card--active' : ''}`}
+      className={`hotel-stat-card ${color} ${isClickable ? 'hotel-stat-card--clickable' : ''} ${isActive ? 'hotel-stat-card--active' : ''} hotel-stat-card--model-c`}
       onClick={onClick}
       onKeyDown={isClickable ? (e: React.KeyboardEvent) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick(); } } : undefined}
       role={isClickable ? 'button' : undefined}
@@ -5593,8 +6016,51 @@ function StatCard({ title, value, secondary, color, onClick, isActive, badge }: 
           </span>
         )}
       </div>
-      <p className="hotel-stat-value">{value}</p>
-      {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+      {isOccupancy ? (
+        <OccupancyDonut value={value} secondary={secondary} occupancyPct={occupancyPct} />
+      ) : (
+        <>
+          <p className="hotel-stat-value">{value}</p>
+          {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+        </>
+      )}
+      {/* Trend sparkline - only when hasTrend is true and not occupancy */}
+      {!isOccupancy && trendData && trendData.length > 0 && (
+        <TrendSparkline data={trendData} previousValue={trendDelta !== null ? trendData[trendData.length - 2] : null} trendDelta={trendDelta} />
+      )}
+    </div>
+  );
+}
+
+function OccupancyDonut({ value, secondary, occupancyPct }: { value: string; secondary: string | null; occupancyPct: number | null }) {
+  const normalized = typeof occupancyPct === 'number' && Number.isFinite(occupancyPct) ? occupancyPct : null;
+  // Clamp to [0, 100] to avoid garbage rendering when upstream passes an unexpected scale.
+  const clampedPct = normalized !== null ? Math.min(100, Math.max(0, normalized)) : null;
+  const fraction = clampedPct !== null ? clampedPct / 100 : 0;
+  const circumference = 2 * Math.PI * 18;
+  const offset = circumference * (1 - fraction);
+  return (
+    <div className="occupancy-donut">
+      <svg className="occupancy-donut__ring" viewBox="0 0 44 44">
+        <circle cx="22" cy="22" r="18" fill="none" stroke="rgba(255,255,255,0.18)" strokeWidth="4" />
+        <circle
+          cx="22" cy="22" r="18"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="4"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform="rotate(-90 22 22)"
+        />
+        <text x="22" y="26" textAnchor="middle" fill="currentColor" fontSize="9" fontWeight="800" style={{ fontVariantNumeric: 'tabular-nums' }}>
+          {clampedPct !== null ? `${clampedPct.toFixed(1).replace('.', ',')}%` : '—'}
+        </text>
+      </svg>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <p className="hotel-stat-value" style={{ fontSize: '0.95rem' }}>{value}</p>
+        {secondary ? <p className="hotel-stat-secondary">{secondary}</p> : null}
+      </div>
     </div>
   );
 }

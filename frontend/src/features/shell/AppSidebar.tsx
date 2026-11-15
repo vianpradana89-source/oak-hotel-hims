@@ -31,6 +31,28 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
 }) => {
   const { effectiveAccess } = useAuth();
   const isHkEnabled = featureFlags ? featureFlags['housekeeping.enabled'] !== false : true;
+  const isDocsEnabled = featureFlags ? featureFlags['documents.enabled'] !== false : true;
+  const [expandedSubmenus, setExpandedSubmenus] = React.useState<Record<string, boolean>>({
+    'Master Produk': true,
+    'Manajemen Persediaan': true,
+  });
+
+  React.useEffect(() => {
+    if (
+      selectedMenu === 'Master Produk' ||
+      selectedMenu === 'Penerimaan Barang' ||
+      selectedMenu === 'Produk & Inventori' ||
+      selectedMenu === 'Analisis Food Cost'
+    ) {
+      setExpandedSubmenus((prev) =>
+        prev['Manajemen Persediaan'] ? prev : { ...prev, 'Manajemen Persediaan': true }
+      );
+    }
+  }, [selectedMenu]);
+
+  const toggleSubmenu = (key: string) => {
+    setExpandedSubmenus((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   // OAK HIMS Grouped Navigation
   const navGroups: NavGroupDef[] = [
@@ -44,6 +66,17 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
           icon: (
             <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          ),
+        },
+        {
+          key: 'Dokumen & Print',
+          label: 'Dokumen & Print',
+          isFunctional: isDocsEnabled,
+          icon: (
+            <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2h8m-4-2h.01M9 9h.01" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 3h6m-6 0v4m6-4v4" />
             </svg>
           ),
         },
@@ -96,16 +129,6 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
             </svg>
           ),
         },
-        {
-          key: 'POS' as MainNavKey,
-          label: 'POS',
-          isFunctional: true,
-          icon: (
-            <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z" />
-            </svg>
-          ),
-        },
       ],
     },
     {
@@ -122,14 +145,57 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
           ),
         },
         {
-          key: 'Master Produk' as MainNavKey,
-          label: 'Master Produk',
+          key: 'Penerimaan Barang' as MainNavKey,
+          label: 'Manajemen Persediaan',
           isFunctional: true,
           icon: (
             <svg className="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
             </svg>
           ),
+          children: [
+            {
+              key: 'Penerimaan Barang' as MainNavKey,
+              label: 'Penerimaan Barang',
+              isFunctional: true,
+              icon: (
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                </svg>
+              ),
+            },
+            {
+              key: 'Produk & Inventori' as MainNavKey,
+              label: 'Stok & Mutasi',
+              isFunctional: true,
+              icon: (
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+                </svg>
+              ),
+            },
+            {
+              key: 'Master Produk' as MainNavKey,
+              label: 'Master Barang & Produk',
+              isFunctional: true,
+              icon: (
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M16 11V7a4 4 0 00-8 0v4M5 9h14l1 12H4L5 9z" />
+                </svg>
+              ),
+            },
+            {
+              key: 'Analisis Food Cost' as MainNavKey,
+              label: 'Analisis Food Cost',
+              isFunctional: true,
+              icon: (
+                <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z" />
+                </svg>
+              ),
+            },
+          ],
         },
         {
           key: 'Laporan',
@@ -169,7 +235,27 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
   const filteredGroups: NavGroupDef[] = navGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => isNavAllowed(effectiveAccess?.effective, item.key as MainNavKey))
+      items: group.items
+        .map((item) => {
+          if (item.children && item.children.length > 0) {
+            return {
+              ...item,
+              children: item.children.filter((sub) =>
+                isNavAllowed(effectiveAccess?.effective, sub.key as MainNavKey)
+              ),
+            };
+          }
+          return item;
+        })
+        .filter((item) => {
+          if (item.children) {
+            return item.children.length > 0;
+          }
+          if (!isNavAllowed(effectiveAccess?.effective, item.key as MainNavKey)) return false;
+          if (item.key === 'Dokumen & Print') return isDocsEnabled;
+          if (item.key === 'Housekeeping') return isHkEnabled;
+          return true;
+        }),
     }))
     .filter((group) => group.items.length > 0);
 
@@ -212,17 +298,27 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
               </div>
             )}
             {group.items.map((item) => {
-              const isActive = selectedMenu === item.key;
+              const hasChildren = item.children && item.children.length > 0;
+              const isChildActive = hasChildren && item.children?.some((c) => c.key === selectedMenu);
+              const isActive = hasChildren ? Boolean(isChildActive) : selectedMenu === item.key;
+              const isSubExpanded = !!expandedSubmenus[item.label || String(item.key)];
+
               const buttonElement = (
                 <button
                   type="button"
-                  key={item.key}
-                  data-nav-key={item.key}
+                  key={item.label || item.key}
+                  data-nav-key={hasChildren ? `group:${item.label}` : item.key}
                   disabled={!item.isFunctional}
                   onClick={() => {
                     if (item.isFunctional) {
-                      onSelectMenu(item.key as MainNavKey);
-                      if (isDrawer) onCloseMobile();
+                      if (hasChildren && (!isCollapsed || isDrawer)) {
+                        toggleSubmenu(item.label || String(item.key));
+                      } else if (hasChildren && isCollapsed && !isDrawer) {
+                        onSelectMenu((item.children?.[0]?.key as MainNavKey) || (item.key as MainNavKey));
+                      } else {
+                        onSelectMenu(item.key as MainNavKey);
+                        if (isDrawer) onCloseMobile();
+                      }
                     }
                   }}
                   className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-left relative ${
@@ -239,9 +335,21 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
                   )}
                   {item.icon}
                   {(!isCollapsed || isDrawer) && (
-                    <span className="truncate flex-1">{item.label}</span>
+                    <span className="leading-snug flex-1 min-w-0">{item.label}</span>
                   )}
-                  {(!isCollapsed || isDrawer) && item.badge && (
+                  {(!isCollapsed || isDrawer) && hasChildren && (
+                    <svg
+                      className={`w-4 h-4 shrink-0 text-slate-400 transition-transform duration-150 ${
+                        isSubExpanded ? 'rotate-90 text-white' : ''
+                      }`}
+                      fill="none"
+                      stroke="currentColor"
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                    </svg>
+                  )}
+                  {(!isCollapsed || isDrawer) && item.badge && !hasChildren && (
                     <span className="text-xs px-1.5 py-0.2 rounded-full bg-slate-800 text-slate-300 font-semibold">
                       {item.badge}
                     </span>
@@ -251,9 +359,47 @@ export const AppSidebar: React.FC<AppSidebarProps> = ({
 
               if (isCollapsed && !isDrawer) {
                 return (
-                  <Tooltip key={item.key} content={item.label} position="right">
+                  <Tooltip key={item.label || item.key} content={item.label} position="right">
                     {buttonElement}
                   </Tooltip>
+                );
+              }
+
+              if (hasChildren && isSubExpanded) {
+                return (
+                  <div key={item.label || item.key} className="space-y-1">
+                    {buttonElement}
+                    <div className="ml-4 pl-3 border-l border-slate-800/80 space-y-1">
+                      {item.children?.map((sub) => {
+                        const isSubActive = selectedMenu === sub.key;
+                        return (
+                          <button
+                            type="button"
+                            key={sub.key}
+                            data-nav-key={sub.key}
+                            disabled={!sub.isFunctional}
+                            onClick={() => {
+                              if (sub.isFunctional) {
+                                onSelectMenu(sub.key as MainNavKey);
+                                if (isDrawer) onCloseMobile();
+                              }
+                            }}
+                            className={`w-full flex items-center gap-2.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors duration-150 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed text-left relative ${
+                              isSubActive
+                                ? 'bg-[#1b4332] text-white font-bold shadow-2xs'
+                                : 'text-slate-400 hover:text-white hover:bg-slate-800/60'
+                            }`}
+                          >
+                            {isSubActive && (
+                              <span className="absolute left-0 top-1 bottom-1 w-0.5 bg-[#d4af37] rounded-r" />
+                            )}
+                            {sub.icon}
+                            <span className="leading-snug flex-1 min-w-0">{sub.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               }
 
