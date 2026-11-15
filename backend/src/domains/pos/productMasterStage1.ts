@@ -1666,6 +1666,10 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
         let createdCount = 0;
         let updatedCount = 0;
         let skippedCount = 0;
+        let stockLocationsBoundCount = 0;
+        let stockMovementsCount = 0;
+        const batchTs = Date.now().toString(36).toUpperCase();
+        const createdByUserId = req.user?.id && Number.isInteger(Number(req.user.id)) ? Number(req.user.id) : null;
         const seenCodesInBatch = new Set<string>();
         const seenNamesInBatch = new Set<string>();
         const errors: Array<{ row_index: number; name: string; message: string }> = [];
@@ -1700,15 +1704,37 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
           const canonicalCode = matchedUnit.code;
           const baseUnitLabel = matchedUnit.label_id;
 
+          const rawLocationCodeInput =
+            typeof item.location_code === 'string' && item.location_code.trim() !== ''
+              ? item.location_code.trim()
+              : null;
+
+          let stockQtyVal: number | null = null;
+          if (item.stock_qty !== undefined && item.stock_qty !== null && String(item.stock_qty).trim() !== '') {
+            const sqNum = Number(item.stock_qty);
+            if (Number.isFinite(sqNum) && sqNum >= 0) {
+              stockQtyVal = sqNum;
+            }
+          }
+
+          const rawNotes =
+            typeof item.notes === 'string' && item.notes.trim() !== ''
+              ? item.notes.trim().slice(0, 500)
+              : typeof item.description === 'string' && item.description.trim() !== ''
+                ? item.description.trim().slice(0, 500)
+                : null;
+
           const rawTrackInput = item.track_stock !== undefined ? item.track_stock : item.track_inventory;
           const trackStockVal =
-            typeof rawTrackInput === 'boolean'
-              ? rawTrackInput
-              : typeof rawTrackInput === 'string' && rawTrackInput.trim() !== ''
-                ? !['TIDAK', 'NO', 'FALSE', '0', 'NONAKTIF', 'NON-STOK'].includes(rawTrackInput.trim().toUpperCase())
-                : isFinishedGood && canonicalCode === 'PORSI'
-                  ? false
-                  : true;
+            rawLocationCodeInput !== null || (stockQtyVal !== null && stockQtyVal > 0)
+              ? true
+              : typeof rawTrackInput === 'boolean'
+                ? rawTrackInput
+                : typeof rawTrackInput === 'string' && rawTrackInput.trim() !== ''
+                  ? !['TIDAK', 'NO', 'FALSE', '0', 'NONAKTIF', 'NON-STOK'].includes(rawTrackInput.trim().toUpperCase())
+                  : isFinishedGood && canonicalCode === 'PORSI'
+                    ? false
+                    : true;
 
           const parsedVariants = isFinishedGood ? parseVariantsInput(item.variants) : { ok: true as const, provided: true as const, value: [] as ProductVariantItem[] };
           const variantsVal: ProductVariantItem[] =
@@ -1825,9 +1851,11 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               }
             }
 
+            let targetProductId: number;
             if (existingItem) {
               // Update existing product safely
-              const lockStatus = await checkProductBaseUnitLockStatus(client, propertyId, Number(existingItem.id), {
+              targetProductId = Number(existingItem.id);
+              const lockStatus = await checkProductBaseUnitLockStatus(client, propertyId, targetProductId, {
                 forMutation: false,
               });
               const nextBaseUnit = lockStatus.isLocked ? existingItem.base_unit || baseUnitLabel : baseUnitLabel;
@@ -1850,9 +1878,10 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                         track_inventory = $10,
                         storage_sublocation = COALESCE($11, storage_sublocation),
                         variants = $12::jsonb,
-                        average_cost = CASE WHEN $13::numeric IS NOT NULL AND COALESCE(average_cost, 0) = 0 THEN $13::numeric ELSE average_cost END,
-                        last_cost = COALESCE($13::numeric, last_cost)
-                  WHERE id = $14 AND property_id = $15`,
+                        average_cost = CASE WHEN $13::numeric IS NOT NULL AND $13::numeric > 0 AND COALESCE(average_cost, 0) = 0 THEN $13::numeric ELSE average_cost END,
+                        last_cost = CASE WHEN $13::numeric IS NOT NULL AND $13::numeric > 0 THEN $13::numeric ELSE last_cost END,
+                        description = COALESCE($14, description)
+                  WHERE id = $15 AND property_id = $16`,
                 [
                   rawName,
                   categoryId,
@@ -1867,32 +1896,34 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                   rawSublocation,
                   JSON.stringify(variantsVal),
                   costPriceVal,
-                  existingItem.id,
+                  rawNotes,
+                  targetProductId,
                   propertyId,
                 ]
               );
               if (rawSublocation) {
                 await client.query(
                   `UPDATE stock_balances SET storage_sublocation = $1 WHERE property_id = $2 AND product_id = $3`,
-                  [rawSublocation, propertyId, existingItem.id]
+                  [rawSublocation, propertyId, targetProductId]
                 );
               }
               updatedCount++;
             } else {
               const generatedCode =
                 rawCode || `PRD-${Date.now().toString().slice(-4)}-${idx + 1}`;
-              await client.query(
+              const insertItemRes = await client.query(
                 `INSERT INTO pos_menu_items (
                    property_id, category_id, item_code, barcode, name,
                    price, is_active, is_sellable_pos, product_type, product_kind,
                    base_unit, canonical_base_unit_code, track_stock, track_inventory,
-                   storage_sublocation, variants, average_cost, last_cost
+                   storage_sublocation, variants, average_cost, last_cost, description
                  ) VALUES (
                    $1, $2, $3, $4, $5,
                    $6, TRUE, $7, $8, 'STANDARD',
                    $9, $10, $11, $11,
-                   $12, $13::jsonb, COALESCE($14::numeric, 0), COALESCE($14::numeric, 0)
-                 )`,
+                   $12, $13::jsonb, COALESCE($14::numeric, 0), COALESCE($14::numeric, 0), $15
+                 )
+                 RETURNING id`,
                 [
                   propertyId,
                   categoryId,
@@ -1908,10 +1939,210 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                   rawSublocation,
                   JSON.stringify(variantsVal),
                   costPriceVal,
+                  rawNotes,
                 ]
               );
+              targetProductId = Number(insertItemRes.rows[0].id);
               createdCount++;
             }
+
+            // 4. Bind to Stock Location(s) & Record Opening Balance / Stock Addition if location_code or stock_qty provided
+            const resolvedLocationIds: number[] = [];
+            if (rawLocationCodeInput) {
+              const tokens = rawLocationCodeInput
+                .split(/[,;/]+/)
+                .map((t: string) => t.trim())
+                .filter(Boolean);
+
+              for (const token of tokens) {
+                const locSearchRes = await client.query(
+                  `SELECT id, is_active
+                     FROM stock_locations
+                    WHERE property_id = $1
+                      AND (UPPER(BTRIM(code)) = UPPER($2) OR LOWER(BTRIM(name)) = LOWER($2))
+                    LIMIT 1`,
+                  [propertyId, token]
+                );
+                if ((locSearchRes.rowCount ?? 0) > 0) {
+                  const foundLoc = locSearchRes.rows[0];
+                  if (!foundLoc.is_active) {
+                    await client.query(`UPDATE stock_locations SET is_active = TRUE WHERE id = $1 AND property_id = $2`, [
+                      foundLoc.id,
+                      propertyId,
+                    ]);
+                  }
+                  resolvedLocationIds.push(Number(foundLoc.id));
+                } else {
+                  const cleanCode = token
+                    .toUpperCase()
+                    .replace(/[^A-Z0-9_-]/g, '')
+                    .slice(0, 35);
+                  if (cleanCode.length >= 2) {
+                    const baseDefaultName =
+                      cleanCode === 'RCP'
+                        ? 'Receptionis'
+                        : cleanCode === 'KCH'
+                          ? 'Housekeeping / Kitchen'
+                          : cleanCode === 'GDG'
+                            ? 'Gudang Utama'
+                            : token.slice(0, 90);
+                    const nameCollisionRes = await client.query(
+                      `SELECT id, is_active
+                         FROM stock_locations
+                        WHERE property_id = $1
+                          AND LOWER(BTRIM(name)) = LOWER(BTRIM($2))
+                        LIMIT 1`,
+                      [propertyId, baseDefaultName]
+                    );
+                    if ((nameCollisionRes.rowCount ?? 0) > 0) {
+                      const existingByName = nameCollisionRes.rows[0];
+                      if (!existingByName.is_active) {
+                        await client.query(`UPDATE stock_locations SET is_active = TRUE WHERE id = $1 AND property_id = $2`, [
+                          existingByName.id,
+                          propertyId,
+                        ]);
+                      }
+                      resolvedLocationIds.push(Number(existingByName.id));
+                    } else {
+                      const defaultLocType =
+                        cleanCode === 'RCP'
+                          ? 'POS_OUTLET'
+                          : cleanCode === 'KCH'
+                            ? 'HK_PANTRY'
+                            : productTypeVal === 'OPERATIONAL_ITEM'
+                              ? 'HK_PANTRY'
+                              : productTypeVal === 'FINISHED_GOOD'
+                                ? 'POS_OUTLET'
+                                : 'WAREHOUSE';
+                      const newLocRes = await client.query(
+                        `INSERT INTO stock_locations (property_id, code, name, location_type, is_active)
+                         VALUES ($1, $2, $3, $4, TRUE)
+                         RETURNING id`,
+                        [propertyId, cleanCode, baseDefaultName, defaultLocType]
+                      );
+                      if ((newLocRes.rowCount ?? 0) > 0) {
+                        resolvedLocationIds.push(Number(newLocRes.rows[0].id));
+                      }
+                    }
+                  }
+                }
+              }
+            } else if (stockQtyVal !== null && stockQtyVal > 0) {
+              const fallbackLocRes = await client.query(
+                `SELECT id FROM stock_locations WHERE property_id = $1 AND is_active = TRUE ORDER BY id ASC LIMIT 1`,
+                [propertyId]
+              );
+              if ((fallbackLocRes.rowCount ?? 0) > 0) {
+                resolvedLocationIds.push(Number(fallbackLocRes.rows[0].id));
+              }
+            }
+
+            const uniqueLocIds = Array.from(new Set(resolvedLocationIds));
+            for (const locId of uniqueLocIds) {
+              const qtyDeltaNum = stockQtyVal !== null && stockQtyVal > 0 ? stockQtyVal : 0;
+              const qtyDeltaFormatted = qtyDeltaNum.toFixed(3);
+              const unitCostFormatted =
+                costPriceVal !== null && costPriceVal >= 0 ? costPriceVal.toFixed(2) : null;
+
+              if (qtyDeltaNum > 0) {
+                // Compute Moving Average Cost before adding new stock
+                if (costPriceVal !== null && costPriceVal > 0) {
+                  const prevStockRes = await client.query(
+                    `SELECT COALESCE((SELECT SUM(quantity) FROM stock_balances WHERE property_id = $1 AND product_id = $2), 0) AS prev_qty,
+                            COALESCE(average_cost, 0) AS prev_avg
+                       FROM pos_menu_items
+                      WHERE id = $2 AND property_id = $1`,
+                    [propertyId, targetProductId]
+                  );
+                  const prevQty = parseFloat(prevStockRes.rows[0]?.prev_qty || '0') || 0;
+                  const prevAvg = parseFloat(prevStockRes.rows[0]?.prev_avg || '0') || 0;
+                  const nextAvg =
+                    prevQty > 0 && prevAvg > 0
+                      ? (prevQty * prevAvg + qtyDeltaNum * costPriceVal) / (prevQty + qtyDeltaNum)
+                      : costPriceVal;
+                  await client.query(
+                    `UPDATE pos_menu_items
+                        SET average_cost = $1,
+                            last_cost = $2
+                      WHERE id = $3 AND property_id = $4`,
+                    [nextAvg.toFixed(2), costPriceVal.toFixed(2), targetProductId, propertyId]
+                  );
+                }
+
+                // Check whether an OPENING_BALANCE already exists for (property_id, product_id, location_id)
+                const priorObRes = await client.query(
+                  `SELECT so.id
+                     FROM stock_operations so
+                     JOIN stock_movements sm ON sm.operation_id = so.id
+                    WHERE so.property_id = $1
+                      AND so.operation_type = 'OPENING_BALANCE'
+                      AND sm.product_id = $2
+                      AND sm.location_id = $3
+                    LIMIT 1`,
+                  [propertyId, targetProductId, locId]
+                );
+                const hasPriorOb = (priorObRes.rowCount ?? 0) > 0;
+                const opType = hasPriorOb ? 'STOCK_ADJUSTMENT' : 'OPENING_BALANCE';
+                const opKey = `IMP-${hasPriorOb ? 'ADJ' : 'OB'}-P${propertyId}-I${targetProductId}-L${locId}-${batchTs}-${idx}`;
+                const opNotes =
+                  rawNotes ||
+                  (hasPriorOb
+                    ? 'Penambahan stok otomatis dari Import Excel'
+                    : 'Saldo awal persediaan dari Import Excel');
+                const opMeta = hasPriorOb
+                  ? JSON.stringify({ reason_code: 'CORRECTION', source: 'EXCEL_IMPORT' })
+                  : JSON.stringify({ source: 'EXCEL_IMPORT' });
+                const fp = crypto
+                  .createHash('sha256')
+                  .update(`${propertyId}:${opType}:${targetProductId}:${locId}:${qtyDeltaFormatted}:${opKey}`)
+                  .digest('hex');
+
+                const opInsRes = await client.query(
+                  `INSERT INTO stock_operations (
+                     property_id, operation_type, operation_key, payload_fingerprint, notes, metadata, created_by, created_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, NOW())
+                   RETURNING id`,
+                  [propertyId, opType, opKey, fp, opNotes, opMeta, createdByUserId]
+                );
+                const opId = opInsRes.rows[0].id;
+
+                await client.query(
+                  `INSERT INTO stock_movements (
+                     operation_id, property_id, product_id, location_id,
+                     quantity_delta, base_unit_code, unit_cost, created_at
+                   ) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+                  [opId, propertyId, targetProductId, locId, qtyDeltaFormatted, canonicalCode, unitCostFormatted]
+                );
+
+                await client.query(
+                  `INSERT INTO stock_balances (
+                     property_id, product_id, location_id, quantity, storage_sublocation, updated_at
+                   ) VALUES ($1, $2, $3, $4, $5, NOW())
+                   ON CONFLICT (property_id, product_id, location_id)
+                   DO UPDATE SET
+                     quantity = stock_balances.quantity + EXCLUDED.quantity,
+                     storage_sublocation = COALESCE(EXCLUDED.storage_sublocation, stock_balances.storage_sublocation),
+                     updated_at = NOW()`,
+                  [propertyId, targetProductId, locId, qtyDeltaFormatted, rawSublocation]
+                );
+                stockMovementsCount++;
+                stockLocationsBoundCount++;
+              } else {
+                // stock_qty is 0 or empty, but location_code was specified -> ensure row exists in stock_balances for Stok & Mutasi
+                await client.query(
+                  `INSERT INTO stock_balances (
+                     property_id, product_id, location_id, quantity, storage_sublocation, updated_at
+                   ) VALUES ($1, $2, $3, 0.000, $4, NOW())
+                   ON CONFLICT (property_id, product_id, location_id)
+                   DO UPDATE SET
+                     storage_sublocation = COALESCE(EXCLUDED.storage_sublocation, stock_balances.storage_sublocation),
+                     updated_at = NOW()`,
+                  [propertyId, targetProductId, locId, rawSublocation]
+                );
+                stockLocationsBoundCount++;
+              }
+            }
+
             await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
           } catch (rowErr: any) {
             await client.query(`ROLLBACK TO SAVEPOINT sp_import_${idx}`);
@@ -1931,6 +2162,8 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             created_count: createdCount,
             updated_count: updatedCount,
             skipped_count: skippedCount,
+            stock_locations_bound_count: stockLocationsBoundCount,
+            stock_movements_count: stockMovementsCount,
             failed_count: errors.length,
             errors,
           },

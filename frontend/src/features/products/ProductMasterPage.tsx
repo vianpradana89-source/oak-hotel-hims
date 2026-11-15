@@ -2091,6 +2091,9 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setExcelImportMode('UPSERT');
     setExcelImportFileName('');
     setShowExcelImportModal(true);
+    if (propertyId) {
+      void loadStockLocationsAndCandidates(propertyId);
+    }
   };
 
   const excelImportPreviewAnalysis = useMemo(() => {
@@ -2189,11 +2192,14 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
             product_type: r.product_type,
             category_name: r.category_name || null,
             base_unit: r.base_unit || 'PCS',
+            location_code: r.location_code || null,
             storage_sublocation: r.storage_sublocation || null,
+            stock_qty: r.stock_qty,
             cost_price: r.cost_price,
             price: r.price,
             is_sellable_pos: r.is_sellable_pos,
             track_stock: r.track_stock,
+            notes: r.notes || null,
             variants: r.variants,
           })),
         }),
@@ -2206,12 +2212,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const created = Number(data.created_count || 0);
       const updated = Number(data.updated_count || 0);
       const skipped = Number(data.skipped_count || 0);
+      const stockLocationsBound = Number(data.stock_locations_bound_count || 0);
+      const stockMovements = Number(data.stock_movements_count || 0);
       const failed = Number(data.failed_count || 0);
       setShowExcelImportModal(false);
       setExcelImportRows([]);
       setExcelImportFileName('');
       setSuccessMsg(
         `Import Excel selesai: ${created} produk baru ditambahkan, ${updated} produk diperbarui${
+          stockLocationsBound > 0 ? `, ${stockLocationsBound} produk masuk ke lokasi Stok & Mutasi` : ''
+        }${stockMovements > 0 ? ` (${stockMovements} mutasi stok dicatat)` : ''}${
           skipped > 0 ? `, ${skipped} baris dilewati` : ''
         }${failed > 0 ? ` (${failed} gagal)` : ''}.`
       );
@@ -5579,7 +5589,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       </span>
                     )}
                   </div>
-                  <div className="max-h-48 overflow-y-auto bg-white rounded-xl border border-amber-200">
+                  <div className="max-h-52 overflow-x-auto overflow-y-auto bg-white rounded-xl border border-amber-200">
                     <table className="w-full text-left text-[11px]">
                       <thead className="bg-amber-50 text-amber-950 font-bold border-b border-amber-200 sticky top-0">
                         <tr>
@@ -5589,10 +5599,14 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                           <th className="py-1.5 px-2.5">Jenis</th>
                           <th className="py-1.5 px-2.5">Kategori</th>
                           <th className="py-1.5 px-2.5">Satuan</th>
+                          <th className="py-1.5 px-2.5">Lokasi Stok</th>
                           <th className="py-1.5 px-2.5">Penyimpanan</th>
+                          <th className="py-1.5 px-2.5 text-right">Stok Masuk</th>
+                          <th className="py-1.5 px-2.5 text-right">Harga Pokok</th>
+                          <th className="py-1.5 px-2.5 text-right">Harga Jual</th>
                           <th className="py-1.5 px-2.5 text-center">POS</th>
                           <th className="py-1.5 px-2.5 text-center">Lacak Inv.</th>
-                          <th className="py-1.5 px-2.5 text-right">Harga</th>
+                          <th className="py-1.5 px-2.5">Catatan</th>
                           <th className="py-1.5 px-2.5">Varian</th>
                         </tr>
                       </thead>
@@ -5603,6 +5617,13 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             rowStatus === 'SKIP_EXISTING' ||
                             rowStatus === 'SKIP_MISSING' ||
                             rowStatus === 'DUPLICATE_IN_FILE';
+                          const matchedLoc = r.location_code
+                            ? stockLocations.find(
+                                (sl) =>
+                                  sl.code.trim().toUpperCase() === r.location_code.trim().toUpperCase() ||
+                                  sl.name.trim().toLowerCase() === r.location_code.trim().toLowerCase()
+                              )
+                            : undefined;
                           return (
                             <tr key={i} className={isSkipped ? 'bg-gray-50/80 opacity-65' : ''}>
                               <td className="py-1.5 px-2.5 whitespace-nowrap">
@@ -5637,7 +5658,29 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                               <td className="py-1.5 px-2.5">{formatProductTypeLabel(r.product_type)}</td>
                               <td className="py-1.5 px-2.5">{r.category_name || '—'}</td>
                               <td className="py-1.5 px-2.5 font-mono">{r.base_unit}</td>
+                              <td className="py-1.5 px-2.5 whitespace-nowrap">
+                                {r.location_code ? (
+                                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-900 border border-indigo-200 font-mono font-bold text-[10px]">
+                                    {matchedLoc ? `${matchedLoc.code} (${matchedLoc.name})` : r.location_code}
+                                  </span>
+                                ) : (
+                                  '—'
+                                )}
+                              </td>
                               <td className="py-1.5 px-2.5">{r.storage_sublocation || '—'}</td>
+                              <td className="py-1.5 px-2.5 text-right font-mono font-bold text-teal-800 whitespace-nowrap">
+                                {r.stock_qty !== null && r.stock_qty !== undefined
+                                  ? r.stock_qty > 0
+                                    ? `+${r.stock_qty} ${r.base_unit}`
+                                    : `0 ${r.base_unit}`
+                                  : '—'}
+                              </td>
+                              <td className="py-1.5 px-2.5 text-right font-mono text-gray-700 whitespace-nowrap">
+                                {r.cost_price > 0 ? formatIDR(r.cost_price) : '—'}
+                              </td>
+                              <td className="py-1.5 px-2.5 text-right font-mono whitespace-nowrap">
+                                {r.price != null ? formatIDR(r.price) : '—'}
+                              </td>
                               <td className="py-1.5 px-2.5 text-center whitespace-nowrap">
                                 <label className="inline-flex items-center gap-1 cursor-pointer">
                                   <input
@@ -5686,8 +5729,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                                   </span>
                                 </label>
                               </td>
-                              <td className="py-1.5 px-2.5 text-right font-mono">
-                                {r.price != null ? formatIDR(r.price) : '—'}
+                              <td className="py-1.5 px-2.5 text-gray-600 max-w-[160px] truncate" title={r.notes || ''}>
+                                {r.notes || '—'}
                               </td>
                               <td className="py-1.5 px-2.5">
                                 {r.variants.length > 0
@@ -5716,6 +5759,25 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     </div>
                   </div>
                 </div>
+
+                {stockLocations.filter((l) => l.is_active).length > 0 && (
+                  <div className="p-2.5 rounded-xl bg-indigo-50/70 border border-indigo-200 text-[11px] text-indigo-950">
+                    <div className="font-bold mb-1">Daftar Kode Lokasi Stok Properti Aktif (untuk kolom Kode Lokasi Stok):</div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {stockLocations
+                        .filter((l) => l.is_active)
+                        .map((loc) => (
+                          <span
+                            key={loc.id}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-white border border-indigo-200 font-mono text-[10px]"
+                          >
+                            <strong className="text-indigo-800">{loc.code}</strong>
+                            <span className="text-gray-600">({loc.name})</span>
+                          </span>
+                        ))}
+                    </div>
+                  </div>
+                )}
 
                 <div className="space-y-2 text-xs text-gray-600 pt-1">
                   <div>
@@ -5755,16 +5817,28 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     Unit dasar: PCS, PORSI, CUP, BOTOL, GRAM, KG, ML, LITER, SET, dll (default: PCS)
                   </div>
                   <div>
-                    <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
-                      Tempat Penyimpanan
+                    <span className="inline-block px-2 py-0.5 rounded bg-indigo-100 text-indigo-900 font-mono font-bold text-[11px] mr-1.5">
+                      Kode Lokasi Stok
                     </span>
-                    Sub-lokasi di dalam gudang/outlet (contoh: Showcase, Chiller, Freezer, Rak Linen)
+                    Kode lokasi properti di menu <strong>Stok &amp; Mutasi</strong> (contoh: <strong>RCP</strong> untuk Receptionis, <strong>KCH</strong> untuk Housekeeping/Kitchen). Saat di-import, produk otomatis masuk ke lokasi tersebut di Stok &amp; Mutasi
                   </div>
                   <div>
                     <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
+                      Tempat Penyimpanan
+                    </span>
+                    Sub-lokasi di dalam gudang/outlet (contoh: Box Rokok, Showcase, Chiller, Freezer, Rak Linen)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-teal-100 text-teal-900 font-mono font-bold text-[11px] mr-1.5">
+                      Stok
+                    </span>
+                    Jumlah stok (angka) yang otomatis masuk/bertambah ke lokasi stok di halaman <strong>Stok &amp; Mutasi</strong> saat di-import
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-amber-100 text-amber-900 font-mono font-bold text-[11px] mr-1.5">
                       Harga Pokok
                     </span>
-                    HPP / harga modal per satuan dasar (angka)
+                    HPP / harga modal per satuan dasar (otomatis masuk ke <strong>Saldo Awal Persediaan</strong> &amp; perhitungan <strong>HPP Rata-rata / Moving Average</strong>)
                   </div>
                   <div>
                     <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
@@ -5783,6 +5857,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       Lacak Inventory
                     </span>
                     Isi <strong>YA</strong> atau <strong>TIDAK</strong> untuk otomatis mencentang <strong>Lacak Stok &amp; GRN</strong> (default: YA untuk semua barang fisik &amp; bahan baku; TIDAK hanya jika diisi TIDAK atau satuan PORSI racikan)
+                  </div>
+                  <div>
+                    <span className="inline-block px-2 py-0.5 rounded bg-purple-100 text-purple-900 font-mono font-bold text-[11px] mr-1.5">
+                      Catatan
+                    </span>
+                    Keterangan mutasi stok yang otomatis tercatat pada <strong>Riwayat Mutasi</strong> di halaman Stok &amp; Mutasi
                   </div>
                   <div>
                     <span className="inline-block px-2 py-0.5 rounded bg-slate-200/80 text-slate-800 font-mono font-bold text-[11px] mr-1.5">
