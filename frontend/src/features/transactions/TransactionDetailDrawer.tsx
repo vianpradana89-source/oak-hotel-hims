@@ -23,6 +23,7 @@ import {
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 
 function TransactionAttachmentPreview({
   transactionId,
@@ -419,7 +420,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
             <div>
               <div className="flex items-center gap-2">
                 <h3 className="text-base font-bold text-slate-900">
-                  {tx ? tx.transaction_no : 'Detail Transaksi'}
+                  {tx ? (isPosTx ? (formatPosOrderDisplayRef(tx.source_id) || tx.transaction_no) : tx.transaction_no) : 'Detail Transaksi'}
                 </h3>
                 {tx && (
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${
@@ -791,9 +792,12 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                 {tx.supplier_phone && (
                   <div className="text-slate-500">Telepon: {tx.supplier_phone}</div>
                 )}
-                {tx.source_reference && (
+                {(tx.source_reference || (isPosTx && tx.source_id)) && (
                   <div className="text-slate-600">
-                    Referensi / Faktur: <span className="font-mono font-bold">{tx.source_reference}</span>
+                    {isPosTx ? 'Nomor Order POS:' : 'Referensi / Faktur:'}{' '}
+                    <span className="font-mono font-bold">
+                      {isPosTx ? (formatPosOrderDisplayRef(tx.source_id) || tx.source_reference) : tx.source_reference}
+                    </span>
                   </div>
                 )}
                 {/* PURCHASE-2C3: Supplier Bank Information */}
@@ -995,6 +999,55 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                             </td>
                           </tr>
                         ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {isPosTx && Array.isArray(tx.pos_order_items) && tx.pos_order_items.length > 0 && (
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider">
+                      Informasi Pembelian Produk POS ({tx.pos_order_items.length})
+                    </span>
+                  </div>
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-bold uppercase text-[10px]">
+                        <tr>
+                          <th className="py-2.5 px-3">Kode</th>
+                          <th className="py-2.5 px-3">Nama Produk / Menu</th>
+                          <th className="py-2.5 px-2 text-center">Qty</th>
+                          <th className="py-2.5 px-2 text-right">Harga Satuan</th>
+                          <th className="py-2.5 px-2 text-right">Diskon</th>
+                          <th className="py-2.5 px-3 text-right">Subtotal</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100 font-medium">
+                        {tx.pos_order_items.map((pi) => {
+                          const qty = Number(pi.quantity || 0);
+                          const unitPrice = Number(pi.unit_price || 0);
+                          const disc = Number(pi.discount_amount || 0);
+                          const lineTotal = Math.max(0, qty * unitPrice - disc);
+                          return (
+                            <tr key={pi.id} className="hover:bg-slate-50/60">
+                              <td className="py-2 px-3 font-mono text-slate-500">{pi.item_code || '-'}</td>
+                              <td className="py-2 px-3 font-semibold text-slate-800">
+                                <div>{pi.item_name}</div>
+                                {pi.notes && <div className="text-[10px] font-normal text-slate-400">Catatan: {pi.notes}</div>}
+                              </td>
+                              <td className="py-2 px-2 text-center font-mono font-bold">{qty}</td>
+                              <td className="py-2 px-2 text-right font-mono">{formatIdr(unitPrice)}</td>
+                              <td className="py-2 px-2 text-right font-mono text-rose-600">
+                                {disc > 0 ? formatIdr(disc) : '-'}
+                              </td>
+                              <td className="py-2 px-3 text-right font-mono font-bold text-slate-900">
+                                {formatIdr(lineTotal)}
+                              </td>
+                            </tr>
+                          );
+                        })}
                       </tbody>
                     </table>
                   </div>

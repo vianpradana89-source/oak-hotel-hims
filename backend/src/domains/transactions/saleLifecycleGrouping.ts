@@ -305,8 +305,8 @@ export function presentedTimeKey(value: unknown): string {
 }
 
 export function comparePresentedListRows(a: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }, b: { transaction_date?: unknown; transaction_time?: unknown; id?: unknown }): number {
-  const dateA = String((a as any).effective_period_date || a.transaction_date).slice(0, 10);
-  const dateB = String((b as any).effective_period_date || b.transaction_date).slice(0, 10);
+  const dateA = hotelDateOf((a as any).effective_period_date || a.transaction_date);
+  const dateB = hotelDateOf((b as any).effective_period_date || b.transaction_date);
   const dateCmp = dateB.localeCompare(dateA);
   if (dateCmp !== 0) return dateCmp;
   const timeCmp = presentedTimeKey(b.transaction_time).localeCompare(presentedTimeKey(a.transaction_time));

@@ -4417,7 +4417,8 @@ function buildHapusConditionsAndValues(
       t.notes ILIKE $${idx} OR
       b.bid ILIKE $${idx} OR
       r.booking_number ILIKE $${idx} OR
-      r.guest_name ILIKE $${idx}
+      r.guest_name ILIKE $${idx} OR
+      ('POS-' || LPAD(COALESCE(t.source_id, ''), 6, '0')) ILIKE $${idx}
     )`);
     values.push(searchTerm);
     idx++;
@@ -4535,7 +4536,8 @@ export async function getTransactions(
       t.notes ILIKE $${valIdx} OR
       b.bid ILIKE $${valIdx} OR
       r.booking_number ILIKE $${valIdx} OR
-      r.guest_name ILIKE $${valIdx}
+      r.guest_name ILIKE $${valIdx} OR
+      ('POS-' || LPAD(COALESCE(t.source_id, ''), 6, '0')) ILIKE $${valIdx}
     )`);
     baseValues.push(searchTerm);
     valIdx++;
@@ -4573,6 +4575,8 @@ export async function getTransactions(
             ota.name AS ota_source_name,
             po_ref.po_number AS po_number,
             po_ref.status AS po_status,
+            pos_ord.pos_table_number AS pos_table_number,
+            pos_ord.pos_order_items AS pos_order_items,
             COALESCE(pmt.total_paid, 0) AS paid_amount,
             GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
      FROM transactions t
@@ -4584,6 +4588,35 @@ export async function getTransactions(
     LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = t.property_id
     LEFT JOIN room_types rt_current ON rt_current.id = rm.room_type_id AND rt_current.property_id = t.property_id
     LEFT JOIN room_types rt_booked ON rt_booked.id = r.booked_room_type_id_snapshot AND rt_booked.property_id = t.property_id
+    LEFT JOIN LATERAL (
+      SELECT
+        po.table_number AS pos_table_number,
+        COALESCE(
+          (
+            SELECT JSON_AGG(
+              JSON_BUILD_OBJECT(
+                'id', poi.id,
+                'menu_item_id', poi.menu_item_id,
+                'item_name', COALESCE(NULLIF(BTRIM(poi.item_name_snapshot), ''), pmi.name, 'Item POS'),
+                'item_code', COALESCE(NULLIF(BTRIM(poi.item_code_snapshot), ''), pmi.item_code, ''),
+                'quantity', poi.quantity,
+                'unit_price', poi.unit_price,
+                'discount_amount', COALESCE(poi.discount_amount, 0),
+                'notes', poi.notes
+              ) ORDER BY poi.id ASC
+            )
+            FROM pos_order_items poi
+            LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id AND pmi.property_id = t.property_id
+            WHERE poi.order_id = po.id
+          ),
+          '[]'::json
+        ) AS pos_order_items
+      FROM pos_orders po
+      WHERE UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS')
+        AND po.property_id = t.property_id
+        AND po.id::text = t.source_id
+      LIMIT 1
+    ) pos_ord ON TRUE
     LEFT JOIN LATERAL (
       SELECT CASE
         WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS') THEN
@@ -5324,7 +5357,27 @@ export async function getTransactionById(
 
     let pmtRes: any;
     let posSettlements: any[] = [];
+    let posOrderItems: any[] = [];
     if (isPosSource) {
+      if (tx.source_id && /^\d+$/.test(String(tx.source_id).trim())) {
+        const poiRes = await pool.query(
+          `SELECT poi.id,
+                  poi.menu_item_id,
+                  COALESCE(NULLIF(BTRIM(poi.item_name_snapshot), ''), pmi.name, 'Item POS') AS item_name,
+                  COALESCE(NULLIF(BTRIM(poi.item_code_snapshot), ''), pmi.item_code, '') AS item_code,
+                  poi.quantity,
+                  poi.unit_price,
+                  COALESCE(poi.discount_amount, 0) AS discount_amount,
+                  poi.notes
+           FROM pos_order_items poi
+           JOIN pos_orders po ON po.id = poi.order_id
+           LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id AND pmi.property_id = $1
+           WHERE po.property_id = $1 AND po.id = $2
+           ORDER BY poi.id ASC`,
+          [propertyId, Number(String(tx.source_id).trim())]
+        );
+        posOrderItems = poiRes.rows;
+      }
       // ── POS: settlement + legacy payment yang langsung menunjuk SALE ──
       // pos_settlements: pembayaran POS yang tercatat di tabel terpisah.
       const psRes = await pool.query(
@@ -5511,6 +5564,7 @@ export async function getTransactionById(
     // POS settlements as a separate field — frontend can display them
     // distinctly from legacy payment_transactions.
     pos_settlements: posSettlements,
+    pos_order_items: posOrderItems,
     audit_logs: auditRes.rows,
     // UI-3: Canonical hotel collectible balance fields (top-level for frontend convenience)
     // For POS_ORDER/POS: canonicalHotelCollectible is NOT populated —

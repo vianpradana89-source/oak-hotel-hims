@@ -194,6 +194,17 @@ export interface TransactionRecord {
   po_number?: string | null;
   po_number_snapshot?: string | null;
   po_status?: string | null;
+  pos_table_number?: string | null;
+  pos_order_items?: Array<{
+    id: number;
+    menu_item_id?: number | null;
+    item_name: string;
+    item_code?: string | null;
+    quantity: number;
+    unit_price: number;
+    discount_amount?: number;
+    notes?: string | null;
+  }>;
   is_legacy_without_po?: boolean;
   has_po_variance?: boolean;
   po_variance_summary?: any | null;

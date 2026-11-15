@@ -408,7 +408,7 @@ export async function queryPresentedPage(
              OR l.notes ILIKE $${searchIdx}
              OR b.bid ILIKE $${searchIdx}
              OR r.booking_number ILIKE $${searchIdx}
-             OR r.guest_name ILIKE $${searchIdx})
+             OR r.guest_name ILIKE $${searchIdx} OR ('POS-' || LPAD(COALESCE(l.source_id, ''), 6, '0')) ILIKE $${searchIdx})
     ),
 
     -- =========================================================

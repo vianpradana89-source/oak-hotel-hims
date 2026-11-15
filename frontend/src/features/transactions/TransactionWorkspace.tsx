@@ -44,6 +44,7 @@ import { ProcurementPoSection } from './ProcurementPoSection';
 import { useAuth } from '../auth/AuthContext';
 import { getPosAccess } from '../pos/posPermissions';
 import POSOrderPanel from '../pos/POSOrderPanel';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 
 interface TransactionWorkspaceProps {
   propertyId: number;
@@ -242,6 +243,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [bookingDetailOpen, setBookingDetailOpen] = useState<boolean>(false);
   const [selectedBookingIdForDetail, setSelectedBookingIdForDetail] = useState<number | string | null>(null);
   const [expandedBids, setExpandedBids] = useState<Record<string, boolean>>({});
+  const [expandedPosTxIds, setExpandedPosTxIds] = useState<Record<string, boolean>>({});
 
   // PURCHASE-2B: expandable operational detail row
   const [expandedPurchaseIds, setExpandedPurchaseIds] = useState<Set<number | string>>(new Set());
@@ -408,6 +410,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   useEffect(() => {
     setExpandedBids({});
+    setExpandedPosTxIds({});
     setExpandedPurchaseIds(new Set());
     setPurchaseDetailCache(new Map());
     setPurchaseLoadingIds(new Set());
@@ -535,6 +538,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setActiveTab(tab);
     setShowVendorSupplierMaster(false);
     setCategoryCode('');
+    setDepartmentCode('');
     setReceivingFilter('');
     setVerificationFilter('');
     if (!['PURCHASE', 'EXPENSE'].includes(tab) && operationalStatus === 'HAPUS') {
@@ -1039,17 +1043,33 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     return (isNeg ? '- Rp ' : 'Rp ') + Math.abs(num).toLocaleString('id-ID');
   };
 
-  const penjualanItems = useMemo(
-    () => (activeTab === 'SALE' && operationalStatus !== 'HAPUS' ? groupPenjualanSaleRows(transactions) : []),
-    [activeTab, operationalStatus, transactions]
-  );
+  const compareTxNewestFirst = useCallback((txA: TransactionRecord, txB: TransactionRecord): number => {
+    const dateA = toTransactionBusinessDateYmd(txA.transaction_date);
+    const dateB = toTransactionBusinessDateYmd(txB.transaction_date);
+    if (dateA !== dateB) return dateB.localeCompare(dateA);
+    const timeA = txA.transaction_time ? new Date(txA.transaction_time).getTime() : 0;
+    const timeB = txB.transaction_time ? new Date(txB.transaction_time).getTime() : 0;
+    if (Number.isFinite(timeA) && Number.isFinite(timeB) && timeA !== timeB) return timeB - timeA;
+    return Number(txB.id || 0) - Number(txA.id || 0);
+  }, []);
+
+  const penjualanItems = useMemo(() => {
+    if (activeTab !== 'SALE' || operationalStatus === 'HAPUS') return [];
+    const grouped = groupPenjualanSaleRows(transactions);
+    return [...grouped].sort((a, b) => {
+      const txA = a.kind === 'standalone' ? a.tx : a.group.primary;
+      const txB = b.kind === 'standalone' ? b.tx : b.group.primary;
+      return compareTxNewestFirst(txA, txB);
+    });
+  }, [activeTab, operationalStatus, transactions, compareTxNewestFirst]);
 
   const workspaceRows = useMemo(() => {
-    if (activeTab === 'ALL' && operationalStatus !== 'HAPUS') {
-      return flattenAllTabRows(groupAllTabRows(transactions));
-    }
-    return transactions;
-  }, [activeTab, operationalStatus, transactions]);
+    const base =
+      activeTab === 'ALL' && operationalStatus !== 'HAPUS'
+        ? flattenAllTabRows(groupAllTabRows(transactions))
+        : transactions;
+    return [...base].sort(compareTxNewestFirst);
+  }, [activeTab, operationalStatus, transactions, compareTxNewestFirst]);
 
   const periodListHint = 'Nilai pada daftar mengikuti periode yang dipilih. Detail menampilkan seluruh booking.';
   const settlementListHint = 'Pelunasan booking ditampilkan di Detail, bukan sebagai sisa periode.';
@@ -1067,6 +1087,25 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   const toggleBidExpand = (bid: string) => {
     setExpandedBids((prev) => ({ ...prev, [bid]: !prev[bid] }));
+  };
+
+  const togglePosTxExpand = (txId: number | string) => {
+    const key = String(txId);
+    setExpandedPosTxIds((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
+  const getPosTransactionDisplayNo = (t: TransactionRecord): string => {
+    const isPos = String(t.source_type || '').toUpperCase() === 'POS_ORDER' || String(t.source_type || '').toUpperCase() === 'POS';
+    if (!isPos) return t.transaction_no;
+    return formatPosOrderDisplayRef(t.source_id) || formatPosOrderDisplayRef(t.source_reference) || t.transaction_no;
+  };
+
+  const formatPosTransactionDescription = (t: TransactionRecord): string => {
+    const isPos = String(t.source_type || '').toUpperCase() === 'POS_ORDER' || String(t.source_type || '').toUpperCase() === 'POS';
+    if (!isPos) return t.description || '';
+    const displayNo = getPosTransactionDisplayNo(t);
+    const raw = String(t.description || '');
+    return raw.replace(/#POS-[0-9A-Za-z-]+/i, `#${displayNo}`);
   };
 
   // PURCHASE-2B: toggle purchase row expansion with lazy load
@@ -1289,6 +1328,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       const t = item.tx;
       const party = t.party_name || t.guest_name_snapshot || t.supplier_name || '-';
       const isPosSource = String(t.source_type || '').toUpperCase() === 'POS_ORDER' || String(t.source_type || '').toUpperCase() === 'POS';
+      const posDisplayNo = getPosTransactionDisplayNo(t);
+      const posItems = Array.isArray(t.pos_order_items) ? t.pos_order_items : [];
+      const posExpanded = Boolean(expandedPosTxIds[String(t.id)]);
       const paid = isPosSource
         ? Number(t.paid_amount || 0)
         : (t.reservation_amount_paid != null ? Number(t.reservation_amount_paid) : Number(t.paid_amount || 0));
@@ -1298,56 +1340,167 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           ? Number(t.reservation_remaining_balance)
           : Number(t.outstanding_amount || 0));
       return (
-        <tr
-          key={t.id}
-          onClick={() => openPenjualanItemDetail(item)}
-          className="hover:bg-slate-50/80 transition-colors cursor-pointer"
-        >
-          <td className="py-2.5 px-3 whitespace-nowrap">
-            <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
-            <div className="text-[10px] text-slate-400">
-              {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
-            </div>
-          </td>
-          <td className="py-2.5 px-3 whitespace-nowrap">
-            <span className="font-mono font-semibold text-slate-800">{t.transaction_no}</span>
-            {t.source_reference && (
-              <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
-            )}
-            <div className="mt-0.5">{getSourceBadge(t.source_type)}</div>
-          </td>
-          <td className="py-2.5 px-3 max-w-[180px]">
-            {t.verification_status === 'REJECTED' ? (
-              <div>
-                <div className="font-semibold text-rose-700 truncate">{party}</div>
-                <div className="text-[10px] text-rose-600 font-medium">Perlu koreksi</div>
+        <React.Fragment key={t.id}>
+          <tr
+            onClick={() => openPenjualanItemDetail(item)}
+            className="hover:bg-slate-50/80 transition-colors cursor-pointer"
+          >
+            <td className="py-2.5 px-3 whitespace-nowrap">
+              <div className="flex items-start gap-1.5">
+                {isPosSource ? (
+                  <button
+                    type="button"
+                    aria-label={posExpanded ? 'Tutup rincian produk POS' : 'Lihat rincian produk POS'}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      togglePosTxExpand(t.id);
+                    }}
+                    className="mt-0.5 w-5 h-5 inline-flex items-center justify-center rounded text-slate-500 hover:bg-slate-100 cursor-pointer"
+                  >
+                    <svg className={`w-3.5 h-3.5 transition-transform ${posExpanded ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5l7 7-7 7" />
+                    </svg>
+                  </button>
+                ) : (
+                  <span className="w-5 inline-block" />
+                )}
+                <div>
+                  <div className="font-semibold text-slate-800">{formatTransactionBusinessDate(t.transaction_date)}</div>
+                  <div className="text-[10px] text-slate-400">
+                    {new Date(t.transaction_time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })}
+                  </div>
+                </div>
               </div>
-            ) : (
-              <div className="font-semibold text-slate-800 truncate">{party}</div>
-            )}
-            <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
-          </td>
-          <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
-          <td className="py-2.5 px-3 whitespace-nowrap">
-            <TransactionSourceBadge channel={t.booking_channel} otaSourceName={t.ota_source_name} />
-          </td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(t.amount)}</td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(t.discount_amount)}</td>
-          <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(displayTransactionNet(t))}</td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(paid)}</td>
-          <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(remaining)}</td>
-          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(t.payment_status)}</td>
-          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(t.payment_responsibility)}</td>
-          <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
-          <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-            <button
-              onClick={() => openPenjualanItemDetail(item)}
-              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-            >
-              Detail
-            </button>
-          </td>
-        </tr>
+            </td>
+            <td className="py-2.5 px-3 whitespace-nowrap">
+              {isPosSource ? (
+                <>
+                  <span
+                    className="font-mono font-semibold text-purple-900 bg-purple-50 px-2 py-0.5 rounded border border-purple-200 inline-block"
+                    title={posDisplayNo}
+                  >
+                    {posDisplayNo}
+                  </span>
+                  <div className="mt-0.5">{getSourceBadge(t.source_type)}</div>
+                </>
+              ) : (
+                <>
+                  <span className="font-mono font-semibold text-slate-800">{t.transaction_no}</span>
+                  {t.source_reference && (
+                    <div className="text-[10px] font-mono text-slate-400">Ref: {t.source_reference}</div>
+                  )}
+                  <div className="mt-0.5">{getSourceBadge(t.source_type)}</div>
+                </>
+              )}
+            </td>
+            <td className="py-2.5 px-3 max-w-[180px]">
+              {t.verification_status === 'REJECTED' ? (
+                <div>
+                  <div className="font-semibold text-rose-700 truncate">{party}</div>
+                  <div className="text-[10px] text-rose-600 font-medium">Perlu koreksi</div>
+                </div>
+              ) : (
+                <div className="font-semibold text-slate-800 truncate">{party}</div>
+              )}
+              {isPosSource ? (
+                <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                  <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-800">
+                    {posItems.length} item produk
+                  </span>
+                </div>
+              ) : (
+                <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
+              )}
+            </td>
+            <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
+            <td className="py-2.5 px-3 whitespace-nowrap">
+              <TransactionSourceBadge channel={t.booking_channel} otaSourceName={t.ota_source_name} />
+            </td>
+            <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(t.amount)}</td>
+            <td className="py-2.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(t.discount_amount)}</td>
+            <td className="py-2.5 px-3 text-right font-mono font-bold text-emerald-800 whitespace-nowrap">{formatIdr(displayTransactionNet(t))}</td>
+            <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(paid)}</td>
+            <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(remaining)}</td>
+            <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(t.payment_status)}</td>
+            <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(t.payment_responsibility)}</td>
+            <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
+            <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+              <button
+                onClick={() => openPenjualanItemDetail(item)}
+                className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
+              >
+                Detail
+              </button>
+            </td>
+          </tr>
+          {isPosSource && posExpanded && (
+            <tr className="bg-slate-50/70">
+              <td colSpan={14} className="px-4 py-2.5">
+                <div className="rounded-lg border border-slate-200 bg-white/80 overflow-hidden">
+                  <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 flex items-center justify-between">
+                    <span>
+                      Informasi Pembelian Produk POS — {posDisplayNo}
+                      {t.pos_table_number ? ` · Meja: ${t.pos_table_number}` : ''}
+                    </span>
+                    <span className="text-slate-400 font-mono">{posItems.length} item</span>
+                  </div>
+                  {posItems.length === 0 ? (
+                    <div className="px-3 py-3 text-[11px] text-slate-400 italic">
+                      Tidak ada rincian produk pada order POS ini.
+                    </div>
+                  ) : (
+                    <table className="w-full text-[11px]">
+                      <thead className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        <tr>
+                          <th className="py-1.5 px-3 text-left">Kode</th>
+                          <th className="py-1.5 px-3 text-left">Nama Produk / Menu</th>
+                          <th className="py-1.5 px-3 text-center">Qty</th>
+                          <th className="py-1.5 px-3 text-right">Harga Satuan</th>
+                          <th className="py-1.5 px-3 text-right">Diskon</th>
+                          <th className="py-1.5 px-3 text-right">Subtotal</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {posItems.map((pi) => {
+                          const qty = Number(pi.quantity || 0);
+                          const unitPrice = Number(pi.unit_price || 0);
+                          const disc = Number(pi.discount_amount || 0);
+                          const lineTotal = Math.max(0, qty * unitPrice - disc);
+                          return (
+                            <tr key={pi.id} className="border-t border-slate-100">
+                              <td className="py-1.5 px-3 font-mono text-slate-500 whitespace-nowrap">{pi.item_code || '-'}</td>
+                              <td className="py-1.5 px-3 font-semibold text-slate-800">
+                                <div>{pi.item_name}</div>
+                                {pi.notes && <div className="text-[10px] font-normal text-slate-400">Catatan: {pi.notes}</div>}
+                              </td>
+                              <td className="py-1.5 px-3 text-center font-mono font-semibold text-slate-700 whitespace-nowrap">{qty}</td>
+                              <td className="py-1.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(unitPrice)}</td>
+                              <td className="py-1.5 px-3 text-right font-mono text-slate-500 whitespace-nowrap">{formatIdr(disc)}</td>
+                              <td className="py-1.5 px-3 text-right font-mono font-semibold text-emerald-800 whitespace-nowrap">{formatIdr(lineTotal)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                      {(Number(t.service_amount || 0) > 0 || Number(t.tax_amount || 0) > 0 || Number(t.discount_amount || 0) > 0) && (
+                        <tfoot className="bg-slate-50/60 border-t border-slate-100 text-[10px]">
+                          <tr>
+                            <td colSpan={6} className="py-1.5 px-3 text-right space-x-3 text-slate-600 font-mono">
+                              <span>Gross: <strong>{formatIdr(t.amount)}</strong></span>
+                              {Number(t.discount_amount || 0) > 0 && <span>Diskon: <strong>-{formatIdr(t.discount_amount)}</strong></span>}
+                              {Number(t.service_amount || 0) > 0 && <span>Service: <strong>+{formatIdr(t.service_amount)}</strong></span>}
+                              {Number(t.tax_amount || 0) > 0 && <span>PBJT: <strong>+{formatIdr(t.tax_amount)}</strong></span>}
+                              <span className="text-emerald-800 font-bold">Total Net: {formatIdr(displayTransactionNet(t))}</span>
+                            </td>
+                          </tr>
+                        </tfoot>
+                      )}
+                    </table>
+                  )}
+                </div>
+              </td>
+            </tr>
+          )}
+        </React.Fragment>
       );
     }
 
@@ -2241,7 +2394,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
           {/* Advanced Filters Drawer */}
           {showAdvancedFilters && (
-            <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5 pt-2 border-t border-slate-200/80">
+            <div className={`grid grid-cols-1 ${activeTab === 'SALE' ? 'sm:grid-cols-2' : 'sm:grid-cols-4'} gap-2.5 pt-2 border-t border-slate-200/80`}>
               {/* Category */}
               <select
                 value={categoryCode}
@@ -2261,22 +2414,24 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   ))}
               </select>
 
-              {/* Department */}
-              <select
-                value={departmentCode}
-                onChange={(e) => {
-                  setDepartmentCode(e.target.value);
-                  setPage(1);
-                }}
-                className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700 focus:outline-hidden"
-              >
-                <option value="">Semua Departemen</option>
-                {departments.map((d) => (
-                  <option key={d.code} value={d.code}>
-                    {d.name}
-                  </option>
-                ))}
-              </select>
+              {/* Department (hidden on SALE tab) */}
+              {activeTab !== 'SALE' && (
+                <select
+                  value={departmentCode}
+                  onChange={(e) => {
+                    setDepartmentCode(e.target.value);
+                    setPage(1);
+                  }}
+                  className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700 focus:outline-hidden"
+                >
+                  <option value="">Semua Departemen</option>
+                  {departments.map((d) => (
+                    <option key={d.code} value={d.code}>
+                      {d.name}
+                    </option>
+                  ))}
+                </select>
+              )}
 
               {/* Verification Filter */}
               <select
@@ -2293,20 +2448,22 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 <option value="REJECTED">Perlu Koreksi</option>
               </select>
 
-              {/* Receiving Filter (for Purchase) */}
-              <select
-                value={receivingFilter}
-                onChange={(e) => {
-                  setReceivingFilter(e.target.value);
-                  setPage(1);
-                }}
-                className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700 focus:outline-hidden"
-              >
-                <option value="">Semua Status Penerimaan</option>
-                <option value="BELUM_DITERIMA">Belum Diterima</option>
-                <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
-                <option value="DITERIMA">Diterima Lengkap</option>
-              </select>
+              {/* Receiving Filter (hidden on SALE tab) */}
+              {activeTab !== 'SALE' && (
+                <select
+                  value={receivingFilter}
+                  onChange={(e) => {
+                    setReceivingFilter(e.target.value);
+                    setPage(1);
+                  }}
+                  className="text-xs bg-white border border-slate-200 rounded-xl px-3 py-2 text-slate-700 focus:outline-hidden"
+                >
+                  <option value="">Semua Status Penerimaan</option>
+                  <option value="BELUM_DITERIMA">Belum Diterima</option>
+                  <option value="DITERIMA_SEBAGIAN">Diterima Sebagian</option>
+                  <option value="DITERIMA">Diterima Lengkap</option>
+                </select>
+              )}
             </div>
           )}
         </div>
@@ -3350,7 +3507,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         </div>
                       </td>
                       <td className="py-3 px-3 font-mono font-semibold text-slate-800 whitespace-nowrap">
-                        {t.transaction_no}
+                        {getPosTransactionDisplayNo(t)}
                       </td>
                       <td className="py-3 px-3 whitespace-nowrap">
                         <span
@@ -3380,7 +3537,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <span className="text-[11px] font-medium text-slate-700">{t.category_name}</span>
                       </td>
                       <td className="py-3 px-4 max-w-xs truncate text-slate-800">
-                        <div>{t.description}</div>
+                        <div>{formatPosTransactionDescription(t)}</div>
                         {t.room_number_snapshot && (
                           <span className="text-[10px] text-slate-400">Kmr {t.room_number_snapshot}</span>
                         )}
