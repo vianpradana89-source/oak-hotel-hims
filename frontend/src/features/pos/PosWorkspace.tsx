@@ -428,7 +428,7 @@ export default function PosWorkspace({
 
   // ── Stock locations (GET /api/pos/stock-locations) ─────────────────────────
   // Dropdown "Gudang Stok" untuk memilih lokasi mana yang dipotong saat POS sale.
-  const [stockLocations, setStockLocations] = useState<Array<{ id: number; name: string; code: string; location_type: string }>>([]);
+  const [stockLocations, setStockLocations] = useState<Array<{ id: number; name: string; code: string; location_type: string; is_active: boolean }>>([]);
   const [stockLocationId, setStockLocationId] = useState<string>('');
   const stockLocFetchEpochRef = useRef(0);
 
@@ -2295,6 +2295,7 @@ export default function PosWorkspace({
           name: l.name || '',
           code: l.code || '',
           location_type: l.location_type || '',
+          is_active: Boolean(l.is_active),
         })));
       })
       .catch(() => { /* silent — non-critical, dropdown hanya tampil kosong */ });
@@ -3916,6 +3917,25 @@ export default function PosWorkspace({
 
                 {/* Area isi tengah Slip Pesanan CREATE yang dapat digulir */}
                 <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 my-2">
+                {/* ── Pilih Gudang Stok (opsional — default: lokasi aktif pertama) ── */}
+                {stockLocations.length > 0 && (
+                  <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3">
+                    <label className="text-[10px] uppercase font-bold text-amber-700">Gudang Stok (pemotongan stok POS)</label>
+                    <select
+                      value={stockLocationId}
+                      disabled={draftLocked}
+                      onChange={e => {if (canMutateDraft()) setStockLocationId(e.target.value);}}
+                      className="block mt-1 w-full text-xs border border-amber-200 rounded-lg p-2 bg-white text-gray-700 disabled:opacity-60"
+                    >
+                      {stockLocations.map(loc => (
+                        <option key={loc.id} value={loc.id}>
+                          {loc.code || loc.id} — {loc.name}{loc.is_active ? '' : ' (nonaktif)'}
+                        </option>
+                      ))}
+                    </select>
+                    <p className="mt-1 text-[10px] text-amber-600/80">Bahan baku resep selalu dipotong dari KITCHEN; produk jadi TIDAK ber-resep dipotong dari gudang ini.</p>
+                  </div>
+                )}
                 {/* Table & Guest Form — terkunci saat pending/ambigu agar
                      payload replay tetap identik dengan snapshot */}
                 <div className={`space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
@@ -4054,35 +4074,6 @@ export default function PosWorkspace({
                       onChange={e => {if (canMutateDraft()) setOrderNotes(e.target.value);}}
                       className="block mt-1 w-full text-xs border border-gray-200 rounded-lg p-2" />
                   </label>
-                  {/* ── Pilih Gudang Stok (opsional — default: lokasi aktif pertama) ── */}
-                  {stockLocations.length > 0 && (
-                    <div>
-                      <label className="text-[10px] uppercase font-bold text-gray-500">Gudang Stok (pemotongan stok POS)</label>
-                      <select
-                        value={stockLocationId}
-                        disabled={draftLocked}
-                        onChange={e => {if (canMutateDraft()) setStockLocationId(e.target.value);}}
-                        className="block mt-0.5 w-full text-xs border border-gray-200 rounded-lg p-2 bg-white"
-                      >
-                        <option value="">— Default (otomatis) —</option>
-                        {stockLocations.map(loc => (
-                          <option key={loc.id} value={String(loc.id)}>
-                            {loc.name}{loc.code ? ` (${loc.code})` : ''}{loc.location_type ? ` · ${loc.location_type}` : ''}
-                          </option>
-                        ))}
-                      </select>
-                      <p className="text-[10px] text-gray-400 mt-0.5 leading-relaxed">
-                        <span className="block">
-                          {stockLocationId
-                            ? 'Berlaku untuk produk jadi tanpa resep.'
-                            : 'Kosong = otomatis (POS_OUTLET → KITCHEN → BAR → WAREHOUSE).'}
-                        </span>
-                        <span className="block">
-                          Bahan baku produk ber-resep selalu dipotong dari KITCHEN (otomatis, tidak terpengaruh pilihan ini).
-                        </span>
-                      </p>
-                    </div>
-                  )}
                 </div>
 
                 {/* Cart Items */}
