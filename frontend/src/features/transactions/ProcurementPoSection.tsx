@@ -142,6 +142,16 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   const [formError, setFormError] = useState<string | null>(null);
   const [isSubmittingForm, setIsSubmittingForm] = useState<boolean>(false);
 
+  // Searchable Product Combobox State per PO Form Row
+  const [openSearchRowIdx, setOpenSearchRowIdx] = useState<number | null>(null);
+  const [rowSearchQueryByIdx, setRowSearchQueryByIdx] = useState<Record<number, string>>({});
+  const [highlightedOptionIdx, setHighlightedOptionIdx] = useState<number>(0);
+
+  // Filter hanya produk yang sudah di-checklist Lacak Inventory (track_stock & track_inventory)
+  const trackedInventoryProducts = useMemo(() => {
+    return rawMaterials.filter((m) => m.track_stock !== false && m.track_inventory !== false);
+  }, [rawMaterials]);
+
   const loadOrders = useCallback(async () => {
     setLoading(true);
     setErrorMsg(null);
@@ -212,6 +222,9 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   const openCreatePoModal = useCallback(async () => {
     setEditingPo(null);
     setFormError(null);
+    setOpenSearchRowIdx(null);
+    setRowSearchQueryByIdx({});
+    setHighlightedOptionIdx(0);
     setFormOrderDate(getJakartaDateToday());
     setFormExpectedDate('');
     setFormNotes('');
@@ -250,9 +263,12 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
 
   const openEditPoModal = async (poSummary: PosPurchaseOrder) => {
     setFormError(null);
+    setOpenSearchRowIdx(null);
+    setRowSearchQueryByIdx({});
+    setHighlightedOptionIdx(0);
     setDetailLoading(true);
     try {
-      const [detail] = await Promise.all([
+      const [detail, refData] = await Promise.all([
         fetchPurchaseOrderById(propertyId, poSummary.id),
         preloadFormReferenceData(),
       ]);
@@ -270,6 +286,12 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
         }
       }
       if (items.length > 0) {
+        const initQueries: Record<number, string> = {};
+        items.forEach((it, idx) => {
+          const foundRm = refData.rawRes.find((m) => Number(m.id) === Number(it.product_id));
+          initQueries[idx] = foundRm?.name || it.product_name || '';
+        });
+        setRowSearchQueryByIdx(initQueries);
         setFormItems(
           items.map((it) => ({
             id: it.id ? Number(it.id) : null,
@@ -328,6 +350,16 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       alert('Baris PO yang sudah memiliki penerimaan barang (GRN Posted) tidak dapat dihapus.');
       return;
     }
+    setOpenSearchRowIdx(null);
+    setRowSearchQueryByIdx((prev) => {
+      const next: Record<number, string> = {};
+      Object.keys(prev).forEach((k) => {
+        const numK = Number(k);
+        if (numK < index) next[numK] = prev[numK];
+        else if (numK > index) next[numK - 1] = prev[numK];
+      });
+      return next;
+    });
     setFormItems((prev) => prev.filter((_, idx) => idx !== index));
   };
 
@@ -341,6 +373,12 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
         : rm?.average_cost && Number(rm.average_cost) > 0
         ? Number(rm.average_cost)
         : 0;
+
+    setRowSearchQueryByIdx((prev) => ({
+      ...prev,
+      [index]: rm ? rm.name : '',
+    }));
+    setOpenSearchRowIdx(null);
 
     const pkgList = prodId > 0 ? await ensurePackagingsLoaded(prodId) : [];
     const defaultPkg = pkgList.find((p) => p.is_default_purchase && p.is_active !== false);
@@ -1423,7 +1461,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       {/* Create / Edit PO Modal */}
       {showFormModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-4xl max-h-[92vh] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
@@ -1531,9 +1569,14 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
               {/* Line Items */}
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <label className="font-bold text-slate-800">
-                    Daftar Barang / Bahan Baku yang Dipesan
-                  </label>
+                  <div>
+                    <label className="font-bold text-slate-800">
+                      Daftar Barang / Bahan Baku yang Dipesan
+                    </label>
+                    <p className="text-[10px] text-slate-500">
+                      Hanya menampilkan produk yang sudah diaktifkan <strong>Lacak Inventory</strong> ({trackedInventoryProducts.length} produk tersedia). Ketik nama atau SKU untuk mencari.
+                    </p>
+                  </div>
                   <button
                     type="button"
                     onClick={handleAddFormLine}
@@ -1543,51 +1586,197 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                   </button>
                 </div>
 
-                <div className="border border-slate-200 rounded-xl overflow-x-auto">
+                <div className="border border-slate-200 rounded-xl overflow-visible">
                   <table className="w-full text-left text-[11px]">
                     <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[10px]">
                       <tr>
-                        <th className="py-2 px-3">Produk Stok</th>
-                        <th className="py-2 px-3">Kemasan / Satuan Beli</th>
+                        <th className="py-2 px-3 min-w-[230px]">Produk Stok (Cari Nama / SKU)</th>
+                        <th className="py-2 px-3 w-36">SKU</th>
+                        <th className="py-2 px-3 min-w-[165px]">Kemasan / Satuan Beli</th>
                         <th className="py-2 px-3 text-right w-24">Qty Pesan</th>
                         <th className="py-2 px-3 text-right w-36">Harga / Satuan Beli</th>
                         <th className="py-2 px-3 text-right w-32">Subtotal</th>
-                        <th className="py-2 px-2 text-center w-12"></th>
+                        <th className="py-2 px-2 text-center w-10"></th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-100">
                       {formItems.map((it, idx) => {
                         const prodId = Number(it.product_id);
                         const rm = rawMaterials.find((m) => Number(m.id) === prodId);
+                        const skuCode = rm?.item_code || '';
                         const baseUnit = rm?.canonical_base_unit_code || rm?.base_unit || 'PCS';
                         const pkgOptions = prodId > 0 ? packagingsByProduct[prodId] || [] : [];
                         const subtotal = (parseFloat(it.ordered_qty) || 0) * (parseFloat(it.unit_cost) || 0);
                         const isLockedByReceipt = it.received_qty > 0;
 
+                        const isSearchOpen = openSearchRowIdx === idx && !isLockedByReceipt;
+                        const inputDisplayValue =
+                          rowSearchQueryByIdx[idx] !== undefined
+                            ? rowSearchQueryByIdx[idx]
+                            : rm
+                            ? rm.name
+                            : '';
+                        const qTrim = inputDisplayValue.trim().toLowerCase();
+                        const filteredCandidates = trackedInventoryProducts
+                          .filter((m) => {
+                            if (!qTrim) return true;
+                            const nameMatch = (m.name || '').toLowerCase().includes(qTrim);
+                            const skuMatch = (m.item_code || '').toLowerCase().includes(qTrim);
+                            const catMatch = (m.category_name || '').toLowerCase().includes(qTrim);
+                            return nameMatch || skuMatch || catMatch;
+                          })
+                          .slice(0, 60);
+
                         return (
-                          <tr key={it.id || `new-${idx}`}>
-                            <td className="py-2 px-3">
-                              <select
-                                value={it.product_id}
-                                disabled={isLockedByReceipt}
-                                onChange={(e) => void handleFormProductChange(idx, e.target.value)}
-                                className="w-full border border-slate-300 rounded-lg px-2 py-1.5 bg-white text-slate-800 disabled:bg-slate-100"
-                              >
-                                <option value="">-- Pilih Produk Stok --</option>
-                                {rawMaterials.map((m) => {
-                                  const isTracked = m.track_stock !== false && m.track_inventory !== false;
-                                  return (
-                                    <option
-                                      key={m.id}
-                                      value={m.id}
-                                      disabled={!isTracked && Number(m.id) !== prodId}
-                                    >
-                                      {m.name} ({m.canonical_base_unit_code || m.base_unit || 'PCS'})
-                                      {!isTracked ? ' — [Non-Stok: Aktifkan Lacak Stok di Master Barang & Produk]' : ''}
-                                    </option>
-                                  );
-                                })}
-                              </select>
+                          <tr key={it.id || `new-${idx}`} className="align-top">
+                            <td className="py-2 px-3 relative">
+                              <div className="relative">
+                                <input
+                                  type="text"
+                                  disabled={isLockedByReceipt}
+                                  value={inputDisplayValue}
+                                  placeholder="Ketik nama barang / SKU (cth: beras)..."
+                                  onFocus={() => {
+                                    setOpenSearchRowIdx(idx);
+                                    setHighlightedOptionIdx(0);
+                                  }}
+                                  onChange={(e) => {
+                                    const val = e.target.value;
+                                    setRowSearchQueryByIdx((prev) => ({ ...prev, [idx]: val }));
+                                    setOpenSearchRowIdx(idx);
+                                    setHighlightedOptionIdx(0);
+                                    if (!val.trim() && it.product_id) {
+                                      handleFormLineFieldChange(idx, 'product_id', '');
+                                    }
+                                  }}
+                                  onKeyDown={(e) => {
+                                    if (!isSearchOpen) {
+                                      if (e.key === 'ArrowDown') {
+                                        setOpenSearchRowIdx(idx);
+                                        setHighlightedOptionIdx(0);
+                                      }
+                                      return;
+                                    }
+                                    if (e.key === 'ArrowDown') {
+                                      e.preventDefault();
+                                      setHighlightedOptionIdx((prev) =>
+                                        filteredCandidates.length > 0
+                                          ? Math.min(prev + 1, filteredCandidates.length - 1)
+                                          : 0
+                                      );
+                                    } else if (e.key === 'ArrowUp') {
+                                      e.preventDefault();
+                                      setHighlightedOptionIdx((prev) => Math.max(prev - 1, 0));
+                                    } else if (e.key === 'Enter') {
+                                      e.preventDefault();
+                                      const picked = filteredCandidates[highlightedOptionIdx];
+                                      if (picked) {
+                                        void handleFormProductChange(idx, String(picked.id));
+                                      }
+                                    } else if (e.key === 'Escape') {
+                                      setOpenSearchRowIdx(null);
+                                    }
+                                  }}
+                                  onBlur={() => {
+                                    setTimeout(() => {
+                                      setOpenSearchRowIdx((curr) => (curr === idx ? null : curr));
+                                      // Kembalikan teks nama produk jika sudah ada product_id terpilih
+                                      if (rm) {
+                                        setRowSearchQueryByIdx((prev) => ({
+                                          ...prev,
+                                          [idx]: rm.name,
+                                        }));
+                                      }
+                                    }, 180);
+                                  }}
+                                  className={`w-full border rounded-lg pl-2.5 pr-7 py-1.5 bg-white text-slate-800 disabled:bg-slate-100 focus:outline-none focus:ring-2 focus:ring-emerald-600/30 ${
+                                    rm
+                                      ? 'border-emerald-400 font-semibold text-slate-900'
+                                      : 'border-slate-300'
+                                  }`}
+                                />
+                                {inputDisplayValue && !isLockedByReceipt ? (
+                                  <button
+                                    type="button"
+                                    tabIndex={-1}
+                                    onMouseDown={(e) => {
+                                      e.preventDefault();
+                                      setRowSearchQueryByIdx((prev) => ({ ...prev, [idx]: '' }));
+                                      handleFormLineFieldChange(idx, 'product_id', '');
+                                      setOpenSearchRowIdx(idx);
+                                      setHighlightedOptionIdx(0);
+                                    }}
+                                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-rose-600 font-bold text-xs cursor-pointer"
+                                    title="Hapus pilihan / ketik ulang"
+                                  >
+                                    ✕
+                                  </button>
+                                ) : (
+                                  <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 text-[10px]">
+                                    🔍
+                                  </span>
+                                )}
+
+                                {isSearchOpen && (
+                                  <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+                                    {filteredCandidates.length > 0 ? (
+                                      filteredCandidates.map((cand, cIdx) => {
+                                        const candUnit = cand.canonical_base_unit_code || cand.base_unit || 'PCS';
+                                        const isSelected = Number(cand.id) === prodId;
+                                        const isHighlighted = cIdx === highlightedOptionIdx;
+                                        return (
+                                          <button
+                                            key={cand.id}
+                                            type="button"
+                                            onMouseDown={(e) => {
+                                              e.preventDefault();
+                                              void handleFormProductChange(idx, String(cand.id));
+                                            }}
+                                            onMouseEnter={() => setHighlightedOptionIdx(cIdx)}
+                                            className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                                              isHighlighted
+                                                ? 'bg-emerald-50 text-emerald-950'
+                                                : isSelected
+                                                ? 'bg-slate-50 font-semibold'
+                                                : 'hover:bg-slate-50'
+                                            }`}
+                                          >
+                                            <div className="min-w-0 flex-1">
+                                              <div className="font-semibold text-slate-800 truncate">
+                                                {cand.name}
+                                              </div>
+                                              <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5">
+                                                <span className="font-mono font-bold text-emerald-800 bg-emerald-100/70 px-1.5 py-0.2 rounded">
+                                                  {cand.item_code || `ID-${cand.id}`}
+                                                </span>
+                                                <span>•</span>
+                                                <span>Satuan: {candUnit}</span>
+                                                {cand.category_name && (
+                                                  <>
+                                                    <span>•</span>
+                                                    <span className="truncate">{cand.category_name}</span>
+                                                  </>
+                                                )}
+                                              </div>
+                                            </div>
+                                            {isSelected && (
+                                              <span className="text-emerald-700 font-bold text-xs shrink-0">
+                                                ✓
+                                              </span>
+                                            )}
+                                          </button>
+                                        );
+                                      })
+                                    ) : (
+                                      <div className="px-3 py-3 text-center text-slate-500 text-[11px]">
+                                        Tidak ada produk <strong>Lacak Inventory</strong> yang cocok dengan pencarian{' '}
+                                        <span className="font-mono font-semibold">"{inputDisplayValue}"</span>.
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+
                               {rm && (rm.track_stock === false || rm.track_inventory === false) && (
                                 <div className="text-[10px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded px-2 py-1 mt-1">
                                   ⚠ Produk ini belum diaktifkan untuk Lacak Stok &amp; GRN. Aktifkan di Master Barang &amp; Produk → Edit.
@@ -1599,6 +1788,17 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                   {it.received_qty > 0 ? ` • Sudah diterima: ${formatQty(it.received_qty)} ${it.ordered_unit}` : ''}
                                 </div>
                               )}
+                            </td>
+
+                            <td className="py-2 px-3">
+                              <input
+                                type="text"
+                                readOnly
+                                value={skuCode}
+                                placeholder="Otomatis..."
+                                title={skuCode ? `SKU: ${skuCode}` : 'SKU otomatis muncul saat produk dipilih'}
+                                className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 bg-slate-50 font-mono text-[11px] font-bold text-emerald-900 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                              />
                             </td>
 
                             <td className="py-2 px-3">
