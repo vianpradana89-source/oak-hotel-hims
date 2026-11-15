@@ -199,7 +199,7 @@ export async function queryPresentedPage(
         t.transaction_status,
         t.receiving_status,
         t.purchase_workflow_status,
-        t.source_type,
+        t.source_type, t.source_id,
         t.category_code,
         t.department_code,
         t.payment_status,
