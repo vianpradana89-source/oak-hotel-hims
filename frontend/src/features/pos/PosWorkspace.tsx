@@ -2285,8 +2285,12 @@ export default function PosWorkspace({
       .then(res => res.ok ? res.json() : null)
       .then(json => {
         if (epoch !== stockLocFetchEpochRef.current) return;
-        const locs = Array.isArray(json?.data) ? json.data : (Array.isArray(json) ? json : []);
-        setStockLocations(locs.filter((l: any) => l.is_active).map((l: any) => ({
+        // Backend returns { data: { property_id, locations: [...] } } or { data: [...] }
+        const raw = Array.isArray(json?.data?.locations) ? json.data.locations
+          : Array.isArray(json?.data) ? json.data
+          : Array.isArray(json) ? json
+          : [];
+        setStockLocations(raw.filter((l: any) => l.is_active).map((l: any) => ({
           id: Number(l.id),
           name: l.name || '',
           code: l.code || '',
