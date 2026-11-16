@@ -209,6 +209,8 @@ interface Props {
   /** ID order yang langsung dibuka dalam mode edit saat PosWorkspace tampil */
   initialEditOrderId?: number | null;
   onConsumedInitialEditOrderId?: () => void;
+  /** Buka modal cetak struk thermal 80mm untuk order tertentu */
+  onPrintReceipt?: (orderId: number) => void;
 }
 
 /**
@@ -404,6 +406,7 @@ export default function PosWorkspace({
   paidOrderId,
   initialEditOrderId = null,
   onConsumedInitialEditOrderId,
+  onPrintReceipt,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
@@ -2712,8 +2715,8 @@ export default function PosWorkspace({
   const canMutateDraft = () => !draftLocked && !submittingRef.current && !idempotencySnapshotRef.current?.unresolved;
 
   const totalOrdersAmount = useMemo(() => {
-    return visiblePosOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
-  }, [visiblePosOrders]);
+    return filteredPosOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+  }, [filteredPosOrders]);
 
   // ── Simpan Pesanan (real API) ──────────────────────────────────────────────
   // Strategi:
@@ -3415,6 +3418,31 @@ export default function PosWorkspace({
     }
   }, [canEditPos, propertyId, deletingOrderId, saving, editSaving, authFetch, onRefresh]);
 
+  const activeOrderFilterSummary = useMemo(() => {
+    const dateLabel =
+      orderDatePreset === 'TODAY'
+        ? 'Hari Ini'
+        : orderDatePreset === 'YESTERDAY'
+          ? 'Kemarin'
+          : orderDatePreset === 'LAST_7_DAYS'
+            ? '7 Hari Terakhir'
+            : orderDatePreset === 'THIS_MONTH'
+              ? 'Bulan Ini'
+              : orderDatePreset === 'LAST_MONTH'
+                ? 'Bulan Lalu'
+                : orderDatePreset === 'CUSTOM'
+                  ? 'Sesuaikan'
+                  : '';
+    const statusLabel =
+      orderStatusTab === 'PROSES'
+        ? 'Proses'
+        : orderStatusTab === 'SELESAI'
+          ? 'Selesai'
+          : '';
+    const parts = [dateLabel, statusLabel].filter(Boolean);
+    return parts.join(' · ');
+  }, [orderDatePreset, orderStatusTab]);
+
   const kpiCardsSection = (
     <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
@@ -3424,13 +3452,17 @@ export default function PosWorkspace({
       </div>
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
         <div className="text-xs text-gray-500 font-medium">Total Pesanan</div>
-        <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{visiblePosOrders.length}</div>
-        <div className="text-[11px] text-gray-400 mt-0.5">Order tercatat</div>
+        <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{filteredPosOrders.length}</div>
+        <div className="text-[11px] text-gray-400 mt-0.5">
+          {activeOrderFilterSummary ? `Order tercatat (${activeOrderFilterSummary})` : 'Order tercatat'}
+        </div>
       </div>
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
         <div className="text-xs text-gray-500 font-medium">Total Transaksi POS</div>
         <div className="text-xl sm:text-2xl font-black text-emerald-700 mt-0.5">{formatIDR(totalOrdersAmount)}</div>
-        <div className="text-[11px] text-gray-400 mt-0.5">Akumulasi penjualan</div>
+        <div className="text-[11px] text-gray-400 mt-0.5">
+          {activeOrderFilterSummary ? `Akumulasi penjualan (${activeOrderFilterSummary})` : 'Akumulasi penjualan'}
+        </div>
       </div>
     </div>
   );
@@ -5085,6 +5117,18 @@ export default function PosWorkspace({
                           </td>
                           <td className="py-3 px-4 text-center">
                             <div className="inline-flex items-center justify-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => onPrintReceipt?.(Number(order.id))}
+                                disabled={isDeletingThis}
+                                aria-label={`Print struk thermal ${displayRef}`}
+                                title="Print Struk Thermal (80mm)"
+                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-purple-700 hover:text-purple-900 hover:bg-purple-50 border border-transparent hover:border-purple-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M6 9V2h12v7M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2M6 14h12v8H6v-8z" />
+                                </svg>
+                              </button>
                               <button
                                 type="button"
                                 onClick={() => void openEditOrderInRegister(order.id)}

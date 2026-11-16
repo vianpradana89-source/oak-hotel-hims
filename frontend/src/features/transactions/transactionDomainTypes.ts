@@ -412,6 +412,8 @@ export interface TransactionQueryResult {
   summary: TransactionSummary;
   /** Global period summary — independent of activeTab/operational_sheet. For dashboard cards. */
   global_summary: TransactionSummary;
+  /** Active period summary — excludes BATAL and HAPUS rows. Used by daily summary cards. */
+  active_summary?: TransactionSummary;
   sheet_counts: TransactionSheetCounts;
   limit: number;
   offset: number;

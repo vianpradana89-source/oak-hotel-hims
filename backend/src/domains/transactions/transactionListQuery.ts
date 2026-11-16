@@ -25,6 +25,8 @@ export interface PresentedPagePlan {
   sheet_counts: TransactionSheetCounts;
   /** Global period summary — independent of activeTab/operational_sheet (SCOPE A). */
   global_summary: TransactionSummary;
+  /** Active period summary — excludes BATAL rows (for daily cards). */
+  active_summary: TransactionSummary;
   effective_date_map: Record<string, string>;
 }
 
@@ -327,6 +329,7 @@ export async function queryPresentedPage(
         BOOL_OR(UPPER(d.transaction_type) = 'EXPENSE') AS has_expense,
         BOOL_OR(UPPER(d.transaction_type) = 'INCOME') AS has_income,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'SALE' THEN d.effective_net ELSE 0 END) AS sale_net,
+        SUM(CASE WHEN UPPER(d.transaction_type) = 'SALE' AND d.standalone_sheet <> 'BATAL' THEN d.effective_net ELSE 0 END) AS active_sale_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'PURCHASE' THEN d.effective_net ELSE 0 END) AS purchase_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'EXPENSE' THEN d.effective_net ELSE 0 END) AS expense_net,
         SUM(CASE WHEN UPPER(d.transaction_type) = 'INCOME' THEN d.effective_net ELSE 0 END) AS income_net,
@@ -456,6 +459,15 @@ export async function queryPresentedPage(
       (SELECT COUNT(*)::int FROM presented WHERE has_purchase) AS global_count_purchase,
       (SELECT COUNT(*)::int FROM presented WHERE has_expense) AS global_count_expense,
       (SELECT COUNT(*)::int FROM presented WHERE has_income) AS global_count_income,
+      /* SCOPE A — active summary, excluding BATAL */
+      (SELECT COALESCE(SUM(active_sale_net), 0) FROM presented WHERE has_sale AND operational_sheet <> 'BATAL') AS active_total_sale,
+      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase AND operational_sheet <> 'BATAL') AS active_total_purchase,
+      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense AND operational_sheet <> 'BATAL') AS active_total_expense,
+      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income AND operational_sheet <> 'BATAL') AS active_total_income,
+      (SELECT COUNT(*)::int FROM presented WHERE has_sale AND operational_sheet <> 'BATAL') AS active_count_sale,
+      (SELECT COUNT(*)::int FROM presented WHERE has_purchase AND operational_sheet <> 'BATAL') AS active_count_purchase,
+      (SELECT COUNT(*)::int FROM presented WHERE has_expense AND operational_sheet <> 'BATAL') AS active_count_expense,
+      (SELECT COUNT(*)::int FROM presented WHERE has_income AND operational_sheet <> 'BATAL') AS active_count_income,
       /* SCOPE C — pagination keys */
       COALESCE(
         (
@@ -531,6 +543,16 @@ export async function queryPresentedPage(
       count_expense: Number(row.global_count_expense || 0),
       count_income: Number(row.global_count_income || 0),
     },
+    active_summary: {
+      total_sale: Number(row.active_total_sale || 0),
+      total_purchase: Number(row.active_total_purchase || 0),
+      total_expense: Number(row.active_total_expense || 0),
+      total_income: Number(row.active_total_income || 0),
+      count_sale: Number(row.active_count_sale || 0),
+      count_purchase: Number(row.active_count_purchase || 0),
+      count_expense: Number(row.active_count_expense || 0),
+      count_income: Number(row.active_count_income || 0),
+    },
     effective_date_map: Object.fromEntries(effectiveDateMap.entries()),
   };
 }
@@ -557,6 +579,7 @@ export function emptyPresentedPlan(hapusCount: number): PresentedPagePlan {
     total_count: 0,
     summary: emptySummary(),
     global_summary: emptySummary(),
+    active_summary: emptySummary(),
     sheet_counts: { proses: 0, selesai: 0, batal: 0, hapus: hapusCount },
     effective_date_map: {},
   };

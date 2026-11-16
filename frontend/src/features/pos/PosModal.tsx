@@ -1,6 +1,7 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import PosWorkspace from './PosWorkspace';
 import type { PosMenuItem, PosOrderItem, PosOrderPaidSignal } from './PosWorkspace';
+import PosThermalReceiptModal from '../thermalReceipt/PosThermalReceiptModal';
 
 interface PosModalProps {
   open: boolean;
@@ -119,6 +120,7 @@ export default function PosModal({
   initialEditOrderId = null,
   onConsumedInitialEditOrderId,
 }: PosModalProps) {
+  const [printReceiptOrderId, setPrintReceiptOrderId] = useState<number | null>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const onRequestCloseRef = useRef(onRequestClose);
@@ -322,9 +324,19 @@ export default function PosModal({
             paidOrderId={paidOrderId}
             initialEditOrderId={initialEditOrderId}
             onConsumedInitialEditOrderId={onConsumedInitialEditOrderId}
+            onPrintReceipt={(orderId) => setPrintReceiptOrderId(orderId)}
           />
         </div>
       </div>
+      {propertyId !== null && printReceiptOrderId !== null && authFetch && (
+        <PosThermalReceiptModal
+          isOpen={printReceiptOrderId !== null}
+          onClose={() => setPrintReceiptOrderId(null)}
+          orderId={printReceiptOrderId}
+          propertyId={propertyId}
+          authFetch={authFetch}
+        />
+      )}
     </div>
   );
 }

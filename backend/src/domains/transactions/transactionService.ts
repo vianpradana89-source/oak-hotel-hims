@@ -4850,6 +4850,7 @@ export async function getTransactions(
       total_count: pagePlan.total_count,
       summary: pagePlan.summary,
       global_summary: pagePlan.global_summary,
+      active_summary: pagePlan.active_summary,
       sheet_counts: pagePlan.sheet_counts,
       limit,
       offset,
@@ -4941,6 +4942,28 @@ export async function getTransactions(
     count_income: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
   };
 
+  const scopeAActiveListSource = scopeAListSource.filter(
+    (row: any) => String(row.operational_sheet || row.sheet || '').toUpperCase() !== 'BATAL'
+  );
+  const activeSummary: TransactionSummary = {
+    total_sale: scopeAActiveListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE')
+      .reduce((sum, row: any) => sum + (row.booking_bid_group?.net != null ? Number(row.booking_bid_group.net || 0) : Number(row.effective_net_amount || 0)), 0),
+    total_purchase: scopeAActiveListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    total_expense: scopeAActiveListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    total_income: scopeAActiveListSource
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME')
+      .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
+    count_sale: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE').length,
+    count_purchase: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE').length,
+    count_expense: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE').length,
+    count_income: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
+  };
+
   // HAPUS path: explicit condition builder (NO regex placeholder renumbering).
   // Same Scope B definition powers count, total_count, and table rows.
   if (targetSheet === 'HAPUS') {
@@ -4971,6 +4994,7 @@ export async function getTransactions(
         count_income: 0,
       },
       global_summary: globalSummary,
+      active_summary: activeSummary,
       sheet_counts: {
         proses: sheet_counts.proses,
         selesai: sheet_counts.selesai,
@@ -5025,6 +5049,7 @@ export async function getTransactions(
     total_count: presented.length,
     summary,
     global_summary: globalSummary,
+    active_summary: activeSummary,
     sheet_counts,
     limit,
     offset,

@@ -479,7 +479,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       // Stale-response guard: discard if a newer request was initiated for a
       // different property or the hotel date has rolled over.
       if (reqId === dailyCardsReqRef.current) {
-        setDailyCards(res.global_summary || {
+        setDailyCards(res.active_summary || res.global_summary || {
           total_sale: 0, total_purchase: 0, total_expense: 0, total_income: 0,
           count_sale: 0, count_purchase: 0, count_expense: 0, count_income: 0
         });
@@ -1071,6 +1071,54 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     return [...base].sort(compareTxNewestFirst);
   }, [activeTab, operationalStatus, transactions, compareTxNewestFirst]);
 
+  const displayedTableStats = useMemo(() => {
+    const isTerminalSheet = operationalStatus === 'BATAL' || operationalStatus === 'HAPUS';
+    if (activeTab === 'SALE' && operationalStatus !== 'HAPUS') {
+      let total = 0;
+      for (const item of penjualanItems) {
+        if (item.kind === 'standalone') {
+          let netVal = displayTransactionNet(item.tx);
+          if (isTerminalSheet && netVal === 0) {
+            netVal =
+              Math.abs(Number(item.tx.net_amount || 0)) ||
+              Math.max(0, Number(item.tx.amount || 0) - Number(item.tx.discount_amount || 0));
+          }
+          total += netVal;
+        } else {
+          let netVal = Number(item.group.net || 0);
+          if (isTerminalSheet && netVal === 0) {
+            netVal = Math.max(0, Number(item.group.gross || 0) - Number(item.group.discount || 0));
+          }
+          total += netVal;
+        }
+      }
+      return { totalAmount: total, rowCount: penjualanItems.length };
+    }
+
+    let total = 0;
+    for (const t of workspaceRows) {
+      if (t.booking_bid_group) {
+        let netVal = Number(t.booking_bid_group.net || 0);
+        if (isTerminalSheet && netVal === 0) {
+          netVal = Math.max(
+            0,
+            Number(t.booking_bid_group.gross || 0) - Number(t.booking_bid_group.discount || 0)
+          );
+        }
+        total += netVal;
+      } else {
+        let netVal = displayTransactionNet(t);
+        if (isTerminalSheet && netVal === 0) {
+          netVal =
+            Math.abs(Number(t.net_amount || 0)) ||
+            Math.max(0, Number(t.amount || 0) - Number(t.discount_amount || 0));
+        }
+        total += netVal;
+      }
+    }
+    return { totalAmount: total, rowCount: workspaceRows.length };
+  }, [activeTab, operationalStatus, penjualanItems, workspaceRows]);
+
   const periodListHint = 'Nilai pada daftar mengikuti periode yang dipilih. Detail menampilkan seluruh booking.';
   const settlementListHint = 'Pelunasan booking ditampilkan di Detail, bukan sebagai sisa periode.';
 
@@ -1372,6 +1420,25 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 </div>
               </div>
             </td>
+            <td className="py-2.5 px-3 max-w-[180px]">
+              {t.verification_status === 'REJECTED' ? (
+                <div>
+                  <div className="font-semibold text-rose-700 truncate">{party}</div>
+                  <div className="text-[10px] text-rose-600 font-medium">Perlu koreksi</div>
+                </div>
+              ) : (
+                <div className="font-semibold text-slate-800 truncate">{party}</div>
+              )}
+              {isPosSource ? (
+                <div className="flex flex-wrap items-center gap-1 mt-0.5">
+                  <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-800">
+                    {posItems.length} item produk
+                  </span>
+                </div>
+              ) : (
+                <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
+              )}
+            </td>
             <td className="py-2.5 px-3 whitespace-nowrap">
               {isPosSource ? (
                 <>
@@ -1393,25 +1460,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 </>
               )}
             </td>
-            <td className="py-2.5 px-3 max-w-[180px]">
-              {t.verification_status === 'REJECTED' ? (
-                <div>
-                  <div className="font-semibold text-rose-700 truncate">{party}</div>
-                  <div className="text-[10px] text-rose-600 font-medium">Perlu koreksi</div>
-                </div>
-              ) : (
-                <div className="font-semibold text-slate-800 truncate">{party}</div>
-              )}
-              {isPosSource ? (
-                <div className="flex flex-wrap items-center gap-1 mt-0.5">
-                  <span className="inline-flex items-center text-[10px] font-bold px-1.5 py-0.5 rounded border border-purple-200 bg-purple-50 text-purple-800">
-                    {posItems.length} item produk
-                  </span>
-                </div>
-              ) : (
-                <div className="text-[10px] text-slate-400 truncate">{t.description}</div>
-              )}
-            </td>
             <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(formatReservationStayType(t.stay_type))}</td>
             <td className="py-2.5 px-3 whitespace-nowrap">
               <TransactionSourceBadge channel={t.booking_channel} otaSourceName={t.ota_source_name} />
@@ -1425,12 +1473,74 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(t.payment_responsibility)}</td>
             <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
             <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-              <button
-                onClick={() => openPenjualanItemDetail(item)}
-                className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-              >
-                Detail
-              </button>
+              {(() => {
+                const standaloneBookingId = t.booking_id ?? t.booking_bid ?? null;
+                const op = mapToOperationalStatus(t);
+                const canVoidRow = t.transaction_status === 'POSTED' && op.group !== 'BATAL' && !t.deleted_at;
+                return (
+                  <div className="inline-flex items-center justify-center gap-1">
+                    <button
+                      type="button"
+                      disabled={!standaloneBookingId}
+                      onClick={() => {
+                        if (standaloneBookingId) {
+                          openBookingSalesDetail(standaloneBookingId);
+                        } else {
+                          openPenjualanItemDetail(item);
+                        }
+                      }}
+                      title={
+                        standaloneBookingId
+                          ? 'Ringkasan Seluruh Booking'
+                          : 'Transaksi non-booking (Walk-In / POS tanpa BID)'
+                      }
+                      aria-label="Ringkasan Seluruh Booking"
+                      className={`w-7 h-7 inline-flex items-center justify-center rounded-lg border transition-colors ${
+                        standaloneBookingId
+                          ? 'text-emerald-700 bg-emerald-50 border-emerald-200 hover:bg-emerald-100 cursor-pointer'
+                          : 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed opacity-60'
+                      }`}
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openDetailDrawer(t.id)}
+                      title={`Detail Transaksi (${t.transaction_no})`}
+                      aria-label={`Detail Transaksi ${t.transaction_no}`}
+                      className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!canVoidRow}
+                      onClick={() => {
+                        if (canVoidRow) openVoidModal(t);
+                      }}
+                      title={
+                        canVoidRow
+                          ? `Void / Batalkan Transaksi ${t.transaction_no}`
+                          : 'Transaksi sudah dibatalkan / tidak dapat di-void'
+                      }
+                      aria-label={`Void Transaksi ${t.transaction_no}`}
+                      className={`w-7 h-7 inline-flex items-center justify-center rounded-lg border transition-colors ${
+                        canVoidRow
+                          ? 'text-rose-600 bg-rose-50 border-rose-200 hover:bg-rose-100 cursor-pointer'
+                          : 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed opacity-50'
+                      }`}
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                      </svg>
+                    </button>
+                  </div>
+                );
+              })()}
             </td>
           </tr>
           {isPosSource && posExpanded && (
@@ -1536,11 +1646,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </div>
             </div>
           </td>
-          <td className="py-2.5 px-3 max-w-[180px]">
-            <span className="font-mono font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 truncate block" title={group.bid}>
-              {group.bid}
-            </span>
-          </td>
           <td className="py-2.5 px-3 max-w-[200px]">
             {group.audit_verification_status === 'REJECTED' ? (
               <div>
@@ -1557,6 +1662,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               title={periodListHint}
             >
               {group.room_count} kamar aktivitas
+            </span>
+          </td>
+          <td className="py-2.5 px-3 max-w-[180px]">
+            <span className="font-mono font-semibold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 truncate block" title={group.bid}>
+              {group.bid}
             </span>
           </td>
           <td className="py-2.5 px-3 whitespace-nowrap">{renderStayTypeBadge(group.stay_type_label)}</td>
@@ -1598,12 +1708,60 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             })}
           </td>
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-            <button
-              onClick={() => openPenjualanItemDetail(item)}
-              className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
-            >
-              Detail
-            </button>
+            {(() => {
+              const canVoidGroup =
+                t.transaction_status === 'POSTED' &&
+                group.operational_sheet !== 'BATAL' &&
+                !t.deleted_at;
+              return (
+                <div className="inline-flex items-center justify-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => openPenjualanItemDetail(item)}
+                    title={`Ringkasan Seluruh Booking (${group.bid})`}
+                    aria-label={`Ringkasan Seluruh Booking ${group.bid}`}
+                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => openDetailDrawer(t.id)}
+                    title={`Detail Transaksi (${t.transaction_no})`}
+                    aria-label={`Detail Transaksi ${t.transaction_no}`}
+                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-slate-200 bg-slate-50 text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canVoidGroup}
+                    onClick={() => {
+                      if (canVoidGroup) openVoidModal(t);
+                    }}
+                    title={
+                      canVoidGroup
+                        ? `Void / Batalkan Transaksi ${t.transaction_no}`
+                        : 'Transaksi sudah dibatalkan / tidak dapat di-void'
+                    }
+                    aria-label={`Void Transaksi ${t.transaction_no}`}
+                    className={`w-7 h-7 inline-flex items-center justify-center rounded-lg border transition-colors ${
+                      canVoidGroup
+                        ? 'text-rose-600 bg-rose-50 border-rose-200 hover:bg-rose-100 cursor-pointer'
+                        : 'text-slate-300 bg-slate-50 border-slate-200 cursor-not-allowed opacity-50'
+                    }`}
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
+                    </svg>
+                  </button>
+                </div>
+              );
+            })()}
           </td>
         </tr>
         {expanded && (
@@ -2201,8 +2359,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               </div>
             </div>
 
-            {/* Contextual create action — right side */}
-            <div className="flex items-center gap-2 shrink-0">
+            {/* Contextual create action + Total Nilai Transaksi — right side (above Filter Lengkap) */}
+            <div className="flex items-center gap-2 shrink-0 ml-auto">
               {activeTab === 'PURCHASE' && (
                 <>
                   <button
@@ -2250,6 +2408,27 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   <span>+ Catat Pemasukan</span>
                 </button>
               )}
+
+              {/* Total Nilai Keseluruhan Transaksi sesuai filter aktif, Sheet, dan Baris */}
+              <div
+                className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl border shadow-2xs ${
+                  operationalStatus === 'PROSES'
+                    ? 'bg-amber-50/90 border-amber-200 text-amber-900'
+                    : operationalStatus === 'PIUTANG'
+                    ? 'bg-orange-50/90 border-orange-200 text-orange-900'
+                    : operationalStatus === 'BATAL' || operationalStatus === 'HAPUS'
+                    ? 'bg-rose-50/90 border-rose-200 text-rose-900'
+                    : 'bg-emerald-50/90 border-emerald-200 text-emerald-900'
+                }`}
+                title="Total nilai transaksi pada daftar yang tampil saat ini (mengikuti filter tanggal, pencarian, sheet status, dan jumlah baris)"
+              >
+                <span className="text-[10px] font-bold uppercase tracking-wider opacity-75">
+                  Total ({displayedTableStats.rowCount} baris):
+                </span>
+                <span className="text-sm font-extrabold font-mono tracking-tight">
+                  {isLoading ? '...' : formatIdr(displayedTableStats.totalAmount)}
+                </span>
+              </div>
             </div>
           </div>
 
@@ -2469,7 +2648,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         </div>
 
         {/* Transaction Table */}
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[calc(100vh-260px)]">
           {isLoading ? (
             <div className="py-16 text-center text-slate-400 space-y-2">
               <div className="w-7 h-7 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto" />
@@ -2498,96 +2677,96 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             </div>
           ) : (
             <table className="w-full text-left text-xs text-slate-600" style={{ tableLayout: 'auto' }}>
-              <thead className="bg-slate-50/90 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
+              <thead className="sticky top-0 z-20 bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200 shadow-[0_1px_0_0_rgba(226,232,240,1)]">
                 {operationalStatus === 'HAPUS' ? (
                   <tr>
-                    <th className="py-3 px-3">Tanggal</th>
-                    <th className="py-3 px-3">No. Transaksi</th>
-                    <th className="py-3 px-3">Tipe / Pihak</th>
-                    <th className="py-3 px-4">Keterangan</th>
-                    <th className="py-3 px-3 text-right">Nominal</th>
-                    <th className="py-3 px-3">Dihapus Oleh</th>
-                    <th className="py-3 px-3">Tanggal Hapus</th>
-                    <th className="py-3 px-4">Alasan Hapus</th>
-                    <th className="py-3 px-3 text-center">Aksi</th>
+                    <th className="py-3 px-3 bg-slate-50">Tanggal</th>
+                    <th className="py-3 px-3 bg-slate-50">No. Transaksi</th>
+                    <th className="py-3 px-3 bg-slate-50">Tipe / Pihak</th>
+                    <th className="py-3 px-4 bg-slate-50">Keterangan</th>
+                    <th className="py-3 px-3 text-right bg-slate-50">Nominal</th>
+                    <th className="py-3 px-3 bg-slate-50">Dihapus Oleh</th>
+                    <th className="py-3 px-3 bg-slate-50">Tanggal Hapus</th>
+                    <th className="py-3 px-4 bg-slate-50">Alasan Hapus</th>
+                    <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                   </tr>
                 ) : (
                   <>
                     {activeTab === 'SALE' && (
                       <tr>
-                        <th className="py-3 px-3">Tanggal</th>
-                        <th className="py-3 px-3">BID / No. Transaksi</th>
-                        <th className="py-3 px-3">Tamu</th>
-                        <th className="py-3 px-3">Tipe Stay</th>
-<th className="py-3 px-3">Sumber</th>
-                        <th className="py-3 px-3 text-right" title={periodListHint}>Gross</th>
-                        <th className="py-3 px-3 text-right" title={periodListHint}>Diskon</th>
-                        <th className="py-3 px-3 text-right" title={periodListHint}>Net</th>
-                         <th className="py-3 px-3 text-right" title={settlementListHint}>Dibayar</th>
-                         <th className="py-3 px-3 text-right" title={settlementListHint}>Sisa</th>
-                         <th className="py-3 px-2 text-center">Pembayaran</th>
-                         <th className="py-3 px-2 text-center">Penanggung</th>
-                         <th className="py-3 px-2 text-center">Status</th>
-                         <th className="py-3 px-3 text-center">Aksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tanggal</th>
+                        <th className="py-3 px-3 bg-slate-50">Tamu</th>
+                        <th className="py-3 px-3 bg-slate-50">BID / No. Transaksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tipe Stay</th>
+                        <th className="py-3 px-3 bg-slate-50">Sumber</th>
+                        <th className="py-3 px-3 text-right bg-slate-50" title={periodListHint}>Gross</th>
+                        <th className="py-3 px-3 text-right bg-slate-50" title={periodListHint}>Diskon</th>
+                        <th className="py-3 px-3 text-right bg-slate-50" title={periodListHint}>Net</th>
+                        <th className="py-3 px-3 text-right bg-slate-50" title={settlementListHint}>Dibayar</th>
+                        <th className="py-3 px-3 text-right bg-slate-50" title={settlementListHint}>Sisa</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Pembayaran</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Penanggung</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Status</th>
+                        <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
                     )}
 
                     {activeTab === 'PURCHASE' && (
                       <tr>
-                        <th className="py-3 px-2.5">Tanggal</th>
-                        <th className="py-3 px-2.5">No. Transaksi / PO</th>
-                        <th className="py-3 px-2.5">Supplier / Rekanan</th>
-                        <th className="py-3 px-2.5">Keterangan & Faktur</th>
-                        <th className="py-3 px-2.5 text-right">Total Tagihan</th>
-                        <th className="py-3 px-2 text-center">Otorisasi PO</th>
-                        <th className="py-3 px-2 text-center">Penerimaan Barang</th>
-                        <th className="py-3 px-2 text-center">Pelunasan</th>
-                        <th className="py-3 px-2 text-center">Pemeriksaan Tagihan</th>
-                        <th className="py-3 px-3 text-right min-w-[156px]">Aksi</th>
+                        <th className="py-3 px-2.5 bg-slate-50">Tanggal</th>
+                        <th className="py-3 px-2.5 bg-slate-50">No. Transaksi / PO</th>
+                        <th className="py-3 px-2.5 bg-slate-50">Supplier / Rekanan</th>
+                        <th className="py-3 px-2.5 bg-slate-50">Keterangan & Faktur</th>
+                        <th className="py-3 px-2.5 text-right bg-slate-50">Total Tagihan</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Otorisasi PO</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Penerimaan Barang</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Pelunasan</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Pemeriksaan Tagihan</th>
+                        <th className="py-3 px-3 text-right min-w-[156px] bg-slate-50">Aksi</th>
                       </tr>
                     )}
 
                     {activeTab === 'EXPENSE' && (
                       <tr>
-                        <th className="py-3 px-3">Tanggal</th>
-                        <th className="py-3 px-3">No. Transaksi</th>
-                        <th className="py-3 px-3">Penerima / Vendor</th>
-                        <th className="py-3 px-3">Kategori</th>
-                        <th className="py-3 px-4">Keterangan</th>
-                        <th className="py-3 px-3 text-right">Nominal</th>
-                        <th className="py-3 px-2 text-center">Pembayaran</th>
-                        <th className="py-3 px-2 text-center">Verifikasi</th>
-                        <th className="py-3 px-2 text-center">Status</th>
-                        <th className="py-3 px-3 text-center">Aksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tanggal</th>
+                        <th className="py-3 px-3 bg-slate-50">No. Transaksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Penerima / Vendor</th>
+                        <th className="py-3 px-3 bg-slate-50">Kategori</th>
+                        <th className="py-3 px-4 bg-slate-50">Keterangan</th>
+                        <th className="py-3 px-3 text-right bg-slate-50">Nominal</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Pembayaran</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Status</th>
+                        <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
                     )}
 
                     {activeTab === 'INCOME' && (
                       <tr>
-                        <th className="py-3 px-3">Tanggal</th>
-                        <th className="py-3 px-3">No. Transaksi</th>
-                        <th className="py-3 px-3">Pelanggan / Pihak</th>
-                        <th className="py-3 px-3">Kategori</th>
-                        <th className="py-3 px-4">Keterangan</th>
-                        <th className="py-3 px-3 text-right">Nominal</th>
-                        <th className="py-3 px-2 text-center">Verifikasi</th>
-                        <th className="py-3 px-2 text-center">Status</th>
-                        <th className="py-3 px-3 text-center">Aksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tanggal</th>
+                        <th className="py-3 px-3 bg-slate-50">No. Transaksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Pelanggan / Pihak</th>
+                        <th className="py-3 px-3 bg-slate-50">Kategori</th>
+                        <th className="py-3 px-4 bg-slate-50">Keterangan</th>
+                        <th className="py-3 px-3 text-right bg-slate-50">Nominal</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Status</th>
+                        <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
                     )}
 
                     {activeTab === 'ALL' && (
                       <tr>
-                        <th className="py-3 px-3">Tanggal</th>
-                        <th className="py-3 px-3">No. Transaksi</th>
-                        <th className="py-3 px-3">Tipe</th>
-                        <th className="py-3 px-3">Pihak / Tamu</th>
-                        <th className="py-3 px-3">Kategori</th>
-                        <th className="py-3 px-4">Keterangan</th>
-                        <th className="py-3 px-3 text-right">Total</th>
-                        <th className="py-3 px-2 text-center">Verifikasi</th>
-                        <th className="py-3 px-2 text-center">Status</th>
-                        <th className="py-3 px-3 text-center">Aksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tanggal</th>
+                        <th className="py-3 px-3 bg-slate-50">No. Transaksi</th>
+                        <th className="py-3 px-3 bg-slate-50">Tipe</th>
+                        <th className="py-3 px-3 bg-slate-50">Pihak / Tamu</th>
+                        <th className="py-3 px-3 bg-slate-50">Kategori</th>
+                        <th className="py-3 px-4 bg-slate-50">Keterangan</th>
+                        <th className="py-3 px-3 text-right bg-slate-50">Total</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Status</th>
+                        <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
                     )}
                   </>

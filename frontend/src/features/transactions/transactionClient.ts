@@ -42,6 +42,7 @@ export interface GetTransactionsResponse {
   total_count: number;
   summary: TransactionSummary;
   global_summary: TransactionSummary;
+  active_summary?: TransactionSummary;
   sheet_counts?: TransactionSheetCounts;
   limit: number;
   offset: number;
