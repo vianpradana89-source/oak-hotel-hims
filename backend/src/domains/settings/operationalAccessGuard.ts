@@ -78,6 +78,7 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/pos\/communication-settings$/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
   { pattern: /^\/api\/pos\/pricing-settings$/, resources: ['POS', 'Dokumen & Print', 'Pengaturan'], action: 'view', methods: ['GET', 'HEAD'] },
   { pattern: /^\/api\/pos\/pricing-settings$/, resources: ['Pengaturan'], action: 'edit', methods: ['PUT', 'PATCH'] },
+  { pattern: /^\/api\/pos\/orders\/\d+$/, resources: ['POS'], action: 'edit', methods: ['DELETE'] },
   { pattern: /^\/api\/pos/, resources: ['POS'] },
 
   { pattern: /^\/api\/rooms\/[^/]+\/status$/, resources: ['Kalender', 'Housekeeping', 'Master Kamar'] },

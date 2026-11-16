@@ -168,6 +168,7 @@ import { releaseReservationInventoryForCheckout } from './domains/reservations/r
 import { createReservationCheckoutHandler } from './domains/reservations/reservationCheckoutHandler';
 import { createPosOrderCreateHandler } from './domains/pos/posOrderCreateHandler';
 import { createPosOrderStatusHandler } from './domains/pos/posOrderStatusHandler';
+import { createPosOrderDeleteHandler } from './domains/pos/posOrderDeleteHandler';
 import { createPosOrderDetailHandler } from './domains/pos/posOrderDetailHandler';
 import { createPosOrderUpdateHandler } from './domains/pos/posOrderUpdateHandler';
 import { createPosReceiptHandler } from './domains/pos/posReceiptHandler';
@@ -563,6 +564,7 @@ app.use(async (req, res, next) => {
   // Cache global (idempotency_keys) TIDAK dipakai agar HIT tidak pernah
   // melewati auth/permission/property-scope.
   if (req.method === 'PUT' && /^\/api\/pos\/orders\/[^/]+\/?$/i.test(req.path)) return next();
+  if (req.method === 'DELETE' && /^\/api\/pos\/orders\/[^/]+\/?$/i.test(req.path)) return next();
   // Non-canonical variants of /api/pos/orders (trailing slash / case difference) → 404.
   // Express default (case-sensitive routing=false, strict routing=false) routes these
   // to the same POS handler; reject here BEFORE global cache lookup so they never
@@ -6697,6 +6699,7 @@ app.get('/api/pos/orders', async (req, res) => {
         FROM pos_orders po
         LEFT JOIN pos_order_items poi ON poi.order_id = po.id
         WHERE po.property_id = $1 AND po.reservation_id = $2
+          AND COALESCE(po.status, 'OPEN') <> 'VOIDED'
         GROUP BY po.id
         ORDER BY po.created_at DESC`
       : `
@@ -6704,6 +6707,7 @@ app.get('/api/pos/orders', async (req, res) => {
         FROM pos_orders po
         LEFT JOIN pos_order_items poi ON poi.order_id = po.id
         WHERE po.property_id = $1
+          AND COALESCE(po.status, 'OPEN') <> 'VOIDED'
         GROUP BY po.id
         ORDER BY po.created_at DESC`;
     const orderParams: any[] = reservationFilter ? [propertyId, reservationFilter] : [propertyId];
@@ -7005,6 +7009,13 @@ app.post('/api/pos/orders/:id/room-charge', async (req, res) => {
 });
 
 app.patch('/api/pos/orders/:id/status', createPosOrderStatusHandler({
+  pool,
+  connect: () => pool.connect(),
+  release: (client, discard) => { if (discard) { client.release(true); } else { client.release(); } },
+  assertPropertyScope
+}));
+
+app.delete('/api/pos/orders/:id', createPosOrderDeleteHandler({
   pool,
   connect: () => pool.connect(),
   release: (client, discard) => { if (discard) { client.release(true); } else { client.release(); } },

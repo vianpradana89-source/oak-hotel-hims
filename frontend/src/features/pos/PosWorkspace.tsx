@@ -386,10 +386,20 @@ export default function PosWorkspace({
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [orderFilterQuery, setOrderFilterQuery] = useState<string>('');
+  const [deletedOrderIds, setDeletedOrderIds] = useState<number[]>([]);
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
+  const [expandedNoteKeys, setExpandedNoteKeys] = useState<Record<string, boolean>>({});
+  const visiblePosOrders = useMemo(() => {
+    return posOrders.filter(
+      (order) =>
+        String(order.status || '').toUpperCase() !== 'VOIDED' &&
+        !deletedOrderIds.includes(Number(order.id))
+    );
+  }, [posOrders, deletedOrderIds]);
   const filteredPosOrders = useMemo(() => {
-    if (!orderFilterQuery.trim()) return posOrders;
+    if (!orderFilterQuery.trim()) return visiblePosOrders;
     const q = orderFilterQuery.trim().toLowerCase();
-    return posOrders.filter((order) => {
+    return visiblePosOrders.filter((order) => {
       const shortRef = formatPosOrderDisplayRef(order.id).toLowerCase();
       const orderNum = (order.order_number || '').toLowerCase();
       const guest = (order.guest_name || '').toLowerCase();
@@ -403,7 +413,7 @@ export default function PosWorkspace({
         idStr.includes(q)
       );
     });
-  }, [posOrders, orderFilterQuery]);
+  }, [visiblePosOrders, orderFilterQuery]);
   const [cart, setCart] = useState<PosCartLine[]>([]);
   const [tableNumber, setTableNumber] = useState('');
   const [guestName, setGuestName] = useState(() => guestNameInitial ?? '');
@@ -427,8 +437,7 @@ export default function PosWorkspace({
   const [pricingSettings, setPricingSettings] = useState<PricingSettingsState>({ status: 'loading' });
 
   // ── Stock locations (GET /api/pos/stock-locations) ─────────────────────────
-  // Dropdown "Gudang Stok" untuk memilih lokasi mana yang dipotong saat POS sale.
-  const [stockLocations, setStockLocations] = useState<Array<{ id: number; name: string; code: string; location_type: string; is_active: boolean }>>([]);
+  // Default lokasi pemotongan stok POS non-resep (wajib memprioritaskan RCP).
   const [stockLocationId, setStockLocationId] = useState<string>('');
   const stockLocFetchEpochRef = useRef(0);
 
@@ -2271,10 +2280,9 @@ export default function PosWorkspace({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [propertyId]);
 
-  // ── Fetch stock locations untuk dropdown "Gudang Stok" di slip pesanan ──
+  // ── Fetch stock locations untuk default gudang stok POS (wajib RCP) ──
   useEffect(() => {
     if (propertyId === null) {
-      setStockLocations([]);
       setStockLocationId('');
       return;
     }
@@ -2290,15 +2298,19 @@ export default function PosWorkspace({
           : Array.isArray(json?.data) ? json.data
           : Array.isArray(json) ? json
           : [];
-        const typeRank = (t: string): number => {
-          switch (String(t || '').toUpperCase()) {
-            case 'POS_OUTLET': return 1;
-            case 'KITCHEN': return 2;
-            case 'BAR': return 3;
-            case 'WAREHOUSE': return 4;
-            case 'HK_PANTRY': return 5;
-            case 'ROOM_MINIBAR': return 6;
-            default: return 7;
+        const locRank = (loc: { code?: string; name?: string; location_type?: string }): number => {
+          const codeUp = String(loc.code || '').trim().toUpperCase();
+          const nameUp = String(loc.name || '').trim().toUpperCase();
+          if (codeUp === 'RCP') return 0;
+          if (nameUp.startsWith('RECEPTION') || nameUp.startsWith('RCP')) return 1;
+          switch (String(loc.location_type || '').toUpperCase()) {
+            case 'POS_OUTLET': return 2;
+            case 'WAREHOUSE': return 3;
+            case 'BAR': return 4;
+            case 'KITCHEN': return 5;
+            case 'HK_PANTRY': return 6;
+            case 'ROOM_MINIBAR': return 7;
+            default: return 8;
           }
         };
         const activeLocs = raw
@@ -2311,10 +2323,9 @@ export default function PosWorkspace({
             is_active: Boolean(l.is_active),
           }))
           .sort((a: any, b: any) => {
-            const diff = typeRank(a.location_type) - typeRank(b.location_type);
+            const diff = locRank(a) - locRank(b);
             return diff !== 0 ? diff : a.id - b.id;
           });
-        setStockLocations(activeLocs);
         setStockLocationId((prev) => {
           if (prev && activeLocs.some((l: any) => String(l.id) === prev)) return prev;
           return activeLocs.length > 0 ? String(activeLocs[0].id) : '';
@@ -2569,8 +2580,8 @@ export default function PosWorkspace({
   const canMutateDraft = () => !draftLocked && !submittingRef.current && !idempotencySnapshotRef.current?.unresolved;
 
   const totalOrdersAmount = useMemo(() => {
-    return posOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
-  }, [posOrders]);
+    return visiblePosOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0);
+  }, [visiblePosOrders]);
 
   // ── Simpan Pesanan (real API) ──────────────────────────────────────────────
   // Strategi:
@@ -3215,6 +3226,63 @@ export default function PosWorkspace({
     };
   }, []);
 
+  const handleDeleteOrder = useCallback(async (order: PosOrderItem) => {
+    if (!canEditPos) {
+      alert('Anda tidak memiliki izin untuk menghapus order POS.');
+      return;
+    }
+    if (propertyId === null) return;
+    if (deletingOrderId !== null || saving || editSaving || submittingRef.current || editSubmittingRef.current) {
+      alert('Tunggu proses berjalan selesai sebelum menghapus order.');
+      return;
+    }
+    const displayRef = formatPosOrderDisplayRef(order.id) || order.order_number;
+    const statusLabel = String(order.status || 'OPEN').toUpperCase();
+    const confirmMsg =
+      statusLabel === 'PAID' || statusLabel === 'BILLED_TO_ROOM'
+        ? `Hapus order ${displayRef} (${statusLabel})?\nData penjualan/folio terkait akan dibatalkan dan stok produk otomatis dikembalikan ke gudang.`
+        : `Hapus order ${displayRef} (${statusLabel})?\nOrder ini akan dihapus dari daftar riwayat.`;
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm(confirmMsg)) return;
+    }
+
+    setDeletingOrderId(Number(order.id));
+    try {
+      const fetcher = authFetch ?? authenticatedFetch;
+      const res = await fetcher(`/api/pos/orders/${order.id}?property_id=${propertyId}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const targetId = Number(order.id);
+        setDeletedOrderIds((prev) => (prev.includes(targetId) ? prev : [...prev, targetId]));
+        if (editingOrderRef.current?.orderId === targetId) {
+          setEditMode('create');
+          setEditingOrder(null);
+          setEditCart(null);
+          setEditMeta(null);
+          setEditError(null);
+          setEditConflict(null);
+          setEditSuccess(null);
+          setEditAmbiguous(false);
+          setEditSyncWarning(null);
+          setEditIdentityUnresolved(null);
+          setEditSavedRevision(null);
+          editingOrderRef.current = null;
+          editModeRef.current = 'create';
+        }
+        setSaveResult((prev) => (prev?.order?.id === targetId ? null : prev));
+        onRefresh?.();
+      } else {
+        alert(json?.message || `Gagal menghapus order ${displayRef}.`);
+      }
+    } catch (err: any) {
+      alert(err?.message || `Gagal menghapus order ${displayRef}.`);
+    } finally {
+      setDeletingOrderId(null);
+    }
+  }, [canEditPos, propertyId, deletingOrderId, saving, editSaving, authFetch, onRefresh]);
+
   const kpiCardsSection = (
     <div className="shrink-0 grid grid-cols-1 sm:grid-cols-3 gap-3">
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
@@ -3224,7 +3292,7 @@ export default function PosWorkspace({
       </div>
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
         <div className="text-xs text-gray-500 font-medium">Total Pesanan</div>
-        <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{posOrders.length}</div>
+        <div className="text-xl sm:text-2xl font-black text-purple-700 mt-0.5">{visiblePosOrders.length}</div>
         <div className="text-[11px] text-gray-400 mt-0.5">Order tercatat</div>
       </div>
       <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-xs">
@@ -3237,20 +3305,27 @@ export default function PosWorkspace({
 
   const viewSelectorTabsSection = (
     <div className="shrink-0 flex items-center justify-between gap-2 border-b border-gray-200 pb-2 flex-wrap">
-      <div className="flex gap-2">
+      <div className="flex gap-1.5">
         <button
           type="button"
+          title="Kasir & Menu POS"
+          aria-label="Kasir & Menu POS"
           onClick={() => setActiveTab('register')}
-          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+          className={`inline-flex items-center justify-center p-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
             activeTab === 'register'
               ? 'bg-purple-900 text-white shadow-xs'
               : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
           }`}
         >
-          Kasir &amp; Menu POS
+          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M3 3h7v7H3V3zm11 0h7v7h-7V3zM3 14h7v7H3v-7zm11 0h7v7h-7v-7z" />
+          </svg>
+          <span className="sr-only">Kasir &amp; Menu POS</span>
         </button>
         <button
           type="button"
+          title={`Riwayat Order (${visiblePosOrders.length})`}
+          aria-label={`Riwayat Order (${visiblePosOrders.length})`}
           onClick={() => {
             // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
             if (editSubmittingRef.current || editDetailInFlightRef.current) {
@@ -3261,13 +3336,20 @@ export default function PosWorkspace({
             }
             setActiveTab('orders');
           }}
-          className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+          className={`inline-flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
             activeTab === 'orders'
               ? 'bg-purple-900 text-white shadow-xs'
               : 'bg-white text-gray-600 hover:bg-gray-100 border border-gray-200'
           }`}
         >
-          Riwayat Order ({posOrders.length})
+          <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 7h6m-6 4h4" />
+          </svg>
+          <span className="sr-only">Riwayat Order (</span>
+          <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${
+            activeTab === 'orders' ? 'bg-purple-700 text-white' : 'bg-purple-50 text-purple-800'
+          }`}>{visiblePosOrders.length}</span>
+          <span className="sr-only">)</span>
         </button>
       </div>
 
@@ -3687,7 +3769,7 @@ export default function PosWorkspace({
                       </div>
 
                       {/* ── Cart items ───────────────────────────────────────── */}
-                      <div className="space-y-2">
+                      <div className="space-y-1.5">
                         <div className="flex items-center justify-between">
                           <h3 className="text-xs font-bold text-gray-700 uppercase tracking-wide">
                             Item Pesanan ({(editCart ?? []).length})
@@ -3699,26 +3781,29 @@ export default function PosWorkspace({
                           )}
                         </div>
 
-                        {(editCart ?? []).map((line, idx) => (
+                        {(editCart ?? []).map((line, idx) => {
+                          const editNoteKey = `edit-${line.localId || line.orderItemId || idx}`;
+                          const showEditNote = Boolean((line.notes ?? '').trim() !== '' || expandedNoteKeys[editNoteKey]);
+                          return (
                           <div
                             key={line.orderItemId ?? `new-${line.menuItemId}-${idx}`}
-                            className="border border-gray-200 rounded-xl p-2.5 space-y-2 bg-gray-50/30"
+                            className="border border-gray-200 rounded-lg px-2.5 py-1.5 space-y-1 bg-gray-50/40"
                           >
-                            <div className="flex items-center justify-between gap-2 flex-wrap">
-                              <div className="flex items-center gap-1.5 flex-1 min-w-[6rem]">
-                                <span className="font-mono text-xs font-bold text-gray-900 truncate">
+                            <div className="flex items-center justify-between gap-1.5 flex-nowrap">
+                              <div className="flex items-center gap-1 flex-1 min-w-0">
+                                <span className="font-mono text-xs font-bold text-gray-900 truncate" title={line.name}>
                                   {line.name}
                                 </span>
                                 {line.orderItemId === undefined && (
-                                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold shrink-0">BARU</span>
+                                  <span className="text-[9px] px-1 py-0.2 rounded bg-amber-50 text-amber-700 border border-amber-200 font-semibold shrink-0">BARU</span>
                                 )}
                               </div>
 
                               {/* Diskon item inline */}
                               {editMode === 'edit' && !editSaving && !editConflict && canDiscountPos && (
-                                <div className="flex items-center gap-1 shrink-0">
-                                  <div className="flex items-center w-20 min-w-0 border border-gray-200 rounded-lg bg-white overflow-hidden">
-                                    <span className="px-1.5 py-1 text-[11px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
+                                <div className="flex items-center gap-0.5 shrink-0">
+                                  <div className="flex items-center w-14 min-w-0 border border-gray-200 rounded-md bg-white overflow-hidden">
+                                    <span className="px-1 py-0.5 text-[10px] font-semibold text-gray-500 bg-gray-50 border-r border-gray-200 select-none shrink-0">
                                       {(line.discount_type ?? 'PERCENT') === 'NOMINAL' ? 'Rp' : '%'}
                                     </span>
                                     <input
@@ -3742,7 +3827,7 @@ export default function PosWorkspace({
                                         }
                                       }}
                                       placeholder="0"
-                                      className="w-full min-w-0 px-1.5 py-1 text-xs bg-white focus:outline-hidden"
+                                      className="w-full min-w-0 px-1 py-0.5 text-[11px] bg-white focus:outline-hidden"
                                     />
                                   </div>
                                   <select
@@ -3760,7 +3845,7 @@ export default function PosWorkspace({
                                         discount_type: nextType,
                                       });
                                     }}
-                                    className="w-14 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs font-medium bg-white"
+                                    className="w-11 shrink-0 border border-gray-200 rounded-md px-1 py-0.5 text-[11px] font-medium bg-white"
                                   >
                                     <option value="NOMINAL">Rp</option>
                                     <option value="PERCENT">%</option>
@@ -3770,19 +3855,19 @@ export default function PosWorkspace({
 
                               {/* Qty control */}
                               {editMode === 'edit' && !editSaving && !editConflict ? (
-                                <div className="flex items-center gap-1 shrink-0">
+                                <div className="flex items-center gap-0.5 shrink-0">
                                   <button
                                     type="button"
                                     onClick={() => updateEditCartQuantity(idx, -1)}
                                     disabled={line.quantity <= 1}
-                                    className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 disabled:opacity-30 cursor-pointer"
+                                    className="w-5 h-5 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 disabled:opacity-30 cursor-pointer"
                                     aria-label="Kurangi jumlah"
                                   >−</button>
-                                  <span className="w-8 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
+                                  <span className="w-5 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
                                   <button
                                     type="button"
                                     onClick={() => updateEditCartQuantity(idx, 1)}
-                                    className="w-6 h-6 rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 cursor-pointer"
+                                    className="w-5 h-5 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 cursor-pointer"
                                     aria-label="Tambah jumlah"
                                   >+</button>
                                 </div>
@@ -3793,12 +3878,30 @@ export default function PosWorkspace({
                               {/* Total baris (canonical preview net setelah diskon item, sebelum diskon order/service/PBJT) */}
                               <span
                                 data-edit-line-total={line.name}
-                                className="font-bold text-xs text-gray-900 tabular-nums shrink-0 text-right min-w-[4.75rem]"
+                                className="font-bold text-xs text-gray-900 tabular-nums shrink-0 text-right min-w-[4.25rem]"
                               >
                                 {editPreview?.lines[idx]
                                   ? formatIDR(editPreview.lines[idx].net)
                                   : formatIDR(line.unit_price * line.quantity)}
                               </span>
+
+                              {/* Toggle catatan item */}
+                              {editMode === 'edit' && !editSaving && !editConflict && (
+                                <button
+                                  type="button"
+                                  title={showEditNote ? 'Sembunyikan catatan item' : 'Tambah / edit catatan item'}
+                                  onClick={() => setExpandedNoteKeys(prev => ({ ...prev, [editNoteKey]: !showEditNote }))}
+                                  className={`w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0 cursor-pointer ${
+                                    (line.notes ?? '').trim() !== ''
+                                      ? 'text-purple-700 bg-purple-50 hover:bg-purple-100'
+                                      : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                                  }`}
+                                >
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                  </svg>
+                                </button>
+                              )}
 
                               {/* Hapus item (hanya edit mode, dan bukan baris terakhir) */}
                               {editMode === 'edit' && !editSaving && !editConflict && (editCart?.length ?? 0) > 1 && (
@@ -3807,7 +3910,7 @@ export default function PosWorkspace({
                                   aria-label={`Hapus item ${line.name}`}
                                   title="Hapus item"
                                   onClick={() => removeEditCartLine(idx)}
-                                  className="w-6 h-6 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 cursor-pointer"
+                                  className="w-5 h-5 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 cursor-pointer"
                                 >
                                   ×
                                 </button>
@@ -3823,7 +3926,7 @@ export default function PosWorkspace({
                                 value={line.notes ?? ''}
                                 onChange={e => updateEditCartItemMeta(idx, { notes: e.target.value || null })}
                                 placeholder="Catatan item (opsional)"
-                                className="w-full border border-gray-200 rounded-lg px-2.5 py-1 bg-white text-xs"
+                                className={showEditNote ? 'w-full border border-gray-200 rounded-md px-2 py-0.5 bg-white text-[11px]' : 'sr-only'}
                               />
                             ) : (
                               (line.notes || line.discount_type) ? (
@@ -3836,7 +3939,8 @@ export default function PosWorkspace({
                               ) : null
                             )}
                           </div>
-                        ))}
+                          );
+                        })}
 
                         {editMode === 'edit' && !editSaving && !editConflict && editCart && editCart.length > 0 && (
                           <p className="text-[10px] text-gray-400">
@@ -3939,25 +4043,6 @@ export default function PosWorkspace({
 
                 {/* Area isi tengah Slip Pesanan CREATE yang dapat digulir */}
                 <div className="flex-1 min-h-0 overflow-y-auto pr-1 space-y-3 my-2">
-                {/* ── Pilih Gudang Stok (opsional — default: lokasi aktif pertama) ── */}
-                {stockLocations.length > 0 && (
-                  <div className="rounded-xl border border-amber-200 bg-amber-50/40 p-3">
-                    <label className="text-[10px] uppercase font-bold text-amber-700">Gudang Stok (pemotongan stok POS)</label>
-                    <select
-                      value={stockLocationId}
-                      disabled={draftLocked}
-                      onChange={e => {if (canMutateDraft()) setStockLocationId(e.target.value);}}
-                      className="block mt-1 w-full text-xs border border-amber-200 rounded-lg p-2 bg-white text-gray-700 disabled:opacity-60"
-                    >
-                      {stockLocations.map(loc => (
-                        <option key={loc.id} value={String(loc.id)}>
-                          {loc.code || loc.id} — {loc.name}{loc.is_active ? '' : ' (nonaktif)'}
-                        </option>
-                      ))}
-                    </select>
-                    <p className="mt-1 text-[10px] text-amber-600/80">Bahan baku resep selalu dipotong dari KITCHEN; produk jadi TIDAK ber-resep dipotong dari gudang ini.</p>
-                  </div>
-                )}
                 {/* Table & Guest Form — terkunci saat pending/ambigu agar
                      payload replay tetap identik dengan snapshot */}
                 <div className={`space-y-2 ${draftLocked ? 'opacity-60' : ''}`}>
@@ -4099,7 +4184,7 @@ export default function PosWorkspace({
                 </div>
 
                 {/* Cart Items */}
-                <div className="space-y-2">
+                <div className="space-y-1.5">
                   {cart.length === 0 ? (
                     <div className="py-8 text-center text-xs text-gray-400">
                       Klik item menu di samping untuk menambahkan pesanan.
@@ -4107,23 +4192,25 @@ export default function PosWorkspace({
                   ) : (
                     cart.map(({ item, qty, discountType = 'PERCENT', discountInput = '', notes = '' }, lineIndex) => {
                       const lineKey = getCartLineKey(item);
+                      const createNoteKey = `create-${lineKey}`;
+                      const showCreateNote = Boolean((notes ?? '').trim() !== '' || expandedNoteKeys[createNoteKey]);
                       return (
                       <div
                         key={lineKey}
-                        className="p-2.5 bg-gray-50 border border-gray-200 rounded-xl text-xs space-y-2"
+                        className="px-2.5 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-xs space-y-1"
                       >
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div className="min-w-[6rem] flex-1">
-                            <div className="font-semibold text-gray-800 truncate">{item.name}</div>
+                        <div className="flex items-center justify-between gap-1.5 flex-nowrap">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-gray-800 truncate" title={item.name}>{item.name}</div>
                           </div>
 
                           {canDiscountPos && (
-                            <div className="flex items-center gap-1 shrink-0">
+                            <div className="flex items-center gap-0.5 shrink-0">
                               {/* Input angka diskon langsung (placeholder 0, default satuan %).
                                   Nilai kosong / 0 = tanpa diskon. Normalisasi leading-zero
                                   (01→1, 0050→50) dilakukan pada onChange. */}
-                              <div className="flex items-center border border-gray-200 rounded-lg bg-white px-2 py-1 w-20">
-                                <span className="text-[11px] text-gray-500 mr-1 select-none shrink-0">
+                              <div className="flex items-center border border-gray-200 rounded-md bg-white px-1.5 py-0.5 w-14">
+                                <span className="text-[10px] text-gray-500 mr-0.5 select-none shrink-0">
                                   {discountType === 'PERCENT' ? '%' : 'Rp'}
                                 </span>
                                 <input
@@ -4139,7 +4226,7 @@ export default function PosWorkspace({
                                     const val = normalizeDiscountInput(e.target.value, t);
                                     changeLine(lineKey, { discountType: t, discountInput: val });
                                   }}
-                                  className="w-full min-w-0 text-xs outline-none bg-transparent"
+                                  className="w-full min-w-0 text-[11px] outline-none bg-transparent"
                                   placeholder="0"
                                 />
                               </div>
@@ -4157,7 +4244,7 @@ export default function PosWorkspace({
                                     changeLine(lineKey, { discountType: newType });
                                   }
                                 }}
-                                className="w-14 shrink-0 border border-gray-200 rounded-lg px-1.5 py-1 text-xs bg-white"
+                                className="w-11 shrink-0 border border-gray-200 rounded-md px-1 py-0.5 text-[11px] bg-white"
                               >
                                 <option value="Rp">Rp</option>
                                 <option value="%">%</option>
@@ -4165,23 +4252,23 @@ export default function PosWorkspace({
                             </div>
                           )}
 
-                          <div className="flex items-center gap-1 shrink-0">
+                          <div className="flex items-center gap-0.5 shrink-0">
                             <button
                               type="button"
                               aria-label={`Kurangi jumlah ${item.name}`}
                               onClick={() => updateCartQty(lineKey, -1)}
                               disabled={draftLocked}
-                              className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                              className="w-5 h-5 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                             >
                               -
                             </button>
-                            <span className="font-bold w-6 text-center text-gray-900">{qty}</span>
+                            <span className="font-bold w-5 text-center text-gray-900">{qty}</span>
                             <button
                               type="button"
                               aria-label={`Tambah jumlah ${item.name}`}
                               onClick={() => updateCartQty(lineKey, 1)}
                               disabled={draftLocked}
-                              className="w-6 h-6 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                              className="w-5 h-5 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-700 font-bold hover:bg-gray-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                             >
                               +
                             </button>
@@ -4189,7 +4276,7 @@ export default function PosWorkspace({
 
                           <span
                             data-line-total={item.name}
-                            className="font-bold text-gray-900 tabular-nums shrink-0 text-right min-w-[4.75rem]"
+                            className="font-bold text-gray-900 tabular-nums shrink-0 text-right min-w-[4.25rem]"
                           >
                             {draftPreview.value
                               ? formatIDR(draftPreview.value.lines[lineIndex].net)
@@ -4198,11 +4285,27 @@ export default function PosWorkspace({
 
                           <button
                             type="button"
+                            title={showCreateNote ? 'Sembunyikan catatan item' : 'Tambah / edit catatan item'}
+                            onClick={() => setExpandedNoteKeys(prev => ({ ...prev, [createNoteKey]: !showCreateNote }))}
+                            disabled={draftLocked}
+                            className={`w-5 h-5 flex items-center justify-center rounded transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer ${
+                              (notes ?? '').trim() !== ''
+                                ? 'text-purple-700 bg-purple-50 hover:bg-purple-100'
+                                : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'
+                            }`}
+                          >
+                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                            </svg>
+                          </button>
+
+                          <button
+                            type="button"
                             aria-label={`Hapus item ${item.name}`}
                             title="Hapus item"
                             onClick={() => removeFromCart(lineKey)}
                             disabled={draftLocked}
-                            className="w-6 h-6 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                            className="w-5 h-5 flex items-center justify-center rounded text-red-500 hover:text-red-700 hover:bg-red-50 text-sm font-bold leading-none shrink-0 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                           >
                             ×
                           </button>
@@ -4216,7 +4319,7 @@ export default function PosWorkspace({
                           disabled={draftLocked}
                           onChange={e => changeLine(lineKey, {notes: e.target.value})}
                           placeholder="Catatan item (opsional)"
-                          className="w-full border border-gray-200 rounded-lg px-2.5 py-1 bg-white text-xs"
+                          className={showCreateNote ? 'w-full border border-gray-200 rounded-md px-2 py-0.5 bg-white text-[11px]' : 'sr-only'}
                         />
                       </div>
                       );
@@ -4637,27 +4740,40 @@ export default function PosWorkspace({
                       <th className="py-3 px-4">Nama Tamu</th>
                       <th className="py-3 px-4 text-right">Total (IDR)</th>
                       <th className="py-3 px-4 text-center">Status</th>
+                      <th className="py-3 px-4 text-center">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {filteredPosOrders.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="py-12 text-center text-gray-400">
+                        <td colSpan={6} className="py-12 text-center text-gray-400">
                           {orderFilterQuery ? 'Tidak ada order yang cocok dengan pencarian.' : 'Belum ada order POS tercatat.'}
                         </td>
                       </tr>
                     ) : (
-                      filteredPosOrders.map((order) => (
+                      filteredPosOrders.map((order) => {
+                        const statusUpper = String(order.status || 'PAID').toUpperCase();
+                        const badgeClass =
+                          statusUpper === 'PAID'
+                            ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+                            : statusUpper === 'OPEN'
+                              ? 'bg-amber-100 text-amber-800 border-amber-300'
+                              : statusUpper === 'BILLED_TO_ROOM'
+                                ? 'bg-sky-100 text-sky-800 border-sky-300'
+                                : 'bg-stone-100 text-stone-600 border-stone-200';
+                        const isDeletingThis = deletingOrderId === Number(order.id);
+                        const displayRef = formatPosOrderDisplayRef(order.id) || order.order_number;
+                        return (
                         <tr key={order.id} className="hover:bg-gray-50/60 transition-colors">
                           <td className="py-3 px-4">
                             <button
                               type="button"
                               onClick={() => void openEditOrderInRegister(order.id)}
-                              disabled={editLoading}
+                              disabled={editLoading || isDeletingThis}
                               title={order.order_number}
                               className="font-mono font-semibold text-purple-900 hover:underline hover:text-purple-700 text-xs sm:text-sm cursor-pointer disabled:opacity-40 disabled:no-underline"
                             >
-                              {formatPosOrderDisplayRef(order.id) || order.order_number}
+                              {displayRef}
                             </button>
                           </td>
                           <td className="py-3 px-4 text-gray-700">
@@ -4670,12 +4786,33 @@ export default function PosWorkspace({
                             {formatIDR(Number(order.total_amount || 0))}
                           </td>
                           <td className="py-3 px-4 text-center">
-                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-purple-50 text-purple-700 border border-purple-200">
-                              {order.status || 'PAID'}
+                            <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-[11px] font-semibold border ${badgeClass}`}>
+                              {statusUpper}
                             </span>
                           </td>
+                          <td className="py-3 px-4 text-center">
+                            {canEditPos && (
+                              <button
+                                type="button"
+                                onClick={() => void handleDeleteOrder(order)}
+                                disabled={isDeletingThis || deletingOrderId !== null || editLoading}
+                                aria-label={`Hapus order ${displayRef}`}
+                                title="Hapus order & kembalikan stok"
+                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                              >
+                                {isDeletingThis ? (
+                                  <span className="w-3.5 h-3.5 border-2 border-red-300 border-t-red-700 rounded-full animate-spin" />
+                                ) : (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                  </svg>
+                                )}
+                              </button>
+                            )}
+                          </td>
                         </tr>
-                      ))
+                        );
+                      })
                     )}
                   </tbody>
                 </table>

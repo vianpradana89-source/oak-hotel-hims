@@ -7658,28 +7658,38 @@ export async function deductStockForPosSale(
   if (explicitLocationOverride) {
     targetLocationId = Number(params.locationId);
   } else {
-    // Ambil dari pos_orders.location_id jika tersedia
+    // Ambil dari pos_orders.location_id jika tersedia (abaikan bila menunjuk ke KITCHEN/KCH tanpa override eksplisit agar default selalu mengutamakan RCP)
     const orderLocRes = await client.query(
-      `SELECT location_id FROM pos_orders WHERE id = $1 AND property_id = $2`,
+      `SELECT po.location_id, sl.location_type, sl.code
+         FROM pos_orders po
+         LEFT JOIN stock_locations sl ON sl.id = po.location_id AND sl.property_id = po.property_id
+        WHERE po.id = $1 AND po.property_id = $2`,
       [orderId, propertyId]
     );
     if (orderLocRes.rows.length > 0 && orderLocRes.rows[0].location_id) {
-      targetLocationId = Number(orderLocRes.rows[0].location_id);
+      const ordLocType = String(orderLocRes.rows[0].location_type || '').toUpperCase();
+      const ordLocCode = String(orderLocRes.rows[0].code || '').trim().toUpperCase();
+      if (ordLocType !== 'KITCHEN' && ordLocCode !== 'KCH') {
+        targetLocationId = Number(orderLocRes.rows[0].location_id);
+      }
     }
   }
 
   if (!targetLocationId) {
-    // Cari lokasi aktif default: POS_OUTLET > KITCHEN > BAR > WAREHOUSE
+    // Cari lokasi aktif default untuk produk tanpa resep:
+    // Prioritas wajib: gudang RCP (Reception) > POS_OUTLET > WAREHOUSE > BAR > KITCHEN
     const defaultLocRes = await client.query(
       `SELECT id FROM stock_locations
         WHERE property_id = $1 AND is_active = TRUE
         ORDER BY
           CASE
-            WHEN location_type = 'POS_OUTLET' THEN 1
-            WHEN location_type = 'KITCHEN' THEN 2
-            WHEN location_type = 'BAR' THEN 3
-            WHEN location_type = 'WAREHOUSE' THEN 4
-            ELSE 5
+            WHEN UPPER(BTRIM(COALESCE(code, ''))) = 'RCP' THEN 0
+            WHEN UPPER(BTRIM(COALESCE(name, ''))) LIKE 'RECEPTION%' OR UPPER(BTRIM(COALESCE(name, ''))) LIKE 'RCP%' THEN 1
+            WHEN location_type = 'POS_OUTLET' THEN 2
+            WHEN location_type = 'WAREHOUSE' THEN 3
+            WHEN location_type = 'BAR' THEN 4
+            WHEN location_type = 'KITCHEN' THEN 5
+            ELSE 6
           END, id ASC
         LIMIT 1`,
       [propertyId]
@@ -7963,6 +7973,189 @@ export async function deductStockForPosSale(
     location_id: targetLocationId,
     items_deducted: itemsDeducted,
     skipped_non_tracked: skippedNonTracked,
+  };
+}
+
+export interface PosOrderStockRestoreItemResult {
+  product_id: number;
+  product_name: string;
+  location_id: number;
+  quantity_restored: number;
+  movement_id: number;
+  previous_balance: string;
+  new_balance: string;
+  base_unit_code: string;
+}
+
+export interface PosOrderStockRestoreResult {
+  replayed: boolean;
+  operation_id?: number;
+  items_restored: PosOrderStockRestoreItemResult[];
+}
+
+/**
+ * Mengembalikan stok (reversal mutasi +qty) ketika suatu POS Order dihapus/dibatalkan.
+ * - Idempoten per (property_id, POS_VOID_ORDER_<orderId>).
+ * - Membaca seluruh mutasi keluar (quantity_delta < 0) dari operasi POS_SALE_ORDER_<orderId>.
+ * - Mengembalikan saldo ke masing-masing location_id asal dan mencatat stock_movements (+qty)
+ *   agar stock_balances dan Kartu Stok tetap sinkron tanpa drift.
+ */
+export async function restoreStockForPosOrderVoid(params: {
+  client: PoolClient;
+  propertyId: number;
+  orderId: number;
+  actorUserId?: string | number | null;
+  actorName?: string | null;
+}): Promise<PosOrderStockRestoreResult> {
+  const { client, propertyId, orderId } = params;
+  const voidOpKey = `POS_VOID_ORDER_${orderId}`;
+  const saleOpKey = `POS_SALE_ORDER_${orderId}`;
+
+  // 1. Cek idempotensi: apakah sudah pernah dikembalikan sebelumnya?
+  const existingVoidRes = await client.query(
+    `SELECT id FROM stock_operations WHERE property_id = $1 AND operation_key = $2 LIMIT 1`,
+    [propertyId, voidOpKey]
+  );
+  if ((existingVoidRes.rowCount ?? 0) > 0) {
+    return {
+      replayed: true,
+      operation_id: Number(existingVoidRes.rows[0].id),
+      items_restored: [],
+    };
+  }
+
+  // 2. Cari operasi pemotongan stok POS_SALE untuk order ini
+  const saleOpRes = await client.query(
+    `SELECT id
+       FROM stock_operations
+      WHERE property_id = $1
+        AND operation_key = $2
+      ORDER BY id DESC
+      LIMIT 1`,
+    [propertyId, saleOpKey]
+  );
+  if ((saleOpRes.rowCount ?? 0) === 0) {
+    return {
+      replayed: false,
+      items_restored: [],
+    };
+  }
+  const saleOpId = Number(saleOpRes.rows[0].id);
+
+  // 3. Ambil seluruh mutasi keluar (quantity_delta < 0) dari operasi POS_SALE tersebut
+  const movsRes = await client.query(
+    `SELECT sm.product_id, sm.location_id, sm.quantity_delta, sm.base_unit_code, sm.unit_cost,
+            COALESCE(pmi.name, 'Produk #' || sm.product_id::text) AS product_name
+       FROM stock_movements sm
+       LEFT JOIN pos_menu_items pmi ON pmi.id = sm.product_id AND pmi.property_id = sm.property_id
+      WHERE sm.operation_id = $1
+        AND sm.property_id = $2
+        AND sm.quantity_delta < 0
+      ORDER BY sm.product_id ASC, sm.location_id ASC, sm.id ASC`,
+    [saleOpId, propertyId]
+  );
+
+  if ((movsRes.rowCount ?? 0) === 0) {
+    return {
+      replayed: false,
+      items_restored: [],
+    };
+  }
+
+  // 4. Buat header stock_operations (tipe: STOCK_ADJUSTMENT) untuk pengembalian stok
+  const notes = `Pengembalian stok hapus POS Order #${orderId}`;
+  const metadata = {
+    pos_order_id: orderId,
+    reversed_operation_id: saleOpId,
+    reason: 'POS_ORDER_DELETED',
+    actor_user_id: params.actorUserId || null,
+    actor_name: params.actorName || null,
+  };
+  const createdByNum =
+    params.actorUserId && Number.isInteger(Number(params.actorUserId)) && Number(params.actorUserId) > 0
+      ? Number(params.actorUserId)
+      : null;
+
+  const opInsertRes = await client.query(
+    `INSERT INTO stock_operations (
+       property_id, operation_type, operation_key, payload_fingerprint,
+       notes, metadata, created_by, created_at
+     ) VALUES (
+       $1, 'STOCK_ADJUSTMENT', $2, $3,
+       $4, $5, $6, NOW()
+     )
+     RETURNING id`,
+    [propertyId, voidOpKey, voidOpKey, notes, JSON.stringify(metadata), createdByNum]
+  );
+  const voidOpId = Number(opInsertRes.rows[0].id);
+
+  const itemsRestored: PosOrderStockRestoreItemResult[] = [];
+
+  // 5. Kembalikan saldo per baris mutasi
+  for (const row of movsRes.rows) {
+    const productId = Number(row.product_id);
+    const locationId = Number(row.location_id);
+    const restoreQty = Math.abs(parseFloat(String(row.quantity_delta || '0')));
+    if (!Number.isFinite(restoreQty) || restoreQty <= 0) continue;
+
+    const balRes = await client.query(
+      `SELECT id, quantity FROM stock_balances
+        WHERE property_id = $1 AND product_id = $2 AND location_id = $3
+        FOR UPDATE`,
+      [propertyId, productId, locationId]
+    );
+    const prevBalance = (balRes.rowCount ?? 0) > 0 ? parseFloat(String(balRes.rows[0].quantity || '0')) : 0;
+    const nextBalance = prevBalance + restoreQty;
+    const deltaStr = restoreQty.toFixed(3);
+    const nextBalanceStr = nextBalance.toFixed(3);
+    const unitCost = row.unit_cost !== null && row.unit_cost !== undefined ? parseFloat(String(row.unit_cost)) : null;
+
+    const movIns = await client.query(
+      `INSERT INTO stock_movements (
+         operation_id, property_id, product_id, location_id,
+         packaging_id, packaging_code, packaging_label,
+         quantity_delta, base_unit_code, unit_cost, created_at
+       ) VALUES (
+         $1, $2, $3, $4,
+         NULL, NULL, NULL,
+         $5, $6, $7, NOW()
+       )
+       RETURNING id`,
+      [voidOpId, propertyId, productId, locationId, deltaStr, row.base_unit_code || 'PCS', unitCost]
+    );
+    const movId = Number(movIns.rows[0].id);
+
+    if ((balRes.rowCount ?? 0) > 0) {
+      await client.query(
+        `UPDATE stock_balances
+            SET quantity = $1, updated_at = NOW()
+          WHERE property_id = $2 AND product_id = $3 AND location_id = $4`,
+        [nextBalanceStr, propertyId, productId, locationId]
+      );
+    } else {
+      await client.query(
+        `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
+         VALUES ($1, $2, $3, $4, NOW())`,
+        [propertyId, productId, locationId, nextBalanceStr]
+      );
+    }
+
+    itemsRestored.push({
+      product_id: productId,
+      product_name: String(row.product_name || `Produk #${productId}`),
+      location_id: locationId,
+      quantity_restored: restoreQty,
+      movement_id: movId,
+      previous_balance: prevBalance.toFixed(3),
+      new_balance: nextBalanceStr,
+      base_unit_code: String(row.base_unit_code || 'PCS'),
+    });
+  }
+
+  return {
+    replayed: false,
+    operation_id: voidOpId,
+    items_restored: itemsRestored,
   };
 }
 

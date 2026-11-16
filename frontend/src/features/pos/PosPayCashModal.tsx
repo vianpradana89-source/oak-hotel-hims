@@ -209,15 +209,19 @@ export default function PosPayCashModal({
         : Array.isArray(json?.data) ? json.data
         : Array.isArray(json) ? json
         : [];
-      const typeRank = (t: string): number => {
-        switch (String(t || '').toUpperCase()) {
-          case 'POS_OUTLET': return 1;
-          case 'KITCHEN': return 2;
-          case 'BAR': return 3;
-          case 'WAREHOUSE': return 4;
-          case 'HK_PANTRY': return 5;
-          case 'ROOM_MINIBAR': return 6;
-          default: return 7;
+      const locRank = (l: any): number => {
+        const codeUp = String(l?.code || '').trim().toUpperCase();
+        const nameUp = String(l?.name || '').trim().toUpperCase();
+        if (codeUp === 'RCP') return 0;
+        if (nameUp.startsWith('RECEPTION') || nameUp.startsWith('RCP')) return 1;
+        switch (String(l?.location_type || '').toUpperCase()) {
+          case 'POS_OUTLET': return 2;
+          case 'WAREHOUSE': return 3;
+          case 'BAR': return 4;
+          case 'KITCHEN': return 5;
+          case 'HK_PANTRY': return 6;
+          case 'ROOM_MINIBAR': return 7;
+          default: return 8;
         }
       };
       const activeLocs = raw
@@ -230,7 +234,7 @@ export default function PosPayCashModal({
           is_active: Boolean(l.is_active),
         }))
         .sort((a: any, b: any) => {
-          const diff = typeRank(a.location_type) - typeRank(b.location_type);
+          const diff = locRank(a) - locRank(b);
           return diff !== 0 ? diff : a.id - b.id;
         });
       setStockLocations(activeLocs);
@@ -685,10 +689,35 @@ export default function PosPayCashModal({
               {configError && <p role="alert" className="text-xs text-amber-800">{configError} CASH tetap tersedia.</p>}
               {editable && (
                 <div className="flex items-center justify-between gap-2">
-                  <button type="button" disabled={configLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
-                    className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40">Muat ulang metode</button>
-                  <button type="button" disabled={stockLocLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setStockLocOpen(true); if (stockLocations.length === 0) void loadStockLocations();}}
-                    className="text-xs font-semibold text-amber-800 underline disabled:opacity-40">Pilih / ganti gudang stok</button>
+                  <button
+                    type="button"
+                    disabled={configLoading}
+                    title="Muat ulang metode pembayaran"
+                    aria-label="Muat ulang metode"
+                    onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
+                    className="w-8 h-8 rounded-lg border border-stone-200 bg-stone-50 hover:bg-emerald-50 hover:border-emerald-300 text-emerald-800 flex items-center justify-center transition-colors cursor-pointer disabled:opacity-40"
+                  >
+                    <svg className={`w-4 h-4 ${configLoading ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                    </svg>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={stockLocLoading}
+                    title="Pilih / ganti gudang stok (Default: RCP)"
+                    aria-label="Pilih / ganti gudang stok"
+                    onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setStockLocOpen(v => !v); if (stockLocations.length === 0) void loadStockLocations();}}
+                    className={`h-8 px-2.5 rounded-lg border flex items-center gap-1.5 text-[11px] font-bold transition-colors cursor-pointer disabled:opacity-40 ${
+                      stockLocOpen
+                        ? 'bg-amber-100 border-amber-400 text-amber-900'
+                        : 'bg-amber-50/70 border-amber-200 hover:bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
+                    </svg>
+                    <span>{stockLocations.find(l => String(l.id) === selectedLocationId)?.code || 'RCP'}</span>
+                  </button>
                 </div>
               )}
               {stockLocOpen && (
