@@ -79,6 +79,7 @@ interface Props {
       guestName?: string | null;
       roomNumber?: string | null;
       reservationStatus?: string | null;
+      editOrderId?: number | null;
     },
   ) => void;
   /** Signal refresh scoped: versi bump + reservation_id target (POSOrderPanel refetch hanya scope cocok) */

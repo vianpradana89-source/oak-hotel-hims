@@ -6695,7 +6695,10 @@ app.get('/api/pos/orders', async (req, res) => {
 
     const orderQuery = reservationFilter
       ? `
-        SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
+        SELECT po.*,
+               COUNT(poi.id) AS item_count,
+               COALESCE(SUM(poi.quantity), 0) AS total_qty,
+               (SELECT ps.payment_method FROM pos_settlements ps WHERE ps.pos_order_id = po.id AND ps.status = 'SUCCESS' ORDER BY ps.id DESC LIMIT 1) AS payment_method
         FROM pos_orders po
         LEFT JOIN pos_order_items poi ON poi.order_id = po.id
         WHERE po.property_id = $1 AND po.reservation_id = $2
@@ -6703,7 +6706,10 @@ app.get('/api/pos/orders', async (req, res) => {
         GROUP BY po.id
         ORDER BY po.created_at DESC`
       : `
-        SELECT po.*, COUNT(poi.id) AS item_count, COALESCE(SUM(poi.quantity), 0) AS total_qty
+        SELECT po.*,
+               COUNT(poi.id) AS item_count,
+               COALESCE(SUM(poi.quantity), 0) AS total_qty,
+               (SELECT ps.payment_method FROM pos_settlements ps WHERE ps.pos_order_id = po.id AND ps.status = 'SUCCESS' ORDER BY ps.id DESC LIMIT 1) AS payment_method
         FROM pos_orders po
         LEFT JOIN pos_order_items poi ON poi.order_id = po.id
         WHERE po.property_id = $1

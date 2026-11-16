@@ -78,6 +78,9 @@ interface PosModalProps {
    * agar event tidak menembus ke dialog di bawah.
    */
   payCashModalPresent?: boolean;
+  /** ID order yang langsung dibuka dalam mode edit saat modal POS dibuka */
+  initialEditOrderId?: number | null;
+  onConsumedInitialEditOrderId?: () => void;
 }
 
 /**
@@ -113,6 +116,8 @@ export default function PosModal({
   onOpenCashPayment,
   paidOrderId,
   payCashModalPresent = false,
+  initialEditOrderId = null,
+  onConsumedInitialEditOrderId,
 }: PosModalProps) {
   const panelRef = useRef<HTMLDivElement>(null);
   const previouslyFocused = useRef<HTMLElement | null>(null);
@@ -315,6 +320,8 @@ export default function PosModal({
             onOrderEdited={onOrderEdited}
             onOpenCashPayment={onOpenCashPayment}
             paidOrderId={paidOrderId}
+            initialEditOrderId={initialEditOrderId}
+            onConsumedInitialEditOrderId={onConsumedInitialEditOrderId}
           />
         </div>
       </div>

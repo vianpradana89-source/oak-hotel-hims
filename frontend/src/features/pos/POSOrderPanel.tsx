@@ -11,10 +11,11 @@ import { formatPosOrderDisplayRef } from './posFormatUtils';
 export interface PosOrderLineItem {
   id: number;
   menu_item_id: number;
-  name: string;
+  name?: string;
+  item_name_snapshot?: string;
   quantity: number;
   unit_price: number | string;
-  line_total: number | string;
+  line_total?: number | string;
 }
 
 export interface PosOrderRecord {
@@ -26,6 +27,7 @@ export interface PosOrderRecord {
   guest_name?: string | null;
   reservation_id?: number | null;
   created_at?: string | null;
+  payment_method?: string | null;
   items: PosOrderLineItem[];
 }
 
@@ -48,6 +50,7 @@ export interface POSOrderPanelProps {
       guestName?: string | null;
       roomNumber?: string | null;
       reservationStatus?: string | null;
+      editOrderId?: number | null;
     },
   ) => void;
   /** true saat user boleh melihat panel POS (di-resolve di parent: atomic key + platform super admin) */
@@ -186,18 +189,23 @@ export default function POSOrderPanel({
   // badge status (OPEN/PAID/DISCOUNTED/VOIDED) di kartu detail selalu
   // mencerminkan data terkini setelah refetch pasca-pembayaran.
   const [selectedOrderId, setSelectedOrderId] = useState<number | null>(null);
+  const [copiedOrderId, setCopiedOrderId] = useState<number | null>(null);
+  const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const [selectedReceiptOrder, setSelectedReceiptOrder] = useState<{
     orderId: number;
     propertyId: number;
     orderNumber: string;
   } | null>(null);
 
-  // Turunkan selectedOrder dari orders — bila ID sudah tidak ada di daftar,
-  // detail otomatis tertutup.
-  const selectedOrder = useMemo<PosOrderRecord | null>(() => {
-    if (selectedOrderId == null) return null;
-    return orders.find((o) => o.id === selectedOrderId) ?? null;
-  }, [orders, selectedOrderId]);
+  const activeOrders = useMemo(
+    () => orders.filter((o) => String(o.status || '').toUpperCase() !== 'VOIDED'),
+    [orders]
+  );
+
+  const totalAllOrdersAmount = useMemo(
+    () => activeOrders.reduce((sum, o) => sum + Number(o.total_amount || 0), 0),
+    [activeOrders]
+  );
 
   // ── Gate "Tambah Order": status reservasi aktif + izin edit POS ─────────
   // Hanya reservasi yang masih aktif (BOOKED / CHECKED_IN) yang boleh
@@ -332,6 +340,51 @@ const handleConfirmRoomCharge = useCallback(async () => {
     void fetchOrders();
   }, [posOrdersRefreshVersion, posOrdersRefreshReservationId, reservationId, fetchOrders]);
 
+  const handleCopyOrderRef = useCallback((orderId: number, textToCopy: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(textToCopy);
+    }
+    setCopiedOrderId(orderId);
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+      window.setTimeout(() => {
+        setCopiedOrderId((prev) => (prev === orderId ? null : prev));
+      }, 1500);
+    }
+  }, []);
+
+  const handleDeleteOrder = useCallback(async (order: PosOrderRecord) => {
+    if (!canEditPos || deletingOrderId !== null) return;
+    const displayRef = formatPosOrderDisplayRef(order.id) || order.order_number;
+    const statusUpper = String(order.status || 'OPEN').toUpperCase();
+    const confirmMsg =
+      statusUpper === 'PAID' || statusUpper === 'BILLED_TO_ROOM'
+        ? `Hapus order ${displayRef} (${statusUpper})?\nData penjualan/tagihan kamar terkait akan dibatalkan dan stok produk otomatis dikembalikan ke gudang.`
+        : `Hapus order ${displayRef} (${statusUpper})?\nOrder ini akan dihapus dari daftar pesanan reservasi.`;
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
+      if (!window.confirm(confirmMsg)) return;
+    }
+    setDeletingOrderId(order.id);
+    try {
+      const res = await authFetch(`/api/pos/orders/${order.id}?property_id=${propertyId}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        if (selectedOrderId === order.id) setSelectedOrderId(null);
+        await fetchOrders();
+        if (onOrderBilledToRoom) {
+          onOrderBilledToRoom({ orderId: order.id, reservationId });
+        }
+      } else {
+        window.alert(data?.message || `Gagal menghapus order ${displayRef}.`);
+      }
+    } catch (err: any) {
+      window.alert(err?.message || `Gagal menghapus order ${displayRef}.`);
+    } finally {
+      setDeletingOrderId(null);
+    }
+  }, [canEditPos, deletingOrderId, authFetch, propertyId, selectedOrderId, fetchOrders, onOrderBilledToRoom, reservationId]);
+
   // ─── Render ─────────────────────────────────────────────────────────────────
   // Panel hanya render bila parent mengizinkan (canViewPos di-resolve di
   // detail view: atomic 'pos.view' ATAU platform super admin effective).
@@ -358,8 +411,8 @@ const handleConfirmRoomCharge = useCallback(async () => {
           </div>
           {canEditPos && (
             <span className="ml-2 block text-[11px] text-stone-400">
-              {orders.length > 0
-                ? `${orders.length} order tercatat`
+              {activeOrders.length > 0
+                ? `${activeOrders.length} order tercatat`
                 : 'Belum ada order'}
             </span>
           )}
@@ -397,213 +450,262 @@ const handleConfirmRoomCharge = useCallback(async () => {
       )}
 
       {/* Empty */}
-      {!loading && !error && orders.length === 0 && (
+      {!loading && !error && activeOrders.length === 0 && (
         <div className="py-6 text-center text-xs text-stone-400">
           Belum ada pesanan POS untuk reservasi ini.
         </div>
       )}
 
-      {/* Order List */}
-      {!loading && !error && orders.length > 0 && (
-        <div className="space-y-2 max-h-64 overflow-y-auto pr-1">
-          {orders.map((order) => (
-            <div
-              key={order.id}
-              className={`p-3 rounded-lg border text-xs transition-colors cursor-pointer ${
-                selectedOrderId === order.id
-                  ? 'border-emerald-300 bg-emerald-50'
-                  : 'border-stone-200 bg-stone-50 hover:bg-stone-100'
-              }`}
-              onClick={() => setSelectedOrderId(order.id)}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <span className="font-mono font-semibold text-stone-800">
-                  {formatPosOrderDisplayRef(order.id) || order.order_number}
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                    order.status === 'OPEN'
-                      ? 'bg-amber-100 text-amber-800 border border-amber-300'
-                      : order.status === 'BILLED_TO_ROOM'
-                      ? 'bg-blue-100 text-blue-800 border border-blue-300'
-                      : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                  }`}
-                >
-                  {order.status === 'OPEN'
-                    ? 'Belum Dibayar'
-                    : order.status === 'BILLED_TO_ROOM'
-                    ? 'Ditagihkan ke Kamar'
-                    : order.status}
-                </span>
-              </div>
-              <div className="text-stone-500">
-                {order.table_number ? `Meja ${order.table_number}` : 'Takeaway'}
-                {order.guest_name ? ` · ${order.guest_name}` : ''}
-                {order.created_at ? ` · ${formatDate(order.created_at)}` : ''}
-              </div>
-              <div className="mt-1 flex items-center justify-between">
-                <span className="font-bold text-stone-900">
-                  {formatIDR(Number(order.total_amount || 0))}
-                </span>
-                <div className="flex items-center gap-1.5">
-                  {/* Status pelunasan pendamping untuk order yang ditagihkan ke folio kamar */}
-                  {order.status === 'BILLED_TO_ROOM' && folioRemainingBalance != null && (
-                    <span
-                      className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                        folioRemainingBalance <= 0
-                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                          : 'bg-amber-100 text-amber-800 border border-amber-300'
-                      }`}
-                    >
-                      {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
+      {/* Unified Order Cards (Gambar 5 style) */}
+      {!loading && !error && activeOrders.length > 0 && (
+        <div className="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+          {activeOrders.map((order) => {
+            const displayRef = formatPosOrderDisplayRef(order.id) || order.order_number;
+            const statusUpper = String(order.status || 'OPEN').toUpperCase();
+            const isDeletingThis = deletingOrderId === order.id;
+            const isBuktiExpanded = selectedOrderId === order.id;
+            const itemsSummary =
+              Array.isArray(order.items) && order.items.length > 0
+                ? order.items
+                    .map((it) => `${it.name || it.item_name_snapshot || 'Menu'} x${it.quantity}`)
+                    .join(', ')
+                : 'Detail item tidak tersedia';
+            const methodLabel =
+              statusUpper === 'PAID'
+                ? (order.payment_method
+                    ? String(order.payment_method).charAt(0).toUpperCase() + String(order.payment_method).slice(1).toLowerCase()
+                    : 'Cash')
+                : statusUpper === 'BILLED_TO_ROOM'
+                  ? 'Tagihan Kamar'
+                  : 'Belum Dibayar';
+
+            return (
+              <div
+                key={order.id}
+                className="p-3 rounded-xl border border-stone-200 bg-white shadow-2xs text-xs space-y-2 transition-colors hover:border-stone-300"
+              >
+                {/* Baris 1: Nomor Order + Copy Icon | Badge Status */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-mono font-bold text-blue-700 text-xs sm:text-[13px] truncate" title={order.order_number}>
+                      {displayRef}
                     </span>
-                  )}
-                  {/* Tagihkan ke Kamar hanya untuk order OPEN + status reservasi aktif (BOOKED / CHECKED_IN) */}
-                  {canEditPos && order.status === 'OPEN' && (reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
                     <button
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setRoomChargeOrder(order);
-                        setChargeNotes('');
-                        setChargeError(null);
+                        handleCopyOrderRef(order.id, displayRef);
                       }}
-                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-blue-100 text-blue-800 border border-blue-300 hover:bg-blue-200 transition-colors cursor-pointer whitespace-nowrap"
+                      title={copiedOrderId === order.id ? 'Tersalin!' : `Salin ${displayRef}`}
+                      aria-label={`Salin nomor order ${displayRef}`}
+                      className="inline-flex items-center justify-center w-5 h-5 rounded text-stone-400 hover:text-stone-700 hover:bg-stone-100 transition-colors cursor-pointer shrink-0"
                     >
-                      Tagihkan ke Kamar
+                      {copiedOrderId === order.id ? (
+                        <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                        </svg>
+                      ) : (
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                          <rect x="9" y="9" width="11" height="11" rx="2" ry="2" />
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                        </svg>
+                      )}
                     </button>
-                  )}
-                  {/* Bayar hanya untuk order OPEN + izin edit POS.
-                      Hilang saat status berubah (PAID/CANCELLED/CLOSED/BILLED_TO_ROOM). */}
-                  {canEditPos && order.status === 'OPEN' && onOpenCashPayment && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onOpenCashPayment({
-                          orderId: order.id,
-                          propertyId,
-                          orderNumber: order.order_number,
-                          totalAmount: order.total_amount,
-                          guestName: order.guest_name ?? guestName ?? null,
-                          roomNumber: roomNumber ?? null,
-                          reservationId: order.reservation_id ?? reservationId,
-                        });
-                      }}
-                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200 transition-colors cursor-pointer whitespace-nowrap"
-                    >
-                      Bayar
-                    </button>
-                  )}
+                  </div>
+
+                  <span
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide shrink-0 ${
+                      statusUpper === 'OPEN'
+                        ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                        : statusUpper === 'BILLED_TO_ROOM'
+                        ? 'bg-sky-50 text-sky-800 border border-sky-200'
+                        : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                    }`}
+                  >
+                    {statusUpper === 'OPEN'
+                      ? 'BELUM LUNAS'
+                      : statusUpper === 'BILLED_TO_ROOM'
+                      ? 'TAGIH KAMAR'
+                      : 'LUNAS'}
+                  </span>
                 </div>
-                {/* Cetak Ulang hanya untuk order PAID dengan id/property valid */}
-                {order.status === 'PAID' &&
-                  Number.isInteger(order.id) && order.id > 0 &&
-                  Number.isInteger(propertyId) && propertyId > 0 && (
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
+
+                {/* Baris 2: Tanggal & Informasi Meja / Tamu */}
+                <div className="text-[11px] text-stone-500">
+                  {order.created_at ? formatDate(order.created_at) : '—'}
+                  {' · '}
+                  {order.table_number ? `Meja ${order.table_number}` : 'Takeaway'}
+                  {order.guest_name ? ` · ${order.guest_name}` : ''}
+                </div>
+
+                {/* Baris 3: Ringkasan Item dalam 1 Blok (Gambar 5) */}
+                <div className="text-xs text-stone-700 leading-relaxed font-medium">
+                  {itemsSummary}
+                </div>
+
+                {/* Rincian per-baris bila tombol Bukti diklik pada order non-PAID */}
+                {isBuktiExpanded && Array.isArray(order.items) && order.items.length > 0 && (
+                  <div className="bg-stone-50 border border-stone-200 rounded-lg p-2 space-y-1">
+                    {order.items.map((item) => (
+                      <div key={item.id} className="flex items-center justify-between text-[11px]">
+                        <span className="text-stone-700 truncate pr-2">
+                          {item.quantity}× {item.name || item.item_name_snapshot || 'Menu'}
+                        </span>
+                        <span className="text-stone-900 font-semibold whitespace-nowrap">
+                          {formatIDR(Number(item.line_total ?? Number(item.unit_price) * item.quantity))}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Baris 4: Metode / Status Folio di Kiri & Total Nominal di Kanan */}
+                <div className="flex items-center justify-between pt-0.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-xs text-stone-500 font-medium">{methodLabel}</span>
+                    {statusUpper === 'BILLED_TO_ROOM' && folioRemainingBalance != null && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                          folioRemainingBalance <= 0
+                            ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
+                            : 'bg-amber-100 text-amber-800 border border-amber-300'
+                        }`}
+                      >
+                        {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-sm font-black text-stone-900 tabular-nums">
+                    {formatIDR(Number(order.total_amount || 0))}
+                  </span>
+                </div>
+
+                {/* Baris Aksi Cepat untuk Order OPEN (Tagihkan ke Kamar & Bayar) */}
+                {canEditPos && statusUpper === 'OPEN' && (
+                  <div className="flex items-center justify-end gap-1.5 pt-0.5">
+                    {(reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRoomChargeOrder(order);
+                          setChargeNotes('');
+                          setChargeError(null);
+                        }}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-blue-50 text-blue-800 border border-blue-200 hover:bg-blue-100 transition-colors cursor-pointer"
+                      >
+                        Tagihkan ke Kamar
+                      </button>
+                    )}
+                    {onOpenCashPayment && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onOpenCashPayment({
+                            orderId: order.id,
+                            propertyId,
+                            orderNumber: order.order_number,
+                            totalAmount: order.total_amount,
+                            guestName: order.guest_name ?? guestName ?? null,
+                            roomNumber: roomNumber ?? null,
+                            reservationId: order.reservation_id ?? reservationId,
+                          });
+                        }}
+                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer"
+                      >
+                        Bayar
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                {/* Baris 5: Tombol Aksi Terpadu — Bukti | Ubah | Hapus (Gambar 5) */}
+                <div className="grid grid-cols-3 gap-1.5 pt-1.5 border-t border-stone-100">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (
+                        statusUpper === 'PAID' &&
+                        Number.isInteger(order.id) &&
+                        order.id > 0 &&
+                        Number.isInteger(propertyId) &&
+                        propertyId > 0
+                      ) {
                         setSelectedReceiptOrder({
                           orderId: order.id,
                           propertyId,
                           orderNumber: order.order_number,
                         });
+                      } else {
+                        setSelectedOrderId((prev) => (prev === order.id ? null : order.id));
+                      }
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold text-stone-600 hover:text-stone-900 hover:bg-stone-100 transition-colors cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                    </svg>
+                    <span>Bukti</span>
+                  </button>
+
+                  {canEditPos ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenPosModal(propertyId, reservationId, {
+                          guestName,
+                          roomNumber,
+                          reservationStatus,
+                          editOrderId: order.id,
+                        });
                       }}
-                      className="px-2 py-0.5 rounded text-[10px] font-bold bg-stone-100 text-stone-700 border border-stone-300 hover:bg-stone-200 transition-colors cursor-pointer whitespace-nowrap"
+                      disabled={isDeletingThis}
+                      className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/70 transition-colors disabled:opacity-40 cursor-pointer"
                     >
-                      Cetak Ulang
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                      </svg>
+                      <span>Ubah</span>
                     </button>
+                  ) : (
+                    <div />
                   )}
+
+                  {canEditPos ? (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void handleDeleteOrder(order);
+                      }}
+                      disabled={isDeletingThis || deletingOrderId !== null}
+                      className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 transition-colors disabled:opacity-40 cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                      <span>{isDeletingThis ? 'Menghapus…' : 'Hapus'}</span>
+                    </button>
+                  ) : (
+                    <div />
+                  )}
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
 
-      {/* Bukti Pemesanan — snapshot of selected order */}
-      {!loading && selectedOrder && (
-        <div className="border-t border-stone-100 pt-3">
-          <h4 className="text-xs font-bold text-stone-700 mb-2 flex items-center gap-1.5">
-            <svg className="w-3.5 h-3.5 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-            </svg>
-            Bukti Pemesanan — {formatPosOrderDisplayRef(selectedOrder.id) || selectedOrder.order_number}
-          </h4>
-
-          <div className="bg-stone-50 border border-stone-200 rounded-lg p-3 space-y-1.5">
-            {/* Order metadata */}
-            <div className="flex items-center justify-between text-[11px] text-stone-500">
-              <span>
-                {selectedOrder.table_number ? `Meja ${selectedOrder.table_number}` : 'Takeaway'}
-                {selectedOrder.guest_name ? ` — ${selectedOrder.guest_name}` : ''}
-              </span>
-              <span>
-                {selectedOrder.status === 'OPEN' ? (
-                  <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 border border-amber-300 rounded-full font-bold text-[10px]">
-                    Belum Dibayar
-                  </span>
-                ) : selectedOrder.status === 'BILLED_TO_ROOM' ? (
-                  <span className="inline-flex items-center gap-1 flex-wrap">
-                  <span className="px-1.5 py-0.5 bg-blue-100 text-blue-800 border border-blue-300 rounded-full font-bold text-[10px]">
-                    Ditagihkan ke Kamar
-                  </span>
-                  {folioRemainingBalance != null && (
-                    <span
-                      className={`px-1.5 py-0.5 rounded-full font-bold text-[10px] ${
-                        folioRemainingBalance <= 0
-                          ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                          : 'bg-amber-100 text-amber-800 border border-amber-300'
-                      }`}
-                    >
-                      {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
-                    </span>
-                  )}
-                  </span>
-                ) : (
-                  <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-full font-bold text-[10px]">
-                    {selectedOrder.status}
-                  </span>
-                )}
-              </span>
-            </div>
-
-            {/* Items */}
-            {Array.isArray(selectedOrder.items) && selectedOrder.items.length > 0 ? (
-              <div className="space-y-1">
-                {selectedOrder.items.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between text-[11px] py-0.5"
-                  >
-                    <span className="text-stone-700 truncate pr-2">
-                      {item.quantity}× {item.name}
-                    </span>
-                    <span className="text-stone-900 font-medium whitespace-nowrap">
-                      {formatIDR(Number(item.line_total ?? Number(item.unit_price) * item.quantity))}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <p className="text-[11px] text-stone-400">Detail item tidak tersedia.</p>
-            )}
-
-            {/* Total */}
-            <div className="border-t border-stone-200 pt-2 mt-2 flex items-center justify-between">
-              <span className="text-xs font-bold text-stone-700">Total</span>
-              <span className="text-sm font-black text-emerald-800">
-                {formatIDR(Number(selectedOrder.total_amount || 0))}
-              </span>
-            </div>
-
-            {/* Timestamp */}
-            {selectedOrder.created_at && (
-              <div className="text-[10px] text-stone-400 text-right">
-                {formatDate(selectedOrder.created_at)}
-              </div>
-            )}
-          </div>
+      {/* Footer Total Semua Order (Gambar 5) */}
+      {!loading && !error && activeOrders.length > 0 && (
+        <div className="border-t border-stone-200 pt-2.5 flex items-center justify-between text-xs">
+          <span className="font-bold text-stone-700">Total Semua Order</span>
+          <span className="font-black text-sm text-stone-900 tabular-nums">
+            {formatIDR(totalAllOrdersAmount)}
+          </span>
         </div>
       )}
 

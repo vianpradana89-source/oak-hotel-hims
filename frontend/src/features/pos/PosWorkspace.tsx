@@ -2,8 +2,26 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import GuestPicker from './GuestPicker';
 import {buildPosOrderDraft, buildPosOrderEditPayload, previewPosDraft, normalizeDiscountInput, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams, type PosOrderEditItem} from './posOrderDraft';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
-import { formatPosOrderDisplayRef } from './posFormatUtils';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
+
+function formatPosOrderDisplayRef(orderId: number | string | null | undefined): string {
+  if (orderId === null || orderId === undefined || orderId === '') return '';
+  const num = typeof orderId === 'number' ? orderId : parseInt(String(orderId).trim(), 10);
+  if (!Number.isFinite(num) || num <= 0) {
+    const raw = String(orderId).trim();
+    if (/^POS-\d+$/i.test(raw)) {
+      const parsed = parseInt(raw.slice(4), 10);
+      if (Number.isFinite(parsed) && parsed > 0) {
+        const s = String(parsed);
+        return `POS-${s.length < 6 ? s.padStart(6, '0') : s}`;
+      }
+    }
+    return raw;
+  }
+  const str = String(num);
+  const padded = str.length < 6 ? str.padStart(6, '0') : str;
+  return `POS-${padded}`;
+}
 
 export interface PosMenuVariant {
   name: string;
@@ -188,6 +206,9 @@ interface Props {
    * tombol "Bayar" hilang.
    */
   paidOrderId?: PosOrderPaidSignal | null;
+  /** ID order yang langsung dibuka dalam mode edit saat PosWorkspace tampil */
+  initialEditOrderId?: number | null;
+  onConsumedInitialEditOrderId?: () => void;
 }
 
 /**
@@ -381,11 +402,19 @@ export default function PosWorkspace({
   canPickGuest = false,
   onOpenCashPayment,
   paidOrderId,
+  initialEditOrderId = null,
+  onConsumedInitialEditOrderId,
 }: Props) {
   const [activeTab, setActiveTab] = useState<'register' | 'orders'>('register');
   const [selectedCategory, setSelectedCategory] = useState<string>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [orderFilterQuery, setOrderFilterQuery] = useState<string>('');
+  const [orderStatusTab, setOrderStatusTab] = useState<'ALL' | 'PROSES' | 'SELESAI'>('ALL');
+  const [orderDatePreset, setOrderDatePreset] = useState<'ALL' | 'TODAY' | 'YESTERDAY' | 'LAST_7_DAYS' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'>('ALL');
+  const [orderCustomDateFrom, setOrderCustomDateFrom] = useState<string>('');
+  const [orderCustomDateTo, setOrderCustomDateTo] = useState<string>('');
+  const [showDateFilterMenu, setShowDateFilterMenu] = useState<boolean>(false);
+  const [copiedOrderId, setCopiedOrderId] = useState<number | null>(null);
   const [deletedOrderIds, setDeletedOrderIds] = useState<number[]>([]);
   const [deletingOrderId, setDeletingOrderId] = useState<number | null>(null);
   const [expandedNoteKeys, setExpandedNoteKeys] = useState<Record<string, boolean>>({});
@@ -396,10 +425,66 @@ export default function PosWorkspace({
         !deletedOrderIds.includes(Number(order.id))
     );
   }, [posOrders, deletedOrderIds]);
-  const filteredPosOrders = useMemo(() => {
-    if (!orderFilterQuery.trim()) return visiblePosOrders;
-    const q = orderFilterQuery.trim().toLowerCase();
+
+  const dateFilteredPosOrders = useMemo(() => {
+    if (orderDatePreset === 'ALL') return visiblePosOrders;
+    const toJakartaYmd = (d: Date): string => {
+      try {
+        return new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Jakarta',
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        }).format(d);
+      } catch {
+        return d.toISOString().slice(0, 10);
+      }
+    };
+    const now = new Date();
+    const todayYmd = toJakartaYmd(now);
+    const yesterdayDate = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+    const yesterdayYmd = toJakartaYmd(yesterdayDate);
+    const sevenDaysAgoDate = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
+    const sevenDaysAgoYmd = toJakartaYmd(sevenDaysAgoDate);
+    const [yrStr, moStr] = todayYmd.split('-');
+    const yr = Number(yrStr);
+    const mo = Number(moStr);
+    const thisMonthYm = `${yrStr}-${moStr}`;
+    const lastMonthYr = mo === 1 ? yr - 1 : yr;
+    const lastMonthMo = mo === 1 ? 12 : mo - 1;
+    const lastMonthYm = `${String(lastMonthYr).padStart(4, '0')}-${String(lastMonthMo).padStart(2, '0')}`;
+
     return visiblePosOrders.filter((order) => {
+      if (!order.created_at) return false;
+      const parsed = new Date(order.created_at);
+      if (Number.isNaN(parsed.getTime())) return false;
+      const orderYmd = toJakartaYmd(parsed);
+      switch (orderDatePreset) {
+        case 'TODAY':
+          return orderYmd === todayYmd;
+        case 'YESTERDAY':
+          return orderYmd === yesterdayYmd;
+        case 'LAST_7_DAYS':
+          return orderYmd >= sevenDaysAgoYmd && orderYmd <= todayYmd;
+        case 'THIS_MONTH':
+          return orderYmd.slice(0, 7) === thisMonthYm;
+        case 'LAST_MONTH':
+          return orderYmd.slice(0, 7) === lastMonthYm;
+        case 'CUSTOM': {
+          if (orderCustomDateFrom && orderYmd < orderCustomDateFrom) return false;
+          if (orderCustomDateTo && orderYmd > orderCustomDateTo) return false;
+          return true;
+        }
+        default:
+          return true;
+      }
+    });
+  }, [visiblePosOrders, orderDatePreset, orderCustomDateFrom, orderCustomDateTo]);
+
+  const searchAndDateFilteredOrders = useMemo(() => {
+    if (!orderFilterQuery.trim()) return dateFilteredPosOrders;
+    const q = orderFilterQuery.trim().toLowerCase();
+    return dateFilteredPosOrders.filter((order) => {
       const shortRef = formatPosOrderDisplayRef(order.id).toLowerCase();
       const orderNum = (order.order_number || '').toLowerCase();
       const guest = (order.guest_name || '').toLowerCase();
@@ -413,7 +498,34 @@ export default function PosWorkspace({
         idStr.includes(q)
       );
     });
-  }, [visiblePosOrders, orderFilterQuery]);
+  }, [dateFilteredPosOrders, orderFilterQuery]);
+
+  const prosesOrdersCount = useMemo(
+    () => searchAndDateFilteredOrders.filter((o) => String(o.status || 'OPEN').toUpperCase() === 'OPEN').length,
+    [searchAndDateFilteredOrders]
+  );
+
+  const selesaiOrdersCount = useMemo(
+    () =>
+      searchAndDateFilteredOrders.filter((o) => {
+        const s = String(o.status || 'PAID').toUpperCase();
+        return s === 'PAID' || s === 'BILLED_TO_ROOM';
+      }).length,
+    [searchAndDateFilteredOrders]
+  );
+
+  const filteredPosOrders = useMemo(() => {
+    if (orderStatusTab === 'PROSES') {
+      return searchAndDateFilteredOrders.filter((o) => String(o.status || 'OPEN').toUpperCase() === 'OPEN');
+    }
+    if (orderStatusTab === 'SELESAI') {
+      return searchAndDateFilteredOrders.filter((o) => {
+        const s = String(o.status || 'PAID').toUpperCase();
+        return s === 'PAID' || s === 'BILLED_TO_ROOM';
+      });
+    }
+    return searchAndDateFilteredOrders;
+  }, [searchAndDateFilteredOrders, orderStatusTab]);
   const [cart, setCart] = useState<PosCartLine[]>([]);
   const [tableNumber, setTableNumber] = useState('');
   const [guestName, setGuestName] = useState(() => guestNameInitial ?? '');
@@ -1411,7 +1523,7 @@ export default function PosWorkspace({
           return false;
         }
         const status = String(order.status ?? '').toUpperCase();
-        if (status !== 'OPEN' && status !== 'PAID' && status !== 'VOIDED') {
+        if (status !== 'OPEN' && status !== 'PAID' && status !== 'VOIDED' && status !== 'BILLED_TO_ROOM') {
           const msg = `Status order tidak dikenal: ${status}`;
           reportSyncFailure(msg);
           setEditLoading(false);
@@ -1641,6 +1753,26 @@ export default function PosWorkspace({
     setActiveTab('register');
     void loadOrderDetail(orderId);
   };
+
+  useEffect(() => {
+    if (initialEditOrderId != null && Number.isInteger(initialEditOrderId) && initialEditOrderId > 0 && propertyId !== null) {
+      openEditOrderInRegister(initialEditOrderId);
+      onConsumedInitialEditOrderId?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialEditOrderId, propertyId]);
+
+  const handleCopyOrderRef = useCallback((orderId: number, textToCopy: string) => {
+    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
+      void navigator.clipboard.writeText(textToCopy);
+    }
+    setCopiedOrderId(orderId);
+    if (typeof window !== 'undefined' && typeof window.setTimeout === 'function') {
+      window.setTimeout(() => {
+        setCopiedOrderId((prev) => (prev === orderId ? null : prev));
+      }, 1500);
+    }
+  }, []);
 
   /**
    * saveEditedOrder() — PUT /api/pos/orders/:id dengan body dari
@@ -3863,7 +3995,7 @@ export default function PosWorkspace({
                                     className="w-5 h-5 flex items-center justify-center rounded border border-gray-300 bg-white text-gray-600 text-xs hover:bg-gray-100 disabled:opacity-30 cursor-pointer"
                                     aria-label="Kurangi jumlah"
                                   >−</button>
-                                  <span className="w-5 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
+                                  <span className="w-8 text-center text-xs font-bold text-gray-900">{line.quantity}</span>
                                   <button
                                     type="button"
                                     onClick={() => updateEditCartQuantity(idx, 1)}
@@ -4708,28 +4840,163 @@ export default function PosWorkspace({
 
           {/* ── Tabel Riwayat (disembunyikan saat editor terbuka) ───────────── */}
             <div className="bg-white border border-gray-200 rounded-2xl overflow-hidden shadow-xs flex flex-col flex-1 min-h-0">
-              <div className="p-3 border-b border-gray-200 bg-gray-50/50 flex items-center justify-between gap-3">
-                <div className="relative flex-1 max-w-sm">
-                  <input
-                    type="text"
-                    value={orderFilterQuery}
-                    onChange={(e) => setOrderFilterQuery(e.target.value)}
-                    placeholder="Cari nomor order (mis. POS-000112), tamu, meja..."
-                    className="w-full text-xs sm:text-sm pl-8 pr-3 py-1.5 rounded-lg border border-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-600 bg-white"
-                  />
-                  <svg className="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                  </svg>
+              <div className="p-3 border-b border-gray-200 bg-gray-50/50 flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[16rem]">
+                  <div className="relative flex-1 max-w-xs min-w-[12rem]">
+                    <input
+                      type="text"
+                      value={orderFilterQuery}
+                      onChange={(e) => setOrderFilterQuery(e.target.value)}
+                      placeholder="Cari nomor order (mis. POS-000112), tamu, meja..."
+                      className="w-full text-xs sm:text-sm pl-8 pr-3 py-1.5 rounded-lg border border-gray-300 focus:outline-none focus:ring-1 focus:ring-purple-600 bg-white"
+                    />
+                    <svg className="w-4 h-4 text-gray-400 absolute left-2.5 top-1/2 -translate-y-1/2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                    </svg>
+                  </div>
+
+                  {/* Filter Tanggal (Gambar 2) */}
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setShowDateFilterMenu((v) => !v)}
+                      className="inline-flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg border border-gray-300 bg-white hover:bg-gray-50 text-xs font-semibold text-gray-700 shadow-2xs cursor-pointer min-w-[9.5rem]"
+                    >
+                      <span>
+                        {orderDatePreset === 'ALL'
+                          ? 'Semua Tanggal'
+                          : orderDatePreset === 'TODAY'
+                          ? 'Hari Ini'
+                          : orderDatePreset === 'YESTERDAY'
+                          ? 'Kemarin'
+                          : orderDatePreset === 'LAST_7_DAYS'
+                          ? '7 Hari Terakhir'
+                          : orderDatePreset === 'THIS_MONTH'
+                          ? 'Bulan Ini'
+                          : orderDatePreset === 'LAST_MONTH'
+                          ? 'Bulan Lalu'
+                          : 'Sesuaikan'}
+                      </span>
+                      <svg className="w-3.5 h-3.5 text-gray-400 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                      </svg>
+                    </button>
+
+                    {showDateFilterMenu && (
+                      <div className="absolute left-0 mt-1.5 w-48 rounded-xl bg-white border border-gray-200 shadow-lg p-1.5 z-30 space-y-0.5">
+                        {([
+                          { id: 'ALL', label: 'Semua Tanggal' },
+                          { id: 'TODAY', label: 'Hari Ini' },
+                          { id: 'YESTERDAY', label: 'Kemarin' },
+                          { id: 'LAST_7_DAYS', label: '7 Hari Terakhir' },
+                          { id: 'THIS_MONTH', label: 'Bulan Ini' },
+                          { id: 'LAST_MONTH', label: 'Bulan Lalu' },
+                          { id: 'CUSTOM', label: 'Sesuaikan' },
+                        ] as const).map((opt) => {
+                          const active = orderDatePreset === opt.id;
+                          return (
+                            <button
+                              key={opt.id}
+                              type="button"
+                              onClick={() => {
+                                setOrderDatePreset(opt.id);
+                                setShowDateFilterMenu(false);
+                              }}
+                              className={`w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-xs font-medium text-left transition-colors cursor-pointer ${
+                                active
+                                  ? 'bg-purple-600 text-white font-semibold'
+                                  : 'text-gray-700 hover:bg-gray-100'
+                              }`}
+                            >
+                              <span className="w-3.5 h-3.5 inline-flex items-center justify-center shrink-0">
+                                {active && (
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )}
+                              </span>
+                              <span>{opt.label}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+
+                  {orderDatePreset === 'CUSTOM' && (
+                    <div className="flex items-center gap-1.5 text-xs">
+                      <input
+                        type="date"
+                        aria-label="Dari tanggal"
+                        value={orderCustomDateFrom}
+                        onChange={(e) => setOrderCustomDateFrom(e.target.value)}
+                        className="px-2 py-1 rounded-lg border border-gray-300 bg-white text-xs text-gray-700"
+                      />
+                      <span className="text-gray-400">–</span>
+                      <input
+                        type="date"
+                        aria-label="Sampai tanggal"
+                        value={orderCustomDateTo}
+                        onChange={(e) => setOrderCustomDateTo(e.target.value)}
+                        className="px-2 py-1 rounded-lg border border-gray-300 bg-white text-xs text-gray-700"
+                      />
+                    </div>
+                  )}
+
+                  {(orderFilterQuery || orderDatePreset !== 'ALL' || orderStatusTab !== 'ALL') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setOrderFilterQuery('');
+                        setOrderDatePreset('ALL');
+                        setOrderCustomDateFrom('');
+                        setOrderCustomDateTo('');
+                        setOrderStatusTab('ALL');
+                        setShowDateFilterMenu(false);
+                      }}
+                      className="text-xs text-gray-500 hover:text-gray-700 underline cursor-pointer"
+                    >
+                      Reset Filter
+                    </button>
+                  )}
                 </div>
-                {orderFilterQuery && (
+
+                {/* Sub-tab Proses (OPEN) & Selesai (PAID / BILLED_TO_ROOM) */}
+                <div className="inline-flex items-center rounded-xl bg-gray-200/70 p-1 gap-1">
                   <button
                     type="button"
-                    onClick={() => setOrderFilterQuery('')}
-                    className="text-xs text-gray-500 hover:text-gray-700 underline cursor-pointer"
+                    onClick={() => setOrderStatusTab('ALL')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      orderStatusTab === 'ALL'
+                        ? 'bg-white text-purple-900 shadow-2xs'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
                   >
-                    Reset Filter
+                    Semua ({searchAndDateFilteredOrders.length})
                   </button>
-                )}
+                  <button
+                    type="button"
+                    onClick={() => setOrderStatusTab('PROSES')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      orderStatusTab === 'PROSES'
+                        ? 'bg-amber-500 text-white shadow-2xs'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    Proses ({prosesOrdersCount})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setOrderStatusTab('SELESAI')}
+                    className={`px-3 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                      orderStatusTab === 'SELESAI'
+                        ? 'bg-emerald-600 text-white shadow-2xs'
+                        : 'text-gray-600 hover:text-gray-900'
+                    }`}
+                  >
+                    Selesai ({selesaiOrdersCount})
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto lg:flex-1 lg:min-h-0 lg:overflow-y-auto">
                 <table className="w-full text-left text-xs sm:text-sm">
@@ -4747,7 +5014,9 @@ export default function PosWorkspace({
                     {filteredPosOrders.length === 0 ? (
                       <tr>
                         <td colSpan={6} className="py-12 text-center text-gray-400">
-                          {orderFilterQuery ? 'Tidak ada order yang cocok dengan pencarian.' : 'Belum ada order POS tercatat.'}
+                          {orderFilterQuery || orderDatePreset !== 'ALL' || orderStatusTab !== 'ALL'
+                            ? 'Tidak ada order yang cocok dengan filter.'
+                            : 'Belum ada order POS tercatat.'}
                         </td>
                       </tr>
                     ) : (
@@ -4766,15 +5035,39 @@ export default function PosWorkspace({
                         return (
                         <tr key={order.id} className="hover:bg-gray-50/60 transition-colors">
                           <td className="py-3 px-4">
-                            <button
-                              type="button"
-                              onClick={() => void openEditOrderInRegister(order.id)}
-                              disabled={editLoading || isDeletingThis}
-                              title={order.order_number}
-                              className="font-mono font-semibold text-purple-900 hover:underline hover:text-purple-700 text-xs sm:text-sm cursor-pointer disabled:opacity-40 disabled:no-underline"
-                            >
-                              {displayRef}
-                            </button>
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                aria-label={order.order_number || displayRef}
+                                onClick={() => void openEditOrderInRegister(order.id)}
+                                disabled={editLoading || isDeletingThis}
+                                title={order.order_number}
+                                className="font-mono font-semibold text-purple-900 hover:underline hover:text-purple-700 text-xs sm:text-sm cursor-pointer disabled:opacity-40 disabled:no-underline"
+                              >
+                                {displayRef}
+                              </button>
+                              {order.order_number && order.order_number !== displayRef && (
+                                <span className="sr-only">{order.order_number}</span>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleCopyOrderRef(Number(order.id), displayRef)}
+                                title={copiedOrderId === Number(order.id) ? 'Tersalin!' : `Salin ${displayRef}`}
+                                aria-label={`Salin nomor order ${displayRef}`}
+                                className="inline-flex items-center justify-center w-5 h-5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 transition-colors cursor-pointer"
+                              >
+                                {copiedOrderId === Number(order.id) ? (
+                                  <svg className="w-3.5 h-3.5 text-emerald-600" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
+                                ) : (
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                    <rect x="9" y="9" width="11" height="11" rx="2" ry="2" />
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" />
+                                  </svg>
+                                )}
+                              </button>
+                            </div>
                           </td>
                           <td className="py-3 px-4 text-gray-700">
                             {order.table_number || 'Takeaway'}
@@ -4791,24 +5084,38 @@ export default function PosWorkspace({
                             </span>
                           </td>
                           <td className="py-3 px-4 text-center">
-                            {canEditPos && (
+                            <div className="inline-flex items-center justify-center gap-1">
                               <button
                                 type="button"
-                                onClick={() => void handleDeleteOrder(order)}
-                                disabled={isDeletingThis || deletingOrderId !== null || editLoading}
-                                aria-label={`Hapus order ${displayRef}`}
-                                title="Hapus order & kembalikan stok"
-                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                                onClick={() => void openEditOrderInRegister(order.id)}
+                                disabled={editLoading || isDeletingThis}
+                                aria-label={`Ubah order ${displayRef}`}
+                                title="Ubah / Lihat detail transaksi"
+                                className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-emerald-700 hover:text-emerald-800 hover:bg-emerald-50 border border-transparent hover:border-emerald-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
                               >
-                                {isDeletingThis ? (
-                                  <span className="w-3.5 h-3.5 border-2 border-red-300 border-t-red-700 rounded-full animate-spin" />
-                                ) : (
-                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                )}
+                                <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
+                                </svg>
                               </button>
-                            )}
+                              {canEditPos && (
+                                <button
+                                  type="button"
+                                  onClick={() => void handleDeleteOrder(order)}
+                                  disabled={isDeletingThis || deletingOrderId !== null || editLoading}
+                                  aria-label={`Hapus order ${displayRef}`}
+                                  title="Hapus order & kembalikan stok"
+                                  className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-red-600 hover:text-red-700 hover:bg-red-50 border border-transparent hover:border-red-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+                                >
+                                  {isDeletingThis ? (
+                                    <span className="w-3.5 h-3.5 border-2 border-red-300 border-t-red-700 rounded-full animate-spin" />
+                                  ) : (
+                                    <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  )}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                         );

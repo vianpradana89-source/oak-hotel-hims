@@ -320,6 +320,7 @@ function AppContent() {
   // Di-set null saat buka dari header (konteks umum) atau saat modal ditutup/pindah properti.
   const [posModalGuestName, setPosModalGuestName] = useState<string | null>(null);
   const [posModalRoomNumber, setPosModalRoomNumber] = useState<string | null>(null);
+  const [posModalEditOrderId, setPosModalEditOrderId] = useState<number | null>(null);
 
   // Ref sinkron status PosWorkspace — dipakai guard close/pindah konteks SEMUA jalur.
   // - pendingRef: request POST in-flight (saving) — cegah close/switch (draft akan dibuang).
@@ -436,6 +437,7 @@ function AppContent() {
     setPosModalPropertyId(null);
     setPosModalGuestName(null);
     setPosModalRoomNumber(null);
+    setPosModalEditOrderId(null);
     setPaidPosOrder(null);
   };
 
@@ -447,6 +449,7 @@ function AppContent() {
     setPosModalPropertyId(null); // konteks umum — mengikuti properti aktif
     setPosModalGuestName(null);   // tidak ada identitas reservasi
     setPosModalRoomNumber(null);
+    setPosModalEditOrderId(null);
     setShowPosModal(true);
   };
 
@@ -468,17 +471,19 @@ function AppContent() {
       guestName?: string | null;
       roomNumber?: string | null;
       reservationStatus?: string | null;
+      editOrderId?: number | null;
     },
   ) => {
     if (!posAccess.canViewPos) return;
-    // "Tambah Order" = aksi edit di policy backend (pos.create / pos.edit).
+    // "Tambah Order" / "Ubah Order" = aksi edit di policy backend (pos.create / pos.edit).
     // Tolak bila user tidak punya izin edit POS — sama dengan gate di panel.
     if (!posAccess.canEditPos) return;
+    const isEditingExistingOrder = context?.editOrderId != null && Number(context.editOrderId) > 0;
     // Validasi status reservasi terkini dari context (ditransfer dari view).
-    // Hanya reservasi aktif (BOOKED / CHECKED_IN) yang boleh menambah order.
-    // Status null/undefined/kosong/tidak dikenal → tolak.
+    // Hanya reservasi aktif (BOOKED / CHECKED_IN) yang boleh menambah order baru.
+    // Untuk membuka/mengubah order existing (editOrderId), tetap diizinkan selama di properti aktif.
     const resStatus = context?.reservationStatus;
-    if (resStatus !== 'BOOKED' && resStatus !== 'CHECKED_IN') {
+    if (!isEditingExistingOrder && resStatus !== 'BOOKED' && resStatus !== 'CHECKED_IN') {
       window.alert(
         `Tambah order tidak tersedia — reservasi berstatus ${resStatus ?? 'tidak diketahui'}. ` +
         'Hanya reservasi BOOKED atau CHECKED_IN yang dapat menambah order.'
@@ -496,6 +501,7 @@ function AppContent() {
     setPosModalPropertyId(propId);
     setPosModalGuestName(context?.guestName ?? null);
     setPosModalRoomNumber(context?.roomNumber ?? null);
+    setPosModalEditOrderId(isEditingExistingOrder ? Number(context!.editOrderId) : null);
     setShowPosModal(true);
   };
 
@@ -596,6 +602,7 @@ function AppContent() {
       setPosModalPropertyId(null);
       setPosModalGuestName(null);
       setPosModalRoomNumber(null);
+      setPosModalEditOrderId(null);
       setPaidPosOrder(null);
       setPropertyId(val);
     }
@@ -4768,6 +4775,8 @@ function AppContent() {
         onOpenCashPayment={openPosCashPayment}
         payCashModalPresent={showPosCashPayment && posCashPaymentContext !== null}
         paidOrderId={paidPosOrder}
+        initialEditOrderId={posModalEditOrderId}
+        onConsumedInitialEditOrderId={() => setPosModalEditOrderId(null)}
       />
 
       {/* Modal pembayaran CASH POS — dimiliki App, bukan consumer. */}
