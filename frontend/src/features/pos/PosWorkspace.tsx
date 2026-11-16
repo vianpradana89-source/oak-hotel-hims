@@ -413,7 +413,7 @@ export default function PosWorkspace({
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [orderFilterQuery, setOrderFilterQuery] = useState<string>('');
   const [orderStatusTab, setOrderStatusTab] = useState<'ALL' | 'PROSES' | 'SELESAI'>('ALL');
-  const [orderDatePreset, setOrderDatePreset] = useState<'ALL' | 'TODAY' | 'YESTERDAY' | 'LAST_7_DAYS' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'>('ALL');
+  const [orderDatePreset, setOrderDatePreset] = useState<'ALL' | 'TODAY' | 'YESTERDAY' | 'LAST_7_DAYS' | 'THIS_MONTH' | 'LAST_MONTH' | 'CUSTOM'>('TODAY');
   const [orderCustomDateFrom, setOrderCustomDateFrom] = useState<string>('');
   const [orderCustomDateTo, setOrderCustomDateTo] = useState<string>('');
   const [showDateFilterMenu, setShowDateFilterMenu] = useState<boolean>(false);
@@ -458,7 +458,7 @@ export default function PosWorkspace({
     const lastMonthYm = `${String(lastMonthYr).padStart(4, '0')}-${String(lastMonthMo).padStart(2, '0')}`;
 
     return visiblePosOrders.filter((order) => {
-      if (!order.created_at) return false;
+      if (!order.created_at) return true;
       const parsed = new Date(order.created_at);
       if (Number.isNaN(parsed.getTime())) return false;
       const orderYmd = toJakartaYmd(parsed);
@@ -3488,8 +3488,8 @@ export default function PosWorkspace({
         </button>
         <button
           type="button"
-          title={`Riwayat Order (${visiblePosOrders.length})`}
-          aria-label={`Riwayat Order (${visiblePosOrders.length})`}
+          title={`Riwayat Order (${filteredPosOrders.length})`}
+          aria-label={`Riwayat Order (${filteredPosOrders.length})`}
           onClick={() => {
             // Guard: blokir bila request in-flight atau draft EDIT belum disimpan
             if (editSubmittingRef.current || editDetailInFlightRef.current) {
@@ -3512,7 +3512,7 @@ export default function PosWorkspace({
           <span className="sr-only">Riwayat Order (</span>
           <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold leading-none ${
             activeTab === 'orders' ? 'bg-purple-700 text-white' : 'bg-purple-50 text-purple-800'
-          }`}>{visiblePosOrders.length}</span>
+          }`}>{filteredPosOrders.length}</span>
           <span className="sr-only">)</span>
         </button>
       </div>
