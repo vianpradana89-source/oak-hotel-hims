@@ -2290,13 +2290,35 @@ export default function PosWorkspace({
           : Array.isArray(json?.data) ? json.data
           : Array.isArray(json) ? json
           : [];
-        setStockLocations(raw.filter((l: any) => l.is_active).map((l: any) => ({
-          id: Number(l.id),
-          name: l.name || '',
-          code: l.code || '',
-          location_type: l.location_type || '',
-          is_active: Boolean(l.is_active),
-        })));
+        const typeRank = (t: string): number => {
+          switch (String(t || '').toUpperCase()) {
+            case 'POS_OUTLET': return 1;
+            case 'KITCHEN': return 2;
+            case 'BAR': return 3;
+            case 'WAREHOUSE': return 4;
+            case 'HK_PANTRY': return 5;
+            case 'ROOM_MINIBAR': return 6;
+            default: return 7;
+          }
+        };
+        const activeLocs = raw
+          .filter((l: any) => l.is_active)
+          .map((l: any) => ({
+            id: Number(l.id),
+            name: l.name || '',
+            code: l.code || '',
+            location_type: l.location_type || '',
+            is_active: Boolean(l.is_active),
+          }))
+          .sort((a: any, b: any) => {
+            const diff = typeRank(a.location_type) - typeRank(b.location_type);
+            return diff !== 0 ? diff : a.id - b.id;
+          });
+        setStockLocations(activeLocs);
+        setStockLocationId((prev) => {
+          if (prev && activeLocs.some((l: any) => String(l.id) === prev)) return prev;
+          return activeLocs.length > 0 ? String(activeLocs[0].id) : '';
+        });
       })
       .catch(() => { /* silent — non-critical, dropdown hanya tampil kosong */ });
   }, [propertyId, authFetch]);
@@ -2969,7 +2991,7 @@ export default function PosWorkspace({
       // (useEffect pada `saving` tetap ada sebagai sinkronisasi cadangan.)
       reportPendingToParent();
     }
-  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason, svcToggleOn, taxToggleOn, pricingSettings, draftPreview]);
+  }, [busy, cart, propertyId, tableNumber, guestName, reservationId, pickedGuest, authFetch, onOrderCreated, onRefresh, canEditPos, canDiscountPos, guestPhone, orderNotes, orderDiscountType, orderDiscountInput, discountReason, svcToggleOn, taxToggleOn, pricingSettings, draftPreview, stockLocationId]);
 
   // Retry handler: membaca snapshot (key + body terseri) PERSIS.
   // handleSaveOrder otomatis memilih snapshot bila fingerprint draft cocok;
@@ -3928,7 +3950,7 @@ export default function PosWorkspace({
                       className="block mt-1 w-full text-xs border border-amber-200 rounded-lg p-2 bg-white text-gray-700 disabled:opacity-60"
                     >
                       {stockLocations.map(loc => (
-                        <option key={loc.id} value={loc.id}>
+                        <option key={loc.id} value={String(loc.id)}>
                           {loc.code || loc.id} — {loc.name}{loc.is_active ? '' : ' (nonaktif)'}
                         </option>
                       ))}

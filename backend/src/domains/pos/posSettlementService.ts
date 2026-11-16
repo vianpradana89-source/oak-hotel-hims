@@ -1,4 +1,4 @@
-﻿/**
+/**
  * POS PAYMENT SETTLEMENT â€” Tahap 2: Service Settlement Pembayaran Langsung CASH
  *
  * Kontrak (lihat handoff):
@@ -829,6 +829,9 @@ export async function payPosOrder(
       }
       if (stockErr?.code === 'NO_STOCK_LOCATION') {
         throw new PosSettlementError(400, 'NO_STOCK_LOCATION', stockErr.message);
+      }
+      if (stockErr?.code === 'LOCATION_NOT_FOUND' || stockErr?.code === 'LOCATION_INACTIVE') {
+        throw new PosSettlementError(stockErr.statusCode || 400, stockErr.code, stockErr.message);
       }
       throw stockErr;
     }

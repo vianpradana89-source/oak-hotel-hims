@@ -6808,6 +6808,19 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
     methodInput.paymentReference = ref || null;
   }
 
+  let parsedLocationId: number | undefined = undefined;
+  if (req.body.location_id !== undefined && req.body.location_id !== null && String(req.body.location_id).trim() !== '') {
+    const locNum = Number(req.body.location_id);
+    if (!Number.isInteger(locNum) || locNum <= 0 || locNum > 2147483647) {
+      return res.status(400).json({
+        status: 'ERROR',
+        code: 'VALIDATION_ERROR',
+        message: 'location_id must be a positive integer'
+      });
+    }
+    parsedLocationId = locNum;
+  }
+
   // Property scope: user token properti harus cocok (kecuali super admin platform).
   // Dijalankan SEBELUM service/replay, menggunakan aktor terautentikasi.
   try {
@@ -6863,6 +6876,7 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
       correlationId: undefined,
       paymentMethod,
       methodInput: Object.keys(methodInput).length > 0 ? methodInput : undefined,
+      locationId: parsedLocationId,
     });
 
     const statusCode = result.created ? 201 : result.replayed ? 200 : 200;

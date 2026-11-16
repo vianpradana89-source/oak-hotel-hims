@@ -117,6 +117,10 @@ export default function PosPayCashModal({
   const [qrisLoadedUrl, setQrisLoadedUrl] = useState<string | null>(null);
   const [qrisError, setQrisError] = useState<string | null>(null);
   const [receiptOpen, setReceiptOpen] = useState(false);
+  const [stockLocations, setStockLocations] = useState<Array<{ id: number; name: string; code: string; location_type: string; is_active: boolean }>>([]);
+  const [selectedLocationId, setSelectedLocationId] = useState<string>('');
+  const [stockLocOpen, setStockLocOpen] = useState(false);
+  const [stockLocLoading, setStockLocLoading] = useState(false);
   const activeConfig = config?.property_id === order.propertyId ? config : null;
   const activeQrisUrl = qrisImage?.propertyId === order.propertyId ? qrisImage.url : null;
   const qrisImageLoaded = !!activeQrisUrl && qrisLoadedUrl === activeQrisUrl;
@@ -195,6 +199,52 @@ export default function PosPayCashModal({
 
   // ── Payment flow ──────────────────────────────────────────────────────────
 
+  const loadStockLocations = useCallback(async (): Promise<void> => {
+    if (!order.propertyId || stockLocLoading) return;
+    setStockLocLoading(true);
+    try {
+      const res = await authFetch(`/api/pos/stock-locations?property_id=${order.propertyId}`);
+      const json = res.ok ? await res.json().catch(() => null) : null;
+      const raw = Array.isArray(json?.data?.locations) ? json.data.locations
+        : Array.isArray(json?.data) ? json.data
+        : Array.isArray(json) ? json
+        : [];
+      const typeRank = (t: string): number => {
+        switch (String(t || '').toUpperCase()) {
+          case 'POS_OUTLET': return 1;
+          case 'KITCHEN': return 2;
+          case 'BAR': return 3;
+          case 'WAREHOUSE': return 4;
+          case 'HK_PANTRY': return 5;
+          case 'ROOM_MINIBAR': return 6;
+          default: return 7;
+        }
+      };
+      const activeLocs = raw
+        .filter((l: any) => l.is_active)
+        .map((l: any) => ({
+          id: Number(l.id),
+          name: l.name || '',
+          code: l.code || '',
+          location_type: l.location_type || '',
+          is_active: Boolean(l.is_active),
+        }))
+        .sort((a: any, b: any) => {
+          const diff = typeRank(a.location_type) - typeRank(b.location_type);
+          return diff !== 0 ? diff : a.id - b.id;
+        });
+      setStockLocations(activeLocs);
+      setSelectedLocationId((prev) => {
+        if (prev && activeLocs.some((l: any) => String(l.id) === prev)) return prev;
+        return activeLocs.length > 0 ? String(activeLocs[0].id) : '';
+      });
+    } catch {
+      // ignore
+    } finally {
+      setStockLocLoading(false);
+    }
+  }, [authFetch, order.propertyId, stockLocLoading]);
+
   /**
    * Jalankan request pembayaran.
    * - Pengajuan baru: buat snapshot (UUID key + body), lalu POST.
@@ -251,7 +301,8 @@ export default function PosPayCashModal({
       key = generateKey();
       try {
         const created = createPaySnapshot({orderId, propertyId, key, amount: order.totalAmount,
-          method, cashInput, reference, config: activeConfig, qrisImageLoaded, verified});
+          method, cashInput, reference, config: activeConfig, qrisImageLoaded, verified,
+          locationId: selectedLocationId ? Number(selectedLocationId) : undefined});
         snapshotRef.current = created;
         bodyJson = created.bodyJson;
       } catch (err) {
@@ -404,6 +455,14 @@ export default function PosPayCashModal({
           receiptOrderIdRef.current = null;
           unresolvedRef.current = false;
           onUnresolvedChange?.(false);
+          if (
+            errJson?.code === 'INSUFFICIENT_STOCK_BALANCE' ||
+            errJson?.code === 'NO_STOCK_LOCATION' ||
+            errJson?.code === 'LOCATION_INACTIVE'
+          ) {
+            setStockLocOpen(true);
+            void loadStockLocations();
+          }
         }
       }
       // ── 5xx / server error ───────────────────────────────────────────────
@@ -443,7 +502,7 @@ export default function PosPayCashModal({
     onRefresh,
     onRequestPending,
     onUnresolvedChange,
-    method, cashInput, reference, activeConfig, qrisImageLoaded, verified,
+    method, cashInput, reference, activeConfig, qrisImageLoaded, verified, selectedLocationId, loadStockLocations,
   ]);
 
   // Konfirmasi (tombol): sinkron sebelum await.
@@ -624,8 +683,46 @@ export default function PosPayCashModal({
               </div>
               {configLoading && <p className="text-xs text-stone-500">Memuat metode pembayaran…</p>}
               {configError && <p role="alert" className="text-xs text-amber-800">{configError} CASH tetap tersedia.</p>}
-              {editable && <button type="button" disabled={configLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
-                className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40">Muat ulang metode</button>}
+              {editable && (
+                <div className="flex items-center justify-between gap-2">
+                  <button type="button" disabled={configLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setVerified(false); setReloadConfig(v => v + 1);}}
+                    className="text-xs font-semibold text-emerald-800 underline disabled:opacity-40">Muat ulang metode</button>
+                  <button type="button" disabled={stockLocLoading} onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setStockLocOpen(true); if (stockLocations.length === 0) void loadStockLocations();}}
+                    className="text-xs font-semibold text-amber-800 underline disabled:opacity-40">Pilih / ganti gudang stok</button>
+                </div>
+              )}
+              {stockLocOpen && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50/50 p-3 space-y-1.5">
+                  <label className="block text-[11px] font-bold uppercase text-amber-800">
+                    Gudang Pemotongan Stok POS
+                    <select
+                      aria-label="Gudang Pemotongan Stok POS"
+                      value={selectedLocationId}
+                      disabled={!editable || !canEditPos || stockLocLoading}
+                      onChange={(e) => {
+                        if (pendingRef.current || unresolvedRef.current) return;
+                        setSelectedLocationId(e.target.value);
+                        snapshotRef.current = null;
+                        setFailMessage(null);
+                      }}
+                      className="mt-1 block w-full text-xs border border-amber-300 rounded-lg p-2 bg-white text-stone-800 font-normal disabled:opacity-60"
+                    >
+                      {stockLocations.length === 0 ? (
+                        <option value="">{stockLocLoading ? 'Memuat daftar gudang…' : 'Pilih gudang stok…'}</option>
+                      ) : (
+                        stockLocations.map((loc) => (
+                          <option key={loc.id} value={String(loc.id)}>
+                            {loc.code || loc.id} — {loc.name}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </label>
+                  <p className="text-[10px] text-amber-700">
+                    Pilih gudang tempat stok produk tersedia sebelum menekan Konfirmasi Pembayaran.
+                  </p>
+                </div>
+              )}
               {method === 'CASH' ? (
                 <div className="space-y-2">
                   <label className="block text-xs font-semibold text-stone-700">Uang diterima (Rp)

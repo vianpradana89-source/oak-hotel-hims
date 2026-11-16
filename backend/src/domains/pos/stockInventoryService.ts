@@ -7652,7 +7652,10 @@ export async function deductStockForPosSale(
 
   // 4. Resolusi lokasi persediaan target (outlet kasir / dapur / gudang)
   let targetLocationId: number | null = null;
-  if (params.locationId && Number.isInteger(Number(params.locationId)) && Number(params.locationId) > 0) {
+  const explicitLocationOverride = Boolean(
+    params.locationId && Number.isInteger(Number(params.locationId)) && Number(params.locationId) > 0
+  );
+  if (explicitLocationOverride) {
     targetLocationId = Number(params.locationId);
   } else {
     // Ambil dari pos_orders.location_id jika tersedia
@@ -7698,7 +7701,7 @@ export async function deductStockForPosSale(
 
   // Validasi keaktifan lokasi stok
   const locValRes = await client.query(
-    `SELECT id, is_active, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
+    `SELECT id, is_active, code, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
     [targetLocationId, propertyId]
   );
   if (locValRes.rowCount === 0) {
@@ -7713,16 +7716,27 @@ export async function deductStockForPosSale(
       { statusCode: 400, code: 'LOCATION_INACTIVE' }
     );
   }
+  const targetLocDisplay = locValRes.rows[0].code
+    ? `${locValRes.rows[0].code} — ${locValRes.rows[0].name}`
+    : String(locValRes.rows[0].name || `#${targetLocationId}`);
+
+  if (explicitLocationOverride) {
+    await client.query(
+      `UPDATE pos_orders SET location_id = $1 WHERE id = $2 AND property_id = $3`,
+      [targetLocationId, orderId, propertyId]
+    );
+  }
 
   // 4b. Resolusi lokasi khusus bahan baku (BOM/resep)
   // ingredients dipotong dari kitchen location (default KITCHEN pertama aktif),
   // kecuali params.kitchenLocationId diberikan eksplisit.
   let ingredientLocationId: number;
+  let ingredientLocDisplay = targetLocDisplay;
   if (params.kitchenLocationId && Number.isInteger(Number(params.kitchenLocationId)) && Number(params.kitchenLocationId) > 0) {
     ingredientLocationId = Number(params.kitchenLocationId);
     // Validasi lokasi kitchen
     const ingLocValRes = await client.query(
-      `SELECT id, is_active, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
+      `SELECT id, is_active, code, name FROM stock_locations WHERE id = $1 AND property_id = $2`,
       [ingredientLocationId, propertyId]
     );
     if (ingLocValRes.rowCount === 0) {
@@ -7737,19 +7751,26 @@ export async function deductStockForPosSale(
         { statusCode: 400, code: 'LOCATION_INACTIVE' }
       );
     }
+    ingredientLocDisplay = ingLocValRes.rows[0].code
+      ? `${ingLocValRes.rows[0].code} — ${ingLocValRes.rows[0].name}`
+      : String(ingLocValRes.rows[0].name || `#${ingredientLocationId}`);
   } else {
     // Default: KITCHEN pertama aktif, atau fallback ke targetLocationId bila tidak ada KITCHEN
     const kitchenLocRes = await client.query(
-      `SELECT id FROM stock_locations
+      `SELECT id, code, name FROM stock_locations
         WHERE property_id = $1 AND is_active = TRUE AND location_type = 'KITCHEN'
         ORDER BY id ASC LIMIT 1`,
       [propertyId]
     );
     if (kitchenLocRes.rows.length > 0) {
       ingredientLocationId = Number(kitchenLocRes.rows[0].id);
+      ingredientLocDisplay = kitchenLocRes.rows[0].code
+        ? `${kitchenLocRes.rows[0].code} — ${kitchenLocRes.rows[0].name}`
+        : String(kitchenLocRes.rows[0].name || `#${ingredientLocationId}`);
     } else {
       // Fallback: pakai lokasi target (POS_OUTLET default) — backward compat
       ingredientLocationId = targetLocationId;
+      ingredientLocDisplay = targetLocDisplay;
     }
   }
 
@@ -7770,6 +7791,7 @@ export async function deductStockForPosSale(
 
   for (const item of sortedItems) {
     const itemLoc = item.is_ingredient ? ingredientLocationId : targetLocationId;
+    const itemLocDisplay = item.is_ingredient ? ingredientLocDisplay : targetLocDisplay;
     const balRes = await client.query(
       `SELECT quantity FROM stock_balances
         WHERE property_id = $1 AND product_id = $2 AND location_id = $3
@@ -7780,10 +7802,29 @@ export async function deductStockForPosSale(
     if (currentBalance < item.quantity - 0.000001) {
       const curFormatted = currentBalance.toFixed(3);
       const reqFormatted = item.quantity.toFixed(3);
-      const locLabel = itemLoc === targetLocationId ? targetLocationId : ingredientLocationId;
+      const altBalRes = await client.query(
+        `SELECT sl.id, sl.code, sl.name, sb.quantity
+           FROM stock_balances sb
+           JOIN stock_locations sl ON sl.id = sb.location_id AND sl.property_id = sb.property_id
+          WHERE sb.property_id = $1
+            AND sb.product_id = $2
+            AND sb.location_id <> $3
+            AND sl.is_active = TRUE
+            AND sb.quantity > 0
+          ORDER BY sb.quantity DESC, sl.id ASC`,
+        [propertyId, item.product_id, itemLoc]
+      );
+      const altLocations = altBalRes.rows.map((r: any) => ({
+        location_id: Number(r.id),
+        location_label: r.code ? `${r.code} — ${r.name}` : String(r.name),
+        quantity: parseFloat(r.quantity).toFixed(3),
+      }));
+      const altHint = altLocations.length > 0
+        ? `. Stok tersedia di gudang lain: ${altLocations.map((a) => `${a.location_label} (${a.quantity})`).join(', ')} — silakan pilih gudang tersebut atau lakukan transfer stok`
+        : '';
       throw Object.assign(
         new Error(
-          `Saldo persediaan tidak mencukupi untuk ${item.is_ingredient ? 'bahan baku' : 'produk'} "${item.name}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}`
+          `Saldo persediaan tidak mencukupi untuk ${item.is_ingredient ? 'bahan baku' : 'produk'} "${item.name}" di gudang "${itemLocDisplay}". Saldo saat ini: ${curFormatted}, dibutuhkan: ${reqFormatted}${altHint}`
         ),
         {
           statusCode: 422,
@@ -7793,8 +7834,10 @@ export async function deductStockForPosSale(
             product_name: item.name,
             current_balance: curFormatted,
             required_quantity: reqFormatted,
-            location_id: targetLocationId,
+            location_id: itemLoc,
+            location_label: itemLocDisplay,
             is_ingredient: item.is_ingredient,
+            available_locations: altLocations,
           },
         }
       );
@@ -7856,6 +7899,7 @@ export async function deductStockForPosSale(
     const deltaStr = deltaQty.toFixed(3);
     const nextBalance = Math.max(0, check.currentBalance + deltaQty);
     const nextBalanceStr = nextBalance.toFixed(3);
+    const effectiveLocId = check.targetLoc;
 
     const movRes = await client.query(
       `INSERT INTO stock_movements (
@@ -7872,7 +7916,7 @@ export async function deductStockForPosSale(
         opId,
         propertyId,
         check.product_id,
-        targetLocationId,
+        effectiveLocId,
         deltaStr,
         check.base_unit_code,
         check.unitCost,
@@ -7883,20 +7927,20 @@ export async function deductStockForPosSale(
     // Update stock_balances secara aman (mencegah pelanggaran constraint chk_stock_balance_non_negative)
     const checkExisting = await client.query(
       `SELECT id FROM stock_balances WHERE property_id = $1 AND product_id = $2 AND location_id = $3`,
-      [propertyId, check.product_id, targetLocationId]
+      [propertyId, check.product_id, effectiveLocId]
     );
     if (checkExisting.rows.length > 0) {
       await client.query(
         `UPDATE stock_balances
             SET quantity = $1, updated_at = NOW()
           WHERE property_id = $2 AND product_id = $3 AND location_id = $4`,
-        [nextBalanceStr, propertyId, check.product_id, targetLocationId]
+        [nextBalanceStr, propertyId, check.product_id, effectiveLocId]
       );
     } else {
       await client.query(
         `INSERT INTO stock_balances (property_id, product_id, location_id, quantity, updated_at)
          VALUES ($1, $2, $3, $4, NOW())`,
-        [propertyId, check.product_id, targetLocationId, nextBalanceStr]
+        [propertyId, check.product_id, effectiveLocId, nextBalanceStr]
       );
     }
 

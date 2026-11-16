@@ -94,6 +94,7 @@ export function createPaySnapshot(input: {
   orderId: number; propertyId: number; amount: number | string; key: string;
   method: PosPaymentMethod; cashInput: string; reference: string;
   config: PosPaymentConfig | null; qrisImageLoaded: boolean; verified: boolean;
+  locationId?: number | null;
 }): PaySnapshot {
   const amount = String(input.amount);
   const minor = cents(amount);
@@ -105,6 +106,10 @@ export function createPaySnapshot(input: {
   if (!isMethodAvailable(input.method, cfg)) throw new Error('Metode belum dikonfigurasi untuk properti ini.');
   let cashReceived: string | null = null, paymentReference: string | null = null;
   const body: Record<string, string | number | null> = {property_id: input.propertyId, payment_method: input.method};
+  if (input.locationId !== undefined && input.locationId !== null) {
+    if (!integerId(input.locationId)) throw new Error('Lokasi gudang stok tidak valid.');
+    body.location_id = input.locationId;
+  }
   if (input.method === 'CASH') {
     cashReceived = input.cashInput.trim();
     const tendered = cents(cashReceived);
