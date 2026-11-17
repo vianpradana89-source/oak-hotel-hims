@@ -335,6 +335,30 @@ export function createIdentityExtractionRouter(pool: Pool, uploadDir: string): R
          context: context || 'CRM_EDIT'
        });
 
+      if (reservation_id != null && reservation_id !== '' && Number.isInteger(Number(reservation_id)) && Number(reservation_id) > 0) {
+        const actorDisplay = user?.full_name || user?.username || (user as any)?.name || 'Staff';
+        const auditAction = relink_reservation_primary_guest
+          ? 'PRIMARY_GUEST_IDENTITY_REPLACED'
+          : 'IDENTITY_DOCUMENT_CONFIRMED';
+        await pool.query(
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+           VALUES ('IDENTITY', $1, 'RESERVATION', $2, $3, $4, $5)`,
+          [
+            auditAction,
+            String(Number(reservation_id)),
+            JSON.stringify({
+              reservation_id: Number(reservation_id),
+              identity_type: String(identity_type || 'KTP'),
+              context: context || 'CRM_EDIT',
+              actor: actorDisplay,
+              actor_name_snapshot: actorDisplay,
+            }),
+            String(user!.id),
+            propertyId,
+          ]
+        ).catch(() => {});
+      }
+
       return res.json({
         success: true,
         data: guest,

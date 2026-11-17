@@ -1,6 +1,5 @@
 import { useState, useEffect, useLayoutEffect, useRef, useCallback, useMemo } from 'react';
 import { normalizeHotelDate } from './calendarDates';
-import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { safeFetchJson } from './calendarApi';
 import { EditReservationModal } from './EditReservationModal';
 import { ComplimentaryActionModal } from './ComplimentaryActionModal';
@@ -77,7 +76,7 @@ export default function QuickReservationDetail({
   onCheckin,
   onCheckout,
   onCancel,
-  onOpenStayChange,
+  onOpenStayChange: _onOpenStayChange,
   onRefresh,
   complimentaryRefreshVersion,
   complimentaryRefreshReservationId,
@@ -90,7 +89,6 @@ export default function QuickReservationDetail({
 }: QuickReservationDetailProps) {
   const [fullData, setFullData] = useState<any>(null);
   const [loading, setLoading] = useState<boolean>(true);
-  const [isMoreActionsOpen, setIsMoreActionsOpen] = useState<boolean>(false);
   const [isThermalModalOpen, setIsThermalModalOpen] = useState<boolean>(false);
   const [isRegistrationModalOpen, setIsRegistrationModalOpen] = useState<boolean>(false);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
@@ -105,7 +103,6 @@ export default function QuickReservationDetail({
 
   const [popoverPos, setPopoverPos] = useState<{ top: number; left: number }>({ top: 100, left: 100 });
   const popoverRef = useRef<HTMLDivElement>(null);
-  const moreActionsRef = useRef<HTMLDivElement>(null);
 
   // Strict property resolution: active property context OR canonical reservation.property_id
   // NEVER silently default to Property 1.
@@ -209,7 +206,7 @@ export default function QuickReservationDetail({
   // Position recalculation when content, loading, or viewport size changes
   useLayoutEffect(() => {
     updatePosition();
-  }, [updatePosition, loading, fullData, inspectionFeedback, isMoreActionsOpen]);
+  }, [updatePosition, loading, fullData, inspectionFeedback]);
 
   useEffect(() => {
     window.addEventListener('resize', updatePosition);
@@ -233,11 +230,7 @@ export default function QuickReservationDetail({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         if (topOverlayPresent()) return; // Overlay teratas — jangan tutup reservasi
-        if (isMoreActionsOpen) {
-          setIsMoreActionsOpen(false);
-        } else {
-          onClose();
-        }
+        onClose();
       }
     };
 
@@ -253,9 +246,6 @@ export default function QuickReservationDetail({
         ) return;
         onClose();
       }
-      if (moreActionsRef.current && !moreActionsRef.current.contains(target)) {
-        setIsMoreActionsOpen(false);
-      }
     };
 
     document.addEventListener('keydown', handleKeyDown);
@@ -264,7 +254,7 @@ export default function QuickReservationDetail({
       document.removeEventListener('keydown', handleKeyDown);
       document.removeEventListener('mousedown', handlePointerDown);
     };
-  }, [onClose, isMoreActionsOpen]);
+  }, [onClose]);
 
   const rawData = fullData || reservation;
   const data = useMemo(() => {
@@ -922,6 +912,22 @@ export default function QuickReservationDetail({
           <div className="flex items-center gap-2">
             {isBooked && (
               <>
+                <button
+                  type="button"
+                  disabled={isPropertyMissing}
+                  onClick={() => {
+                    if (isPropertyMissing) return;
+                    setIsEditModalOpen(true);
+                  }}
+                  className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors whitespace-nowrap ${
+                    isPropertyMissing
+                      ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
+                      : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
+                  }`}
+                >
+                  Edit
+                </button>
+
                 {onCheckin && (
                   <button
                     type="button"
@@ -935,7 +941,7 @@ export default function QuickReservationDetail({
                       onCheckin(data.id, data.primary_guest?.primary_guest_id || null);
                       onClose();
                     }}
-                    className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 ${
+                    className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center justify-center gap-1.5 whitespace-nowrap ${
                       isPropertyMissing
                         ? 'bg-stone-200 text-stone-400 border border-stone-300 cursor-not-allowed'
                         : isCheckinEligible
@@ -955,21 +961,24 @@ export default function QuickReservationDetail({
                   </button>
                 )}
 
-                <button
-                  type="button"
-                  disabled={isPropertyMissing}
-                  onClick={() => {
-                    if (isPropertyMissing) return;
-                    setIsEditModalOpen(true);
-                  }}
-                  className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors ${
-                    isPropertyMissing
-                      ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
-                      : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
-                  }`}
-                >
-                  Edit
-                </button>
+                {onCancel && (
+                  <button
+                    type="button"
+                    disabled={isPropertyMissing}
+                    onClick={() => {
+                      if (isPropertyMissing) return;
+                      onCancel(data.id);
+                      onClose();
+                    }}
+                    className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors whitespace-nowrap ${
+                      isPropertyMissing
+                        ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
+                        : 'bg-rose-50/70 hover:bg-rose-100 text-rose-700 border-rose-200 cursor-pointer'
+                    }`}
+                  >
+                    Batalkan
+                  </button>
+                )}
               </>
             )}
 
@@ -982,13 +991,13 @@ export default function QuickReservationDetail({
                     if (isPropertyMissing) return;
                     setIsEditModalOpen(true);
                   }}
-                  className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors ${
+                  className={`px-3.5 py-2 font-semibold text-xs rounded-xl border transition-colors whitespace-nowrap ${
                     isPropertyMissing
                       ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
                       : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
                   }`}
                 >
-                  Edit
+                  Edit Reservasi
                 </button>
 
                 {data.require_checkout_inspection && (!data.checkout_inspection || data.checkout_inspection.clearance_state === 'REQUESTED' || data.checkout_inspection.clearance_state === 'INSPECTING') ? (
@@ -997,7 +1006,7 @@ export default function QuickReservationDetail({
                       type="button"
                       disabled={requestingInspection || isPropertyMissing}
                       onClick={handleRequestInspection}
-                      className="flex-1 py-2 px-3 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                      className="flex-1 py-2 px-3 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer whitespace-nowrap"
                     >
                       {requestingInspection ? 'Meminta...' : 'Minta Pemeriksaan'}
                     </button>
@@ -1005,7 +1014,7 @@ export default function QuickReservationDetail({
                     <button
                       type="button"
                       disabled
-                      className="flex-1 py-2 px-3 bg-stone-200 text-stone-500 font-bold text-xs rounded-xl cursor-not-allowed"
+                      className="flex-1 py-2 px-3 bg-stone-200 text-stone-500 font-bold text-xs rounded-xl cursor-not-allowed whitespace-nowrap"
                       title="Pemeriksaan Housekeeping sedang berjalan"
                     >
                       ⏳ Cek Housekeeping
@@ -1021,7 +1030,7 @@ export default function QuickReservationDetail({
                         onCheckout(data.id);
                         onClose();
                       }}
-                      className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors ${
+                      className={`flex-1 py-2 px-3 font-bold text-xs rounded-xl shadow-xs transition-colors whitespace-nowrap ${
                         isPropertyMissing
                           ? 'bg-stone-200 text-stone-400 border border-stone-300 cursor-not-allowed'
                           : 'bg-amber-700 hover:bg-amber-600 text-white cursor-pointer'
@@ -1031,87 +1040,12 @@ export default function QuickReservationDetail({
                     </button>
                   )
                 )}
-
-                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
-                  <button
-                    type="button"
-                    disabled={isPropertyMissing}
-                    onClick={() => {
-                      if (isPropertyMissing) return;
-                      onOpenStayChange(data);
-                      onClose();
-                    }}
-                    className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors ${
-                      isPropertyMissing
-                        ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
-                        : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
-                    }`}
-                  >
-                    {CHECKOUT_DATE_CHANGE_LABEL}
-                  </button>
-                )}
               </>
             )}
 
             {(isCheckedOut || isCancelled) && (
               <div className="flex-1 py-1.5 px-3 bg-stone-100 text-stone-600 rounded-xl text-xs font-semibold text-center border border-stone-200">
                 {isCheckedOut ? '● Reservasi telah selesai' : '● Reservasi telah dibatalkan'}
-              </div>
-            )}
-
-            {/* More Actions Dropdown (⋯ Lainnya) */}
-            {isBooked && (
-              <div className="relative" ref={moreActionsRef}>
-                <button
-                  type="button"
-                  disabled={isPropertyMissing}
-                  onClick={() => {
-                    if (isPropertyMissing) return;
-                    setIsMoreActionsOpen((prev) => !prev);
-                  }}
-                  className={`px-2.5 py-2 font-bold text-xs rounded-xl border transition-colors ${
-                    isPropertyMissing
-                      ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
-                      : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
-                  }`}
-                  title="Menu Lainnya"
-                >
-                  ⋯
-                </button>
-
-                {isMoreActionsOpen && (
-                  <div className="absolute right-0 bottom-full mb-1 w-48 bg-white rounded-xl shadow-xl border border-stone-200 py-1.5 z-70 text-xs font-medium text-stone-700 animate-in fade-in zoom-in-95 duration-100">
-                    {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMoreActionsOpen(false);
-                          onOpenStayChange(data);
-                          onClose();
-                        }}
-                        className="w-full text-left px-3.5 py-2 hover:bg-stone-50 text-stone-700 cursor-pointer flex items-center gap-2"
-                      >
-                        <span>📅</span>
-                        <span>{CHECKOUT_DATE_CHANGE_LABEL}</span>
-                      </button>
-                    )}
-
-                    {isBooked && onCancel && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsMoreActionsOpen(false);
-                          onCancel(data.id);
-                          onClose();
-                        }}
-                        className="w-full text-left px-3.5 py-2 hover:bg-rose-50 text-rose-700 cursor-pointer flex items-center gap-2 border-t border-stone-100 mt-1"
-                      >
-                        <span>✕</span>
-                        <span>Batalkan Reservasi</span>
-                      </button>
-                    )}
-                  </div>
-                )}
               </div>
             )}
           </div>

@@ -4587,17 +4587,81 @@ function buildAuditSummary(module: string | null, action: string | null, payload
     }
     return null;
   };
+  const safeCleanLabel = (val: unknown): string | null => {
+    if (typeof val !== 'string') return null;
+    const trimmed = val.trim();
+    if (!trimmed || trimmed.length > 80) return null;
+    return trimmed;
+  };
   switch (ma) {
     case 'PMS:CREATE': return 'Reservasi dibuat';
-    case 'PMS:UPDATE':
-    case 'PMS:UPDATE_RESERVATION_DETAIL': return 'Reservasi diperbarui';
-    case 'PMS:CANCEL': return 'Reservasi dibatalkan';
+    case 'PMS:UPDATE': return 'Reservasi diperbarui';
+    case 'PMS:UPDATE_RESERVATION_DETAIL': {
+      if (payload && typeof payload === 'object' && payload.before && payload.after) {
+        const b = payload.before;
+        const a = payload.after;
+        const changes: string[] = [];
+        if (b.check_in && a.check_in && (String(b.check_in) !== String(a.check_in) || String(b.check_out) !== String(a.check_out))) {
+          changes.push('tanggal menginap');
+        }
+        if (b.room_id != null && a.room_id != null && Number(b.room_id) !== Number(a.room_id)) {
+          changes.push('kamar');
+        }
+        if (
+          (b.ktp_path !== undefined && a.ktp_path !== undefined && b.ktp_path !== a.ktp_path) ||
+          (b.primary_guest_id !== undefined && a.primary_guest_id !== undefined && b.primary_guest_id !== a.primary_guest_id)
+        ) {
+          changes.push('KTP/identitas');
+        }
+        if (b.discount_amount !== undefined && a.discount_amount !== undefined && Number(b.discount_amount || 0) !== Number(a.discount_amount || 0)) {
+          changes.push('diskon');
+        }
+        if (b.total_price !== undefined && a.total_price !== undefined && Number(b.total_price || 0) !== Number(a.total_price || 0) && !changes.includes('diskon')) {
+          changes.push('tarif');
+        }
+        if (changes.length > 0) {
+          return `Reservasi diperbarui (${changes.join(', ')})`;
+        }
+      }
+      return 'Reservasi diperbarui';
+    }
+    case 'PMS:ADD_ROOM': return 'Tambah kamar reservasi';
+    case 'PMS:BOOKED_RATE_CORRECTION': return 'Koreksi tarif reservasi';
+    case 'PMS:RESERVATION_SPECIAL_REQUESTS_UPDATED': return 'Catatan reservasi diperbarui';
+    case 'PMS:CANCEL':
+    case 'PMS:LEGACY_PRE_LEDGER_CANCELLATION':
+      return 'Reservasi dibatalkan';
     case 'PMS:CHECK_IN': return 'Check-in selesai';
-    case 'PMS:CHECK_OUT': return 'Check-out selesai';
+    case 'PMS:CHECK_OUT':
+    case 'PMS:COMPLETE':
+      return 'Check-out selesai';
     case 'PMS:EXTEND': return 'Check-out diperpanjang';
     case 'PMS:SHORTEN': return 'Check-out dipotong';
     case 'PMS:ROOM_MOVE': return 'Pindah kamar';
     case 'PMS:CHECKOUT_ROOM_CHECK_REQUESTED': return 'Inspeksi kamar diminta';
+    case 'PMS:CHECKOUT_INSPECTION_PASSED':
+    case 'PMS:CHECKOUT_ROOM_CHECK_PASSED':
+      return 'Inspeksi kamar selesai';
+    case 'PMS:CHECKOUT_INSPECTION_ISSUE_FOUND':
+    case 'PMS:CHECKOUT_ROOM_CHECK_ISSUE':
+      return 'Temuan inspeksi kamar';
+    case 'IDENTITY_CUSTODY:IDENTITY_CUSTODY_HELD': {
+      const docType = safeCleanLabel(payload?.document_type);
+      return docType ? `Tambah jaminan identitas (${docType})` : 'Tambah jaminan identitas';
+    }
+    case 'IDENTITY_CUSTODY:IDENTITY_CUSTODY_RETURNED': {
+      const docType = safeCleanLabel(payload?.document_type);
+      return docType ? `Kembalikan jaminan identitas (${docType})` : 'Kembalikan jaminan identitas';
+    }
+    case 'IDENTITY:IDENTITY_DOCUMENT_CONFIRMED':
+    case 'IDENTITY:IDENTITY_DOCUMENT_STORED':
+      return 'Verifikasi KTP / identitas tamu';
+    case 'IDENTITY:IDENTITY_DOCUMENT_REPLACED':
+    case 'IDENTITY:PRIMARY_GUEST_IDENTITY_REPLACED':
+    case 'GUEST_CRM:PRIMARY_GUEST_REPLACE':
+      return 'Ganti KTP / identitas tamu';
+    case 'GUEST_CRM:RESERVATION_GUEST_UPDATE':
+      return 'Data identitas tamu diperbarui';
     case 'PAYMENT:PAYMENT_CREATED': {
       const amt = safeAmount(payload);
       return amt != null ? `Pembayaran ${fmtRp(amt)}` : 'Pembayaran dicatat';
@@ -4611,22 +4675,49 @@ function buildAuditSummary(module: string | null, action: string | null, payload
       return 'Pembayaran dibatalkan';
     case 'PAYMENT:PAYMENT_EVIDENCE_UPLOADED':
       return 'Bukti pembayaran diunggah';
+    case 'PAYMENT:PAYMENT_EVIDENCE_REPLACED':
+      return 'Bukti pembayaran diganti';
+    case 'PAYMENT:PAYMENT_EVIDENCE_DEACTIVATED':
+      return 'Bukti pembayaran dihapus';
     case 'DEPOSIT:DEPOSIT_RECEIVED':
     case 'DEPOSIT:DEPOSIT_CREATED': {
       const amt = safeAmount(payload);
-      return amt != null ? `Deposit diterima ${fmtRp(amt)}` : 'Deposit diterima';
+      return amt != null ? `Tambah jaminan deposit ${fmtRp(amt)}` : 'Tambah jaminan deposit';
     }
     case 'DEPOSIT:DEPOSIT_APPLIED': {
       const amt = safeAmount(payload);
       return amt != null ? `Deposit diterapkan (${fmtRp(amt)})` : 'Deposit diterapkan';
     }
     case 'DEPOSIT:DEPOSIT_REFUNDED':
-    case 'DEPOSIT:DEPOSIT_CLEARED':
-      return 'Deposit dikembalikan';
+    case 'DEPOSIT:DEPOSIT_CLEARED': {
+      const amt = safeAmount(payload);
+      return amt != null ? `Kembalikan jaminan deposit (${fmtRp(amt)})` : 'Kembalikan jaminan deposit';
+    }
     case 'DEPOSIT:DEPOSIT_REVERSED':
-      return 'Deposit dibatalkan';
+      return 'Jaminan deposit dibatalkan';
     case 'DEPOSIT:DEPOSIT_UNAPPLIED':
       return 'Deposit tidak diterapkan';
+    case 'STAY_CHARGE:EXTRA_BED_POSTED':
+    case 'STAY_CHARGE:EXTRA_PERSON_POSTED':
+    case 'STAY_CHARGE:EARLY_CHECKIN_POSTED':
+    case 'STAY_CHARGE:LATE_CHECKOUT_POSTED':
+    case 'STAY_CHARGE:PENALTY_POSTED':
+    case 'STAY_CHARGE:OTHER_POSTED': {
+      const fe = payload?.folio_entry;
+      const desc = safeCleanLabel(fe?.description) || safeCleanLabel(payload?.description);
+      const amt = safeAmount(fe) ?? safeAmount(payload);
+      if (desc && amt != null) return `Tambah biaya: ${desc} (${fmtRp(amt)})`;
+      if (desc) return `Tambah biaya: ${desc}`;
+      return 'Tambah biaya tambahan';
+    }
+    case 'STAY_CHARGE:FOLIO_ENTRY_VOIDED': {
+      const desc = safeCleanLabel(payload?.original_entry?.description) || safeCleanLabel(payload?.description);
+      return desc ? `Batalkan biaya: ${desc}` : 'Biaya tambahan dibatalkan';
+    }
+    case 'STAY_CHARGE:FOLIO_ENTRY_CORRECTED': {
+      const desc = safeCleanLabel(payload?.replacement_entry?.description) || safeCleanLabel(payload?.original_entry?.description);
+      return desc ? `Koreksi biaya: ${desc}` : 'Biaya tambahan dikoreksi';
+    }
     default:
       return 'Aktivitas tercatat';
   }
@@ -4686,7 +4777,7 @@ app.get('/api/reservations/:id/audit', requireAuth, async (req: any, res) => {
     //    [tz param], [limit+1]. tz is parameterized (never hard-coded offset).
     const whereClause = `
       WHERE al.property_id = $1
-        AND al.entity = 'RESERVATION'
+        AND al.entity IN ('RESERVATION', 'RESERVATION_FOLIO')
         AND al.record_id = $2`;
 
     let paginationClause = '';

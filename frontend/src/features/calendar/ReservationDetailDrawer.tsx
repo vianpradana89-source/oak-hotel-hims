@@ -2,9 +2,6 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { safeFetchJson } from './calendarApi';
 import { useAuditLog } from './useAuditLog';
 import { EditReservationModal } from './EditReservationModal';
-import BookedReservationRepriceModal from './BookedReservationRepriceModal';
-import { canShowBookedRateCorrection } from './bookedReservationReprice';
-import { canShowCheckoutDateChange, CHECKOUT_DATE_CHANGE_LABEL } from './checkoutDateChange';
 import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { AddRoomToBookingModal } from './AddRoomToBookingModal';
@@ -350,7 +347,7 @@ export default function ReservationDetailDrawer({
   onCheckin,
   onCheckout,
   onCancel,
-  onOpenStayChange,
+  onOpenStayChange: _onOpenStayChange,
   checkoutInspectionRefreshVersion,
   checkoutInspectionRefreshReservationId,
   propertyBranding,
@@ -377,11 +374,9 @@ export default function ReservationDetailDrawer({
   const [folioData, setFolioData] = useState<any>(null);
   const [deletingFolioEntryId, setDeletingFolioEntryId] = useState<number | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
-  const [isRepriceModalOpen, setIsRepriceModalOpen] = useState<boolean>(false);
   const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
   const [isAddChargeModalOpen, setIsAddChargeModalOpen] = useState<boolean>(false);
   const [isAddRoomModalOpen, setIsAddRoomModalOpen] = useState<boolean>(false);
-  const [isFooterMoreActionsOpen, setIsFooterMoreActionsOpen] = useState(false);
   const [activeRoomFindings, setActiveRoomFindings] = useState<any[]>([]);
   const [isResolveModalOpen, setIsResolveModalOpen] = useState<boolean>(false);
   const [paymentDraft, setPaymentDraft] = useState<string>('');
@@ -2376,32 +2371,34 @@ export default function ReservationDetailDrawer({
                         sourceTypeUpper === 'DAY_USE_ROOM';
                       const isDeletingThis = deletingFolioEntryId === Number(ent.id);
                       return (
-                        <div key={ent.id} className="p-2.5 flex items-center justify-between text-xs gap-2">
-                          <div>
-                            <span className="font-semibold text-stone-800 text-xs">{ent.description || ent.entry_type}</span>
+                        <div key={ent.id} className="px-3 py-2.5 flex items-center justify-between text-xs gap-3">
+                          <div className="min-w-0">
+                            <span className="font-semibold text-stone-800 text-xs block truncate">{ent.description || ent.entry_type}</span>
                             <span className="text-xs text-stone-400 block font-mono mt-0.5">
                               {ent.entry_type || ent.source_type} • {ent.hotel_date || ent.created_at?.slice(0, 10) || ''}
                             </span>
                           </div>
-                          <div className="flex items-center gap-2 shrink-0">
-                            <div className="font-mono font-bold text-right text-xs">
+                          <div className="flex items-center gap-2.5 shrink-0">
+                            <div className="font-mono tabular-nums font-bold text-right text-xs">
                               {isDebit ? (
                                 <span className="text-stone-900">+Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
                               ) : (
                                 <span className="text-emerald-800">-Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
                               )}
                             </div>
-                            {!isRoomCharge && (
+                            {!isRoomCharge ? (
                               <button
                                 type="button"
                                 disabled={isDeletingThis}
                                 onClick={() => handleDeleteFolioEntry(ent)}
                                 title={`Hapus ${ent.description || ent.entry_type}`}
                                 aria-label={`Hapus ${ent.description || ent.entry_type}`}
-                                className="w-5 h-5 inline-flex items-center justify-center rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer disabled:opacity-50 text-sm leading-none font-bold"
+                                className="w-6 h-6 inline-flex items-center justify-center rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 border border-stone-200/80 hover:border-rose-200 transition-colors cursor-pointer disabled:opacity-50 text-sm leading-none shrink-0"
                               >
                                 {isDeletingThis ? '…' : '×'}
                               </button>
+                            ) : (
+                              <span className="w-6 h-6 shrink-0" aria-hidden="true" />
                             )}
                           </div>
                         </div>
@@ -2687,7 +2684,7 @@ export default function ReservationDetailDrawer({
                 reservationStatus={data.status}
                 remainingBalance={remainingBalance}
                 isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
-                onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); onRefresh(); }}
+                onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); auditLog.retry(); onRefresh(); }}
                 onGuaranteeStateChange={setGuaranteeState}
               />
             </div>
@@ -2834,7 +2831,7 @@ export default function ReservationDetailDrawer({
                 <button
                   type="button"
                   onClick={() => setIsEditModalOpen(true)}
-                  className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                  className="px-3.5 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   Edit Reservasi
                 </button>
@@ -2849,7 +2846,7 @@ export default function ReservationDetailDrawer({
                     }
                     onCheckin(data.id, detailData.primary_guest?.primary_guest_id || null);
                   }}
-                  className={`px-4 py-2 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 ${
+                  className={`px-4 py-2 font-bold text-xs rounded-xl shadow-xs transition-colors flex items-center gap-1.5 whitespace-nowrap ${
                     isCheckinReady
                       ? 'bg-emerald-800 hover:bg-emerald-700 text-white cursor-pointer'
                       : 'bg-stone-200 text-stone-400 border border-stone-300 cursor-not-allowed'
@@ -2860,54 +2857,13 @@ export default function ReservationDetailDrawer({
                   <span>Check-in Tamu</span>
                 </button>
 
-                {/* More Actions Dropdown — always present for BOOKED */}
-                <div className="relative">
-                  <button
-                    type="button"
-                    onClick={() => setIsFooterMoreActionsOpen((v) => !v)}
-                    className="px-2.5 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                  >
-                    ⋯ Lainnya
-                  </button>
-                  {isFooterMoreActionsOpen && (
-                    <div
-                      className="absolute right-0 bottom-full mb-2 w-[220px] bg-white border border-stone-200 rounded-xl shadow-lg z-50 overflow-hidden"
-                      onClick={(e) => e.stopPropagation()}
-                    >
-                      <div className="py-1">
-                        {canShowBookedRateCorrection(data) && (
-                          <button
-                            type="button"
-                            onClick={() => { setIsFooterMoreActionsOpen(false); setIsRepriceModalOpen(true); }}
-                            className="w-full text-left px-3 py-2 text-xs font-semibold text-emerald-900 hover:bg-emerald-50 transition-colors cursor-pointer"
-                          >
-                            Koreksi Tarif
-                          </button>
-                        )}
-                        {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
-                          <button
-                            type="button"
-                            onClick={() => { setIsFooterMoreActionsOpen(false); onOpenStayChange(data); }}
-                            className="w-full text-left px-3 py-2 text-xs font-semibold text-stone-700 hover:bg-stone-50 transition-colors cursor-pointer"
-                          >
-                            {CHECKOUT_DATE_CHANGE_LABEL}
-                          </button>
-                        )}
-                        {(canShowBookedRateCorrection(data) ||
-                          (onOpenStayChange && canShowCheckoutDateChange(data.status))) && (
-                          <div className="border-t border-stone-100 my-1" />
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => { setIsFooterMoreActionsOpen(false); onCancel(data.id); }}
-                          className="w-full text-left px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 transition-colors cursor-pointer"
-                        >
-                          Batalkan Reservasi
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => onCancel(data.id)}
+                  className="px-3.5 py-2 bg-rose-50/70 hover:bg-rose-100 text-rose-700 font-semibold text-xs rounded-xl border border-rose-200 transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  Batalkan
+                </button>
               </>
             )}
 
@@ -2917,20 +2873,10 @@ export default function ReservationDetailDrawer({
                 <button
                   type="button"
                   onClick={() => setIsEditModalOpen(true)}
-                  className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                  className="px-3.5 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   Edit Reservasi
                 </button>
-
-                {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
-                  <button
-                    type="button"
-                    onClick={() => onOpenStayChange(data)}
-                    className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
-                  >
-                    {CHECKOUT_DATE_CHANGE_LABEL}
-                  </button>
-                )}
 
                 {data.require_checkout_inspection && (!data.checkout_inspection || data.checkout_inspection.clearance_state === 'REQUESTED' || data.checkout_inspection.clearance_state === 'INSPECTING') ? (
                   !data.checkout_inspection ? (
@@ -2938,7 +2884,7 @@ export default function ReservationDetailDrawer({
                       type="button"
                       disabled={requestingInspection}
                       onClick={handleRequestCheckoutInspection}
-                      className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                      className="px-4 py-2 bg-emerald-800 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer whitespace-nowrap"
                     >
                       {requestingInspection ? 'Mengirim...' : 'Minta Pemeriksaan Kamar'}
                     </button>
@@ -2946,7 +2892,7 @@ export default function ReservationDetailDrawer({
                     <button
                       type="button"
                       disabled
-                      className="px-4 py-2 bg-stone-300 text-stone-500 font-bold text-xs rounded-xl cursor-not-allowed shadow-none"
+                      className="px-4 py-2 bg-stone-300 text-stone-500 font-bold text-xs rounded-xl cursor-not-allowed shadow-none whitespace-nowrap"
                       title="Pemeriksaan Housekeeping harus diselesaikan terlebih dahulu"
                     >
                       ⏳ Menunggu Housekeeping
@@ -2966,7 +2912,7 @@ export default function ReservationDetailDrawer({
                         onRefresh();
                       });
                     }}
-                    className="px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+                    className="px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer whitespace-nowrap"
                   >
                     Check-out Tamu
                   </button>
@@ -3143,19 +3089,6 @@ export default function ReservationDetailDrawer({
            </div>
          )}
 
-        {isRepriceModalOpen && activePropId && (
-          <BookedReservationRepriceModal
-            isOpen={isRepriceModalOpen}
-            onClose={() => setIsRepriceModalOpen(false)}
-            reservation={data}
-            propertyId={activePropId}
-            onSuccess={() => {
-              loadFullReservation(data.id);
-              loadFolio(data.id);
-              onRefresh();
-            }}
-          />
-        )}
         {isEditModalOpen && activePropId && (
           <EditReservationModal
             isOpen={isEditModalOpen}
@@ -3165,6 +3098,7 @@ export default function ReservationDetailDrawer({
             onSuccess={() => {
               loadFullReservation(data.id);
               loadFolio(data.id);
+              auditLog.retry();
               onRefresh();
             }}
           />
@@ -3181,6 +3115,7 @@ export default function ReservationDetailDrawer({
             onSuccess={() => {
               loadFullReservation(data.id);
               loadFolio(data.id);
+              auditLog.retry();
               onRefresh();
             }}
           />

@@ -1334,7 +1334,11 @@ export async function applyReservationEdit(
           guest_name: current.guest_name,
           guest_phone: current.guest_phone,
           has_valid_identity: Boolean(current.has_valid_identity),
-          ktp_path: current.ktp_path ?? null
+          ktp_path: current.ktp_path ?? null,
+          room_id: current.room_id ?? null,
+          check_in: current.check_in ?? null,
+          check_out: current.check_out ?? null,
+          discount_amount: Number(current.discount_amount || 0)
         },
         after: {
           total_price: finalTotalAfterDiscount,
@@ -1344,7 +1348,11 @@ export async function applyReservationEdit(
           guest_name: updatedRes.rows[0].guest_name,
           guest_phone: updatedRes.rows[0].guest_phone,
           has_valid_identity: Boolean(updatedRes.rows[0].has_valid_identity),
-          ktp_path: updatedRes.rows[0].ktp_path ?? null
+          ktp_path: updatedRes.rows[0].ktp_path ?? null,
+          room_id: updatedRes.rows[0].room_id ?? null,
+          check_in: updatedRes.rows[0].check_in ?? null,
+          check_out: updatedRes.rows[0].check_out ?? null,
+          discount_amount: Number(updatedRes.rows[0].discount_amount || 0)
         },
         price_difference: priceDifference,
         quoted_price_difference: quotedPriceDifference,
