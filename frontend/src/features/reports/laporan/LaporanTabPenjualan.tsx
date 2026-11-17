@@ -344,14 +344,11 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const totalDiscountAmount =
     discSummary?.total_discount_amount ?? roomDiscountTotal + posDiscountTotal;
 
-  const isSingleDayPeriod = Boolean(
-    data.start_date && data.end_date && data.start_date === data.end_date
-  );
-  const showRoomRateCol = !isSingleDayPeriod;
+  const showRoomRateCol = false;
 
   // Delegate specialized sub-views (4 through 11)
   if (reportMode === 'overnight_vs_dayuse') {
-    return <SubViewOvernightVsDayUse roomSales={roomSales} showRoomRateCol={showRoomRateCol} />;
+    return <SubViewOvernightVsDayUse roomSales={roomSales} showRoomRateCol={false} />;
   }
   if (reportMode === 'sumber_penjualan') {
     return <SubViewSumberPenjualan roomSales={roomSales} />;

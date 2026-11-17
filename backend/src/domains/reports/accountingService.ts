@@ -1,0 +1,866 @@
+import { Pool } from 'pg';
+
+let schemaInitialized = false;
+
+const DEFAULT_SYSTEM_ACCOUNTS: Array<{
+  account_number: string;
+  account_name: string;
+  classification: string;
+}> = [
+  { account_number: '11101', account_name: 'Kas', classification: 'Kas & Bank' },
+  { account_number: '11102', account_name: 'Bank', classification: 'Kas & Bank' },
+  { account_number: '11105', account_name: 'Transfer BCA', classification: 'Kas & Bank' },
+  { account_number: '11106', account_name: 'Qris', classification: 'Kas & Bank' },
+  {
+    account_number: '11200',
+    account_name: 'Investasi jangka pendek dan surat berharga',
+    classification: 'Investasi jangka pendek',
+  },
+  { account_number: '11300', account_name: 'Piutang', classification: 'Piutang' },
+  { account_number: '11400', account_name: 'Persediaan Barang Dagang', classification: 'Persediaan' },
+  { account_number: '12000', account_name: 'Aset Tetap', classification: 'Peralatan' },
+  { account_number: '21000', account_name: 'Hutang Usaha', classification: 'Kewajiban Lancar' },
+];
+
+export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promise<void> {
+  if (!schemaInitialized) {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS accounting_coa_accounts (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        account_number VARCHAR(32) NOT NULL,
+        account_name VARCHAR(160) NOT NULL,
+        classification VARCHAR(80) NOT NULL DEFAULT 'Kas & Bank',
+        opening_balance NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        opening_date DATE NULL,
+        is_system BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (property_id, account_number)
+      );
+
+      CREATE TABLE IF NOT EXISTS accounting_bank_accounts (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        bank_name VARCHAR(120) NOT NULL,
+        account_number VARCHAR(80) NOT NULL DEFAULT '-',
+        account_holder VARCHAR(160) NOT NULL DEFAULT '-',
+        balance NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        notes TEXT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS accounting_investor_transfers (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        source_account VARCHAR(80) NOT NULL,
+        investor_name VARCHAR(160) NOT NULL,
+        amount NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        transfer_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        notes TEXT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS accounting_fixed_assets (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        asset_name VARCHAR(180) NOT NULL,
+        category VARCHAR(100) NOT NULL DEFAULT 'Peralatan',
+        purchase_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        purchase_price NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        current_value NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        depreciation_rate NUMERIC(6, 2) NOT NULL DEFAULT 0,
+        status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+        notes TEXT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS accounting_manual_payables (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        supplier_name VARCHAR(160) NOT NULL,
+        transaction_no VARCHAR(80) NOT NULL,
+        total_amount NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        paid_amount NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        due_date DATE NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'UNPAID',
+        notes TEXT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS accounting_manual_receivables (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        customer_name VARCHAR(160) NOT NULL,
+        transaction_no VARCHAR(80) NOT NULL,
+        total_amount NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        paid_amount NUMERIC(16, 2) NOT NULL DEFAULT 0,
+        due_date DATE NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'UNPAID',
+        notes TEXT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `);
+    schemaInitialized = true;
+  }
+
+  for (const acc of DEFAULT_SYSTEM_ACCOUNTS) {
+    await pool.query(
+      `INSERT INTO accounting_coa_accounts
+         (property_id, account_number, account_name, classification, opening_balance, is_system)
+       VALUES ($1, $2, $3, $4, 0, TRUE)
+       ON CONFLICT (property_id, account_number) DO NOTHING`,
+      [propertyId, acc.account_number, acc.account_name, acc.classification]
+    );
+  }
+}
+
+export function computeDepreciatedValue(
+  purchasePrice: number,
+  currentValueOverride: number | null | undefined,
+  depreciationRatePct: number,
+  purchaseDateStr: string,
+  asOfDateStr: string
+): number {
+  const price = Math.max(0, Number(purchasePrice) || 0);
+  const baseVal =
+    currentValueOverride !== null &&
+    currentValueOverride !== undefined &&
+    Number(currentValueOverride) > 0
+      ? Number(currentValueOverride)
+      : price;
+  const rate = Math.max(0, Math.min(100, Number(depreciationRatePct) || 0));
+  if (rate <= 0) return Math.round(baseVal);
+
+  const pDate = new Date(`${String(purchaseDateStr).slice(0, 10)}T00:00:00Z`);
+  const refDate = new Date(`${String(asOfDateStr).slice(0, 10)}T00:00:00Z`);
+  if (isNaN(pDate.getTime()) || isNaN(refDate.getTime()) || refDate <= pDate) {
+    return Math.round(baseVal);
+  }
+  const elapsedYears = (refDate.getTime() - pDate.getTime()) / (365.25 * 24 * 3600 * 1000);
+  const depreciation = baseVal * (rate / 100) * elapsedYears;
+  return Math.max(0, Math.round(baseVal - depreciation));
+}
+
+export interface AccountingHubContext {
+  propertyId: number;
+  startDate: string;
+  endDate: string;
+  cashOnHand: number;
+  bankAccount: number;
+  transferBank: number;
+  qrisBalance: number;
+  cardEdc: number;
+  inventoryValue: number;
+  allTimePiutangTotal: number;
+  allTimePiutangItems: any[];
+  periodPiutangItems: any[];
+  roomSales: any[];
+  posItemSales: any[];
+  financialsData: any;
+  pricingSettings?: any;
+}
+
+export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHubContext) {
+  await ensureAccountingSchema(pool, ctx.propertyId);
+
+  const [
+    coaRes,
+    manualBanksRes,
+    investorTransfersRes,
+    fixedAssetsRes,
+    manualPayablesRes,
+    himsPurchasesRes,
+    manualReceivablesRes,
+  ] = await Promise.all([
+    pool.query(
+      `SELECT id, property_id, account_number, account_name, classification,
+              opening_balance::numeric(16,2) AS opening_balance,
+              to_char(opening_date, 'YYYY-MM-DD') AS opening_date,
+              is_system
+       FROM accounting_coa_accounts
+       WHERE property_id = $1
+       ORDER BY account_number ASC, id ASC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, bank_name, account_number, account_holder,
+              balance::numeric(16,2) AS balance, notes
+       FROM accounting_bank_accounts
+       WHERE property_id = $1
+       ORDER BY id ASC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, source_account, investor_name,
+              amount::numeric(16,2) AS amount,
+              to_char(transfer_date, 'YYYY-MM-DD') AS transfer_date,
+              notes,
+              to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD HH24:MI') AS created_at
+       FROM accounting_investor_transfers
+       WHERE property_id = $1
+       ORDER BY transfer_date DESC, id DESC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, asset_name, category,
+              to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date,
+              purchase_price::numeric(16,2) AS purchase_price,
+              current_value::numeric(16,2) AS current_value,
+              depreciation_rate::numeric(6,2) AS depreciation_rate,
+              status, notes
+       FROM accounting_fixed_assets
+       WHERE property_id = $1
+       ORDER BY purchase_date DESC, id DESC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, supplier_name, transaction_no,
+              total_amount::numeric(16,2) AS total_amount,
+              paid_amount::numeric(16,2) AS paid_amount,
+              to_char(due_date, 'YYYY-MM-DD') AS due_date,
+              status, notes,
+              to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date
+       FROM accounting_manual_payables
+       WHERE property_id = $1
+       ORDER BY created_at DESC, id DESC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT
+         t.id,
+         t.transaction_no,
+         to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
+         COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
+         COALESCE(NULLIF(BTRIM(t.description), ''), 'Pembelian Operasional / PO') AS notes,
+         COALESCE(t.net_amount, 0)::numeric(16,2) AS total_amount,
+         CASE
+           WHEN UPPER(COALESCE(t.payment_status, 'UNPAID')) = 'PAID' THEN COALESCE(t.net_amount, 0)
+           ELSE COALESCE(t.paid_amount, 0)
+         END::numeric(16,2) AS paid_amount,
+         to_char(t.due_date, 'YYYY-MM-DD') AS due_date,
+         COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Cash') AS payment_method,
+         UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status
+       FROM transactions t
+       LEFT JOIN suppliers s ON s.id = t.supplier_id
+       WHERE t.property_id = $1
+         AND t.transaction_type = 'PURCHASE'
+         AND t.deleted_at IS NULL
+         AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+       ORDER BY t.transaction_date DESC, t.id DESC
+       LIMIT 500`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, customer_name, transaction_no,
+              total_amount::numeric(16,2) AS total_amount,
+              paid_amount::numeric(16,2) AS paid_amount,
+              to_char(due_date, 'YYYY-MM-DD') AS due_date,
+              status, notes,
+              to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date
+       FROM accounting_manual_receivables
+       WHERE property_id = $1
+       ORDER BY created_at DESC, id DESC`,
+      [ctx.propertyId]
+    ),
+  ]);
+
+  // 1. Investor transfers aggregation
+  const transfersBySource = new Map<string, number>();
+  let periodInvestorTransfers = 0;
+  for (const tr of investorTransfersRes.rows) {
+    const amt = Math.max(0, Number(tr.amount) || 0);
+    const src = String(tr.source_account || '').toUpperCase();
+    const tDate = String(tr.transfer_date || '').slice(0, 10);
+    if (tDate <= ctx.endDate) {
+      transfersBySource.set(src, (transfersBySource.get(src) || 0) + amt);
+    }
+    if (tDate >= ctx.startDate && tDate <= ctx.endDate) {
+      periodInvestorTransfers += amt;
+    }
+  }
+
+  // 2. Fixed assets valuation
+  const assetsItems = fixedAssetsRes.rows.map((a: any) => {
+    const purchasePrice = Number(a.purchase_price) || 0;
+    const currentOverride = Number(a.current_value) || purchasePrice;
+    const depRate = Number(a.depreciation_rate) || 0;
+    const effectiveValue = computeDepreciatedValue(
+      purchasePrice,
+      currentOverride,
+      depRate,
+      a.purchase_date,
+      ctx.endDate
+    );
+    return {
+      id: Number(a.id),
+      property_id: Number(a.property_id || ctx.propertyId),
+      asset_name: String(a.asset_name || '-'),
+      category: String(a.category || 'Peralatan'),
+      purchase_date: String(a.purchase_date || ''),
+      purchase_price: purchasePrice,
+      current_value: effectiveValue,
+      depreciation_rate: depRate,
+      status: String(a.status || 'ACTIVE').toUpperCase(),
+      notes: a.notes ? String(a.notes) : null,
+    };
+  });
+
+  const activeAssets = assetsItems.filter(
+    (a) => a.status === 'ACTIVE' || a.status === 'AKTIF'
+  );
+  const activeAssetsTotalValue = activeAssets.reduce((s, a) => s + a.current_value, 0);
+  const periodAssetPurchases = assetsItems
+    .filter((a) => a.purchase_date >= ctx.startDate && a.purchase_date <= ctx.endDate)
+    .reduce((s, a) => s + a.purchase_price, 0);
+
+  // 3. Payables (HIMS Purchases + Manual Payables)
+  const payablesItems: Array<{
+    id: string;
+    source: 'HIMS_PURCHASE' | 'MANUAL';
+    raw_id: number;
+    supplier_name: string;
+    transaction_no: string;
+    tx_date: string;
+    due_date: string | null;
+    total_amount: number;
+    paid_amount: number;
+    remaining_amount: number;
+    status: 'UNPAID' | 'PARTIAL' | 'PAID';
+    notes: string | null;
+    payment_method?: string;
+  }> = [];
+
+  for (const p of himsPurchasesRes.rows) {
+    const total = Math.max(0, Math.round(Number(p.total_amount) || 0));
+    const paid = Math.max(0, Math.min(total, Math.round(Number(p.paid_amount) || 0)));
+    const remaining = Math.max(0, total - paid);
+    const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
+      remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+    payablesItems.push({
+      id: `HIMS-PUR-${p.id}`,
+      source: 'HIMS_PURCHASE',
+      raw_id: Number(p.id),
+      supplier_name: String(p.supplier_name || '-'),
+      transaction_no: String(p.transaction_no || `PO-${p.id}`),
+      tx_date: String(p.tx_date || ''),
+      due_date: p.due_date || null,
+      total_amount: total,
+      paid_amount: paid,
+      remaining_amount: remaining,
+      status,
+      notes: p.notes ? String(p.notes) : null,
+      payment_method: String(p.payment_method || 'Cash'),
+    });
+  }
+
+  for (const mp of manualPayablesRes.rows) {
+    const total = Math.max(0, Math.round(Number(mp.total_amount) || 0));
+    const paid = Math.max(0, Math.min(total, Math.round(Number(mp.paid_amount) || 0)));
+    const remaining = Math.max(0, total - paid);
+    const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
+      remaining <= 0 || String(mp.status).toUpperCase() === 'PAID'
+        ? 'PAID'
+        : paid > 0
+        ? 'PARTIAL'
+        : 'UNPAID';
+    payablesItems.push({
+      id: `MANUAL-AP-${mp.id}`,
+      source: 'MANUAL',
+      raw_id: Number(mp.id),
+      supplier_name: String(mp.supplier_name || '-'),
+      transaction_no: String(mp.transaction_no || `HTG-${mp.id}`),
+      tx_date: String(mp.tx_date || ''),
+      due_date: mp.due_date || null,
+      total_amount: total,
+      paid_amount: status === 'PAID' ? total : paid,
+      remaining_amount: status === 'PAID' ? 0 : remaining,
+      status,
+      notes: mp.notes ? String(mp.notes) : null,
+    });
+  }
+
+  payablesItems.sort((a, b) => b.tx_date.localeCompare(a.tx_date));
+  const payablesTotalAmount = payablesItems.reduce((s, i) => s + i.total_amount, 0);
+  const payablesPaidTotal = payablesItems.reduce((s, i) => s + i.paid_amount, 0);
+  const payablesUnpaidTotal = payablesItems.reduce((s, i) => s + i.remaining_amount, 0);
+  const payablesUnpaidCount = payablesItems.filter((i) => i.remaining_amount > 0).length;
+
+  // 4. Receivables (Real HIMS Sheet Piutang + Manual Receivables)
+  const receivablesItems: Array<{
+    id: string;
+    source: 'HIMS_RESERVATION' | 'MANUAL';
+    raw_id: number | string;
+    customer_name: string;
+    transaction_no: string;
+    tx_date: string;
+    due_date: string | null;
+    room_summary?: string;
+    total_amount: number;
+    paid_amount: number;
+    remaining_amount: number;
+    status: 'UNPAID' | 'PARTIAL' | 'PAID';
+    notes: string | null;
+  }> = [];
+
+  for (const item of ctx.allTimePiutangItems || []) {
+    const total = Math.max(0, Math.round(Number(item.net) || 0));
+    const paid = Math.max(0, Math.round(Number(item.paid) || 0));
+    const remaining = Math.max(0, Math.round(Number(item.remaining) || 0));
+    const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
+      remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+    receivablesItems.push({
+      id: `HIMS-AR-${item.bid}`,
+      source: 'HIMS_RESERVATION',
+      raw_id: String(item.bid),
+      customer_name: String(item.guest_name || '-'),
+      transaction_no: String(item.bid || '-'),
+      tx_date: String(item.tx_date || item.check_in || ''),
+      due_date: item.check_out || null,
+      room_summary: String(item.room_summary || ''),
+      total_amount: total,
+      paid_amount: paid,
+      remaining_amount: remaining,
+      status,
+      notes: 'Reservasi Check-Out Belum Lunas (Sheet Piutang)',
+    });
+  }
+
+  for (const mr of manualReceivablesRes.rows) {
+    const total = Math.max(0, Math.round(Number(mr.total_amount) || 0));
+    const paid = Math.max(0, Math.min(total, Math.round(Number(mr.paid_amount) || 0)));
+    const remaining = Math.max(0, total - paid);
+    const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
+      remaining <= 0 || String(mr.status).toUpperCase() === 'PAID'
+        ? 'PAID'
+        : paid > 0
+        ? 'PARTIAL'
+        : 'UNPAID';
+    receivablesItems.push({
+      id: `MANUAL-AR-${mr.id}`,
+      source: 'MANUAL',
+      raw_id: Number(mr.id),
+      customer_name: String(mr.customer_name || '-'),
+      transaction_no: String(mr.transaction_no || `PTG-${mr.id}`),
+      tx_date: String(mr.tx_date || ''),
+      due_date: mr.due_date || null,
+      total_amount: total,
+      paid_amount: status === 'PAID' ? total : paid,
+      remaining_amount: status === 'PAID' ? 0 : remaining,
+      status,
+      notes: mr.notes ? String(mr.notes) : null,
+    });
+  }
+
+  receivablesItems.sort((a, b) => b.tx_date.localeCompare(a.tx_date));
+  const receivablesTotalAmount = receivablesItems.reduce((s, i) => s + i.total_amount, 0);
+  const receivablesPaidTotal = receivablesItems.reduce((s, i) => s + i.paid_amount, 0);
+  const receivablesUnpaidTotal = receivablesItems.reduce((s, i) => s + i.remaining_amount, 0);
+  const receivablesUnpaidCount = receivablesItems.filter((i) => i.remaining_amount > 0).length;
+
+  // 5. Manual Banks
+  const manualBanksTotal = manualBanksRes.rows.reduce(
+    (s: number, b: any) => s + (Number(b.balance) || 0),
+    0
+  );
+
+  // 6. Chart of Accounts (COA) live balances
+  const coaAccounts = coaRes.rows.map((row: any) => {
+    const accNum = String(row.account_number || '').trim();
+    const opening = Number(row.opening_balance) || 0;
+    const deductedByAccNum = transfersBySource.get(accNum.toUpperCase()) || 0;
+    let liveMovement = 0;
+
+    if (accNum === '11101') {
+      liveMovement = ctx.cashOnHand - (transfersBySource.get('CASH') || 0);
+    } else if (accNum === '11102') {
+      liveMovement = ctx.bankAccount + manualBanksTotal - (transfersBySource.get('BANK') || 0);
+    } else if (accNum === '11105') {
+      liveMovement =
+        ctx.transferBank -
+        (transfersBySource.get('TRANSFER_BANK') || 0) -
+        (transfersBySource.get('TRANSFER BANK') || 0);
+    } else if (accNum === '11106') {
+      liveMovement = ctx.qrisBalance - (transfersBySource.get('QRIS') || 0);
+    } else if (accNum === '11300') {
+      liveMovement = receivablesUnpaidTotal;
+    } else if (accNum === '11400') {
+      liveMovement = ctx.inventoryValue;
+    } else if (accNum === '12000') {
+      liveMovement = activeAssetsTotalValue;
+    } else if (accNum === '21000') {
+      liveMovement = payablesUnpaidTotal;
+    }
+
+    const currentBalance = Math.max(0, Math.round(opening + liveMovement - deductedByAccNum));
+    return {
+      id: Number(row.id),
+      property_id: Number(row.property_id || ctx.propertyId),
+      account_number: accNum,
+      account_name: String(row.account_name || ''),
+      classification: String(row.classification || 'Kas & Bank'),
+      opening_balance: Math.round(opening),
+      opening_date: row.opening_date || null,
+      current_balance: currentBalance,
+      is_system: Boolean(row.is_system),
+    };
+  });
+
+  // 7. Bank List (Auto HIMS payment methods + Manual banks)
+  const autoBankList = [
+    {
+      id: 'AUTO-CASH',
+      bank_name: 'Cash',
+      account_number: '-',
+      account_holder: '-',
+      balance: Math.max(
+        0,
+        Math.round(
+          ctx.cashOnHand -
+            (transfersBySource.get('CASH') || 0) -
+            (transfersBySource.get('11101') || 0)
+        )
+      ),
+      source_type: 'AUTO' as const,
+      method_code: 'CASH',
+    },
+    {
+      id: 'AUTO-TRANSFER',
+      bank_name: 'Transfer Bank',
+      account_number: '-',
+      account_holder: '-',
+      balance: Math.max(
+        0,
+        Math.round(
+          ctx.transferBank -
+            (transfersBySource.get('TRANSFER_BANK') || 0) -
+            (transfersBySource.get('TRANSFER BANK') || 0) -
+            (transfersBySource.get('11105') || 0)
+        )
+      ),
+      source_type: 'AUTO' as const,
+      method_code: 'TRANSFER_BANK',
+    },
+    {
+      id: 'AUTO-QRIS',
+      bank_name: 'QRIS',
+      account_number: '-',
+      account_holder: '-',
+      balance: Math.max(
+        0,
+        Math.round(
+          ctx.qrisBalance -
+            (transfersBySource.get('QRIS') || 0) -
+            (transfersBySource.get('11106') || 0)
+        )
+      ),
+      source_type: 'AUTO' as const,
+      method_code: 'QRIS',
+    },
+    ...(ctx.cardEdc > 0
+      ? [
+          {
+            id: 'AUTO-EDC',
+            bank_name: 'EDC / Kartu Debit & Kredit',
+            account_number: '-',
+            account_holder: '-',
+            balance: Math.max(
+              0,
+              Math.round(ctx.cardEdc - (transfersBySource.get('EDC') || 0))
+            ),
+            source_type: 'AUTO' as const,
+            method_code: 'EDC',
+          },
+        ]
+      : []),
+    {
+      id: 'AUTO-AR',
+      bank_name: 'PIUTANG',
+      account_number: '-',
+      account_holder: '-',
+      balance: Math.max(0, Math.round(receivablesUnpaidTotal)),
+      source_type: 'AUTO' as const,
+      method_code: 'AR',
+    },
+  ];
+
+  const manualBankList = manualBanksRes.rows.map((b: any) => {
+    const bankNameUpper = String(b.bank_name || '').toUpperCase();
+    const deducted = transfersBySource.get(bankNameUpper) || 0;
+    return {
+      id: `MANUAL-BANK-${b.id}`,
+      bank_name: String(b.bank_name || ''),
+      account_number: String(b.account_number || '-'),
+      account_holder: String(b.account_holder || '-'),
+      balance: Math.max(0, Math.round((Number(b.balance) || 0) - deducted)),
+      source_type: 'MANUAL' as const,
+      manual_id: Number(b.id),
+    };
+  });
+
+  const bankList = [...autoBankList, ...manualBankList];
+
+  // 8. General Journal (Jurnal Umum)
+  const rawJournal: Array<{
+    sortKey: string;
+    id: string;
+    bid_or_ref: string;
+    badge_type: 'Penjualan' | 'Pemasukan' | 'Pengeluaran' | 'Pembelian' | 'Transfer Investor';
+    tx_date: string;
+    tx_datetime: string;
+    description: string;
+    payment_method: string;
+    cash_in: number;
+    cash_out: number;
+  }> = [];
+
+  for (const r of ctx.roomSales || []) {
+    if (r.is_complimentary) continue;
+    const amount = Math.round(Number(r.total_price) || 0);
+    if (amount <= 0) continue;
+    const txDate = String(r.tx_date || r.check_in || '').slice(0, 10);
+    const txDatetime = r.tx_datetime ? String(r.tx_datetime).slice(0, 16) : `${txDate}, 14.00`;
+    const stayLabel =
+      String(r.stay_type || '').toUpperCase() === 'DAY_USE'
+        ? 'Day Use'
+        : `${r.nights || 1} malam`;
+    rawJournal.push({
+      sortKey: `${txDate}_1_${r.booking_code || r.reservation_id}`,
+      id: `JRN-RM-${r.reservation_id}`,
+      bid_or_ref: String(r.booking_code || `RES-${r.reservation_id}`),
+      badge_type: 'Penjualan',
+      tx_date: txDate,
+      tx_datetime: txDatetime,
+      description: `Booking ${r.guest_name || 'Tamu'} (${r.check_in || txDate} - ${r.check_out || txDate}, ${stayLabel}) • Kamar ${r.room_number || '-'}`,
+      payment_method: String(r.payment_method || 'Cash'),
+      cash_in: amount,
+      cash_out: 0,
+    });
+  }
+
+  for (const p of ctx.posItemSales || []) {
+    if (p.is_complimentary) continue;
+    const amount = Math.round(Number(p.line_total) || 0);
+    if (amount <= 0) continue;
+    const txDate = String(p.tx_date || '').slice(0, 10);
+    const txDatetime = p.tx_datetime ? String(p.tx_datetime).slice(0, 16) : `${txDate}, 12.00`;
+    rawJournal.push({
+      sortKey: `${txDate}_2_${p.booking_or_order_no || p.order_item_id}`,
+      id: `JRN-POS-${p.order_item_id}`,
+      bid_or_ref: String(p.booking_or_order_no || `POS-${p.order_id}`),
+      badge_type: 'Penjualan',
+      tx_date: txDate,
+      tx_datetime: txDatetime,
+      description: `POS ${p.item_name || 'Produk'} (${Number(p.quantity) || 1}x) — ${p.customer_name || 'Walk-In'}`,
+      payment_method: String(p.payment_method || 'Cash'),
+      cash_in: amount,
+      cash_out: 0,
+    });
+  }
+
+  for (const inc of ctx.financialsData?.other_income?.items || []) {
+    const amount = Math.round(Number(inc.net_amount) || 0);
+    if (amount <= 0) continue;
+    const txDate = String(inc.transaction_date || '').slice(0, 10);
+    rawJournal.push({
+      sortKey: `${txDate}_3_${inc.transaction_no || inc.id}`,
+      id: `JRN-INC-${inc.id}`,
+      bid_or_ref: String(inc.transaction_no || `INC-${inc.id}`),
+      badge_type: 'Pemasukan',
+      tx_date: txDate,
+      tx_datetime: `${txDate}, 10.00`,
+      description: `${inc.description || inc.category_name || 'Pemasukan Lain'} (${inc.party_name || '-'})`,
+      payment_method: String(inc.payment_method || 'Cash'),
+      cash_in: amount,
+      cash_out: 0,
+    });
+  }
+
+  for (const exp of ctx.financialsData?.expense?.items || []) {
+    const amount = Math.round(Number(exp.net_amount) || 0);
+    if (amount <= 0) continue;
+    const txDate = String(exp.transaction_date || '').slice(0, 10);
+    rawJournal.push({
+      sortKey: `${txDate}_4_${exp.transaction_no || exp.id}`,
+      id: `JRN-EXP-${exp.id}`,
+      bid_or_ref: String(exp.transaction_no || `EXP-${exp.id}`),
+      badge_type: 'Pengeluaran',
+      tx_date: txDate,
+      tx_datetime: `${txDate}, 15.00`,
+      description: `${exp.description || exp.category_name || 'Pengeluaran Operasional'}`,
+      payment_method: String(exp.payment_method || 'Cash'),
+      cash_in: 0,
+      cash_out: amount,
+    });
+  }
+
+  for (const pur of payablesItems) {
+    if (pur.tx_date < ctx.startDate || pur.tx_date > ctx.endDate) continue;
+    const amount = Math.round(Number(pur.total_amount) || 0);
+    if (amount <= 0) continue;
+    rawJournal.push({
+      sortKey: `${pur.tx_date}_5_${pur.transaction_no}`,
+      id: `JRN-PUR-${pur.id}`,
+      bid_or_ref: pur.transaction_no,
+      badge_type: 'Pembelian',
+      tx_date: pur.tx_date,
+      tx_datetime: `${pur.tx_date}, 11.00`,
+      description: `${pur.notes || 'Pembelian Barang'} — ${pur.supplier_name}`,
+      payment_method: String(pur.payment_method || 'Cash'),
+      cash_in: 0,
+      cash_out: amount,
+    });
+  }
+
+  for (const tr of investorTransfersRes.rows) {
+    const tDate = String(tr.transfer_date || '').slice(0, 10);
+    if (tDate < ctx.startDate || tDate > ctx.endDate) continue;
+    const amount = Math.round(Number(tr.amount) || 0);
+    if (amount <= 0) continue;
+    rawJournal.push({
+      sortKey: `${tDate}_6_${tr.id}`,
+      id: `JRN-INV-${tr.id}`,
+      bid_or_ref: `INV-${tr.id}`,
+      badge_type: 'Transfer Investor',
+      tx_date: tDate,
+      tx_datetime: String(tr.created_at || `${tDate}, 16.00`),
+      description: `Transfer ke Investor: ${tr.investor_name}${tr.notes ? ` (${tr.notes})` : ''}`,
+      payment_method: String(tr.source_account || 'Kas & Bank'),
+      cash_in: 0,
+      cash_out: amount,
+    });
+  }
+
+  rawJournal.sort((a, b) => a.sortKey.localeCompare(b.sortKey));
+
+  let runningBalance = 0;
+  let totalIn = 0;
+  let totalOut = 0;
+  const journalRows = rawJournal.map((row, idx) => {
+    totalIn += row.cash_in;
+    totalOut += row.cash_out;
+    runningBalance += row.cash_in - row.cash_out;
+    return {
+      row_no: idx + 1,
+      id: row.id,
+      bid_or_ref: row.bid_or_ref,
+      badge_type: row.badge_type,
+      tx_date: row.tx_date,
+      tx_datetime: row.tx_datetime,
+      description: row.description,
+      payment_method: row.payment_method,
+      cash_in: row.cash_in,
+      cash_out: row.cash_out,
+      running_balance: runningBalance,
+    };
+  });
+
+  // 9. PPN Summary (Rekap Pajak PPN)
+  const taxPct = Number(ctx.pricingSettings?.tax_percentage || 11);
+  const ppnRows: Array<{
+    id: string;
+    tx_date: string;
+    ref_no: string;
+    source: 'KAMAR' | 'POS' | 'PEMBELIAN';
+    party_name: string;
+    dpp_amount: number;
+    ppn_amount: number;
+    total_amount: number;
+  }> = [];
+
+  let roomTaxTotal = 0;
+  let posTaxTotal = 0;
+  const purchaseTaxTotal = 0;
+
+  for (const r of ctx.roomSales || []) {
+    if (r.is_complimentary) continue;
+    const total = Math.round(Number(r.total_price) || 0);
+    const taxAmt = Math.round(Number(r.tax_amount) || 0);
+    if (taxAmt <= 0) continue;
+    roomTaxTotal += taxAmt;
+    ppnRows.push({
+      id: `PPN-RM-${r.reservation_id}`,
+      tx_date: String(r.tx_date || r.check_in || '').slice(0, 10),
+      ref_no: String(r.booking_code || `RES-${r.reservation_id}`),
+      source: 'KAMAR',
+      party_name: String(r.guest_name || '-'),
+      dpp_amount: Math.max(0, total - taxAmt),
+      ppn_amount: taxAmt,
+      total_amount: total,
+    });
+  }
+
+  for (const p of ctx.posItemSales || []) {
+    if (p.is_complimentary) continue;
+    const total = Math.round(Number(p.line_total) || 0);
+    const taxAmt = Math.round(Number(p.tax_amount) || 0);
+    if (taxAmt <= 0) continue;
+    posTaxTotal += taxAmt;
+    ppnRows.push({
+      id: `PPN-POS-${p.order_item_id}`,
+      tx_date: String(p.tx_date || '').slice(0, 10),
+      ref_no: String(p.booking_or_order_no || `POS-${p.order_id}`),
+      source: 'POS',
+      party_name: String(p.customer_name || 'Walk-In'),
+      dpp_amount: Math.max(0, total - taxAmt),
+      ppn_amount: taxAmt,
+      total_amount: total,
+    });
+  }
+
+  return {
+    coa_accounts: coaAccounts,
+    bank_list: bankList,
+    investor_transfers: investorTransfersRes.rows.map((r: any) => ({
+      id: Number(r.id),
+      property_id: Number(r.property_id || ctx.propertyId),
+      source_account: String(r.source_account || ''),
+      investor_name: String(r.investor_name || ''),
+      amount: Math.round(Number(r.amount) || 0),
+      transfer_date: String(r.transfer_date || ''),
+      notes: r.notes ? String(r.notes) : null,
+      created_at: String(r.created_at || ''),
+    })),
+    fixed_assets: {
+      items: assetsItems,
+      active_count: activeAssets.length,
+      active_total_value: activeAssetsTotalValue,
+      period_purchase_total: periodAssetPurchases,
+    },
+    payables: {
+      items: payablesItems,
+      total_amount: payablesTotalAmount,
+      paid_total: payablesPaidTotal,
+      unpaid_total: payablesUnpaidTotal,
+      unpaid_count: payablesUnpaidCount,
+    },
+    receivables: {
+      items: receivablesItems,
+      total_amount: receivablesTotalAmount,
+      paid_total: receivablesPaidTotal,
+      unpaid_total: receivablesUnpaidTotal,
+      unpaid_count: receivablesUnpaidCount,
+    },
+    general_journal: {
+      opening_balance: 0,
+      total_in: totalIn,
+      total_out: totalOut,
+      closing_balance: runningBalance,
+      tx_count: journalRows.length,
+      rows: journalRows,
+    },
+    ppn_summary: {
+      tax_percentage: taxPct,
+      room_tax_total: roomTaxTotal,
+      pos_tax_total: posTaxTotal,
+      purchase_tax_total: purchaseTaxTotal,
+      net_ppn_payable: Math.max(0, roomTaxTotal + posTaxTotal - purchaseTaxTotal),
+      rows: ppnRows,
+    },
+    period_investor_transfers: periodInvestorTransfers,
+  };
+}

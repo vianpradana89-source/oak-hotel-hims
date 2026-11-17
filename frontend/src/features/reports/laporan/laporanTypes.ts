@@ -289,6 +289,150 @@ export interface PiutangSheetSummaryData {
   all_time_items?: PiutangSheetItem[];
 }
 
+export interface CoaAccountItem {
+  id: number;
+  property_id: number;
+  account_number: string;
+  account_name: string;
+  classification: string;
+  opening_balance: number;
+  opening_date: string | null;
+  current_balance: number;
+  is_system: boolean;
+}
+
+export interface BankListItem {
+  id: string;
+  bank_name: string;
+  account_number: string;
+  account_holder: string;
+  balance: number;
+  source_type: 'AUTO' | 'MANUAL';
+  method_code?: string;
+  manual_id?: number;
+}
+
+export interface InvestorTransferItem {
+  id: number;
+  property_id: number;
+  source_account: string;
+  investor_name: string;
+  amount: number;
+  transfer_date: string;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface FixedAssetItem {
+  id: number;
+  property_id: number;
+  asset_name: string;
+  category: string;
+  purchase_date: string;
+  purchase_price: number;
+  current_value: number;
+  depreciation_rate: number;
+  status: string;
+  notes: string | null;
+}
+
+export interface AccountingPayableItem {
+  id: string;
+  source: 'HIMS_PURCHASE' | 'MANUAL';
+  raw_id: number;
+  supplier_name: string;
+  transaction_no: string;
+  tx_date: string;
+  due_date: string | null;
+  total_amount: number;
+  paid_amount: number;
+  remaining_amount: number;
+  status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  notes: string | null;
+}
+
+export interface AccountingReceivableItem {
+  id: string;
+  source: 'HIMS_RESERVATION' | 'MANUAL';
+  raw_id: number | string;
+  customer_name: string;
+  transaction_no: string;
+  tx_date: string;
+  due_date: string | null;
+  room_summary?: string;
+  total_amount: number;
+  paid_amount: number;
+  remaining_amount: number;
+  status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  notes: string | null;
+}
+
+export interface GeneralJournalRow {
+  row_no: number;
+  id: string;
+  bid_or_ref: string;
+  badge_type: 'Penjualan' | 'Pemasukan' | 'Pengeluaran' | 'Pembelian' | 'Transfer Investor';
+  tx_date: string;
+  tx_datetime: string;
+  description: string;
+  payment_method: string;
+  cash_in: number;
+  cash_out: number;
+  running_balance: number;
+}
+
+export interface AccountingSubledgerData {
+  coa_accounts: CoaAccountItem[];
+  bank_list: BankListItem[];
+  investor_transfers: InvestorTransferItem[];
+  fixed_assets: {
+    items: FixedAssetItem[];
+    active_count: number;
+    active_total_value: number;
+    period_purchase_total: number;
+  };
+  payables: {
+    items: AccountingPayableItem[];
+    total_amount: number;
+    paid_total: number;
+    unpaid_total: number;
+    unpaid_count: number;
+  };
+  receivables: {
+    items: AccountingReceivableItem[];
+    total_amount: number;
+    paid_total: number;
+    unpaid_total: number;
+    unpaid_count: number;
+  };
+  general_journal: {
+    opening_balance: number;
+    total_in: number;
+    total_out: number;
+    closing_balance: number;
+    tx_count: number;
+    rows: GeneralJournalRow[];
+  };
+  ppn_summary: {
+    tax_percentage: number;
+    room_tax_total: number;
+    pos_tax_total: number;
+    purchase_tax_total: number;
+    net_ppn_payable: number;
+    rows: Array<{
+      id: string;
+      tx_date: string;
+      ref_no: string;
+      source: 'KAMAR' | 'POS' | 'PEMBELIAN';
+      party_name: string;
+      dpp_amount: number;
+      ppn_amount: number;
+      total_amount: number;
+    }>;
+  };
+  period_investor_transfers: number;
+}
+
 export interface AnalyticsHubData {
   property_id: number;
   start_date: string;
@@ -303,6 +447,7 @@ export interface AnalyticsHubData {
   purchase_lines: PurchaseLineRow[];
   discount_summary?: DiscountSummaryData;
   piutang_sheet_summary?: PiutangSheetSummaryData;
+  accounting_subledger?: AccountingSubledgerData;
   accounting_statements?: AccountingStatementsData;
 }
 

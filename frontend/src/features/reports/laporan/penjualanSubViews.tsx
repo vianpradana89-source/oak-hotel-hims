@@ -1507,7 +1507,7 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
 export const SubViewOvernightVsDayUse: React.FC<{
   roomSales: RoomSaleRow[];
   showRoomRateCol?: boolean;
-}> = ({ roomSales, showRoomRateCol = true }) => {
+}> = ({ roomSales, showRoomRateCol = false }) => {
   const [stayFilter, setStayFilter] = useState<'ALL' | 'OVERNIGHT' | 'DAY_USE'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 

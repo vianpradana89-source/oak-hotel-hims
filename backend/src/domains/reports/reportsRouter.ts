@@ -5,6 +5,7 @@ import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyK
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
 import { getTransactions } from '../transactions/transactionService';
+import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 
 function parsePositiveInt(value: any): number | null {
   const n = Number(value);
@@ -1783,35 +1784,76 @@ export function createReportsRouter(pool: Pool): Router {
       };
 
       const cardEdc = Math.max(0, Number(bsRow.card_edc || 0));
-      const accountsReceivable = Math.max(0, periodPiutangTotal);
       const inventoryValue = Math.max(0, Number(bsRow.inventory_value || 0));
+
+      const accountingSubledger = await buildAccountingSubledgerData(pool, {
+        propertyId,
+        startDate,
+        endDate,
+        cashOnHand,
+        bankAccount,
+        transferBank,
+        qrisBalance,
+        cardEdc,
+        inventoryValue,
+        allTimePiutangTotal,
+        allTimePiutangItems,
+        periodPiutangItems,
+        roomSales: roomSalesRes.rows || [],
+        posItemSales: posItemsRes.rows || [],
+        financialsData,
+        pricingSettings,
+      });
+
+      const investingFixedAssets = Number(accountingSubledger.fixed_assets.period_purchase_total || 0);
+      const financingEquityChanges = -Number(accountingSubledger.period_investor_transfers || 0);
+      cashFlow.investing_activities.fixed_assets = investingFixedAssets;
+      cashFlow.investing_activities.subtotal_investing = -investingFixedAssets;
+      cashFlow.total_income_after_investing = subtotalOperating - investingFixedAssets;
+      cashFlow.financing_activities.equity_changes = financingEquityChanges;
+      cashFlow.financing_activities.subtotal_financing = financingEquityChanges;
+      cashFlow.net_cash_change = subtotalOperating - investingFixedAssets + financingEquityChanges;
+      cashFlow.closing_cash_balance = openingCash + cashFlow.net_cash_change;
+
+      const coaByNum = new Map<string, number>();
+      for (const acc of accountingSubledger.coa_accounts) {
+        coaByNum.set(acc.account_number, Number(acc.current_balance || 0));
+      }
+
+      const bsCash = coaByNum.get('11101') ?? cashOnHand;
+      const bsBank = coaByNum.get('11102') ?? bankAccount;
+      const bsTransfer = coaByNum.get('11105') ?? transferBank;
+      const bsQris = coaByNum.get('11106') ?? qrisBalance;
+      const bsShortTermInv = coaByNum.get('11200') ?? 0;
+      const accountsReceivable = Math.max(0, Number(accountingSubledger.receivables.unpaid_total || allTimePiutangTotal));
+      const fixedAssets = Math.max(0, Number(accountingSubledger.fixed_assets.active_total_value || 0));
       const subtotalCurrentAssets =
-        cashOnHand +
-        bankAccount +
-        transferBank +
-        qrisBalance +
+        bsCash +
+        bsBank +
+        bsTransfer +
+        bsQris +
         cardEdc +
+        bsShortTermInv +
         accountsReceivable +
         inventoryValue;
-      const fixedAssets = 0;
       const totalAssets = subtotalCurrentAssets + fixedAssets;
 
-      const accountsPayable = Number(financialsData.purchase?.unpaid_total || 0);
+      const accountsPayable = Math.max(0, Number(accountingSubledger.payables.unpaid_total || 0));
       const guestDeposits = Math.max(0, Number(bsRow.guest_deposits || 0));
       const subtotalLiabilities = accountsPayable + guestDeposits;
       const currentPeriodIncome = netProfit;
-      const retainedEarnings = Math.max(0, totalAssets - subtotalLiabilities - currentPeriodIncome);
+      const retainedEarnings = totalAssets - subtotalLiabilities - currentPeriodIncome;
       const subtotalEquity = retainedEarnings + currentPeriodIncome;
 
       const balanceSheet = {
         assets: {
           current_assets: {
-            cash_on_hand: cashOnHand,
-            bank_account: bankAccount,
-            transfer_bank: transferBank,
-            qris_balance: qrisBalance,
+            cash_on_hand: bsCash,
+            bank_account: bsBank,
+            transfer_bank: bsTransfer,
+            qris_balance: bsQris,
             card_edc: cardEdc,
-            short_term_investment: 0,
+            short_term_investment: bsShortTermInv,
             accounts_receivable: accountsReceivable,
             inventory_value: inventoryValue,
             subtotal_current_assets: subtotalCurrentAssets
@@ -1853,6 +1895,7 @@ export function createReportsRouter(pool: Pool): Router {
           pricing_settings: pricingSettings,
           discount_summary: discountSummary,
           piutang_sheet_summary: piutangSheetSummary,
+          accounting_subledger: accountingSubledger,
           accounting_statements: {
             profit_loss: profitLoss,
             cash_flow: cashFlow,
@@ -1867,6 +1910,343 @@ export function createReportsRouter(pool: Pool): Router {
         code: 'INTERNAL_ERROR',
         message: err.message || 'Internal server error'
       });
+    }
+  });
+
+  // ============================================================================
+  // ACCOUNTING CRUD ENDPOINTS (COA, Banks, Investor Transfers, Assets, AP, AR)
+  // ============================================================================
+
+  router.post('/accounting/coa', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const accountNumber = String(req.body.account_number || '').trim();
+      const accountName = String(req.body.account_name || '').trim();
+      const classification = String(req.body.classification || 'Kas & Bank').trim();
+      const openingBalance = Number(req.body.opening_balance || 0);
+      const openingDate = req.body.opening_date ? String(req.body.opening_date).slice(0, 10) : null;
+      if (!accountNumber || !accountName) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nomor akun dan nama akun wajib diisi' });
+      }
+      const r = await pool.query(
+        `INSERT INTO accounting_coa_accounts (property_id, account_number, account_name, classification, opening_balance, opening_date, is_system, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW())
+         ON CONFLICT (property_id, account_number)
+         DO UPDATE SET
+           account_name = EXCLUDED.account_name,
+           classification = EXCLUDED.classification,
+           opening_balance = EXCLUDED.opening_balance,
+           opening_date = EXCLUDED.opening_date,
+           updated_at = NOW()
+         RETURNING *`,
+        [propertyId, accountNumber, accountName, classification, openingBalance, openingDate]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menyimpan akun COA' });
+    }
+  });
+
+  router.delete('/accounting/coa/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+      await ensureAccountingSchema(pool, 1);
+      await pool.query(`DELETE FROM accounting_coa_accounts WHERE id = $1 AND is_system = FALSE`, [id]);
+      return res.json({ status: 'SUCCESS' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus akun COA' });
+    }
+  });
+
+  router.post('/accounting/banks', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const bankName = String(req.body.bank_name || '').trim();
+      const accountNumber = String(req.body.account_number || '-').trim();
+      const accountHolder = String(req.body.account_holder || '-').trim();
+      const balance = Number(req.body.balance || 0);
+      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      if (!bankName) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama bank / metode wajib diisi' });
+      }
+      const r = await pool.query(
+        `INSERT INTO accounting_bank_accounts (property_id, bank_name, account_number, account_holder, balance, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW())
+         RETURNING *`,
+        [propertyId, bankName, accountNumber, accountHolder, balance, notes]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menyimpan rekening bank' });
+    }
+  });
+
+  router.delete('/accounting/banks/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+      await ensureAccountingSchema(pool, 1);
+      await pool.query(`DELETE FROM accounting_bank_accounts WHERE id = $1`, [id]);
+      return res.json({ status: 'SUCCESS' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus rekening bank' });
+    }
+  });
+
+  router.post('/accounting/investor-transfers', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const sourceAccount = String(req.body.source_account || '').trim();
+      const investorName = String(req.body.investor_name || '').trim();
+      const amount = Number(req.body.amount || 0);
+      const transferDate = req.body.transfer_date
+        ? String(req.body.transfer_date).slice(0, 10)
+        : hotelDateFromInstant(new Date());
+      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      if (!sourceAccount || !investorName || !(amount > 0)) {
+        return res.status(400).json({
+          status: 'ERROR',
+          message: 'Akun sumber, nama investor, dan jumlah (> 0) wajib diisi',
+        });
+      }
+      const r = await pool.query(
+        `INSERT INTO accounting_investor_transfers (property_id, source_account, investor_name, amount, transfer_date, notes)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [propertyId, sourceAccount, investorName, amount, transferDate, notes]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal mencatat transfer investor' });
+    }
+  });
+
+  router.delete('/accounting/investor-transfers/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+      await ensureAccountingSchema(pool, 1);
+      await pool.query(`DELETE FROM accounting_investor_transfers WHERE id = $1`, [id]);
+      return res.json({ status: 'SUCCESS' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus transfer investor' });
+    }
+  });
+
+  router.post('/accounting/assets', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const assetName = String(req.body.asset_name || '').trim();
+      const category = String(req.body.category || 'Peralatan').trim();
+      const purchaseDate = req.body.purchase_date
+        ? String(req.body.purchase_date).slice(0, 10)
+        : hotelDateFromInstant(new Date());
+      const purchasePrice = Number(req.body.purchase_price || 0);
+      const currentValue =
+        req.body.current_value !== undefined && req.body.current_value !== ''
+          ? Number(req.body.current_value)
+          : purchasePrice;
+      const depreciationRate = Number(req.body.depreciation_rate || 0);
+      const status = String(req.body.status || 'ACTIVE').toUpperCase();
+      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      if (!assetName) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama aset wajib diisi' });
+      }
+      const r = await pool.query(
+        `INSERT INTO accounting_fixed_assets
+           (property_id, asset_name, category, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+         RETURNING *`,
+        [propertyId, assetName, category, purchaseDate, purchasePrice, currentValue, depreciationRate, status, notes]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menyimpan aset tetap' });
+    }
+  });
+
+  router.delete('/accounting/assets/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+      await ensureAccountingSchema(pool, 1);
+      await pool.query(`DELETE FROM accounting_fixed_assets WHERE id = $1`, [id]);
+      return res.json({ status: 'SUCCESS' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus aset tetap' });
+    }
+  });
+
+  router.post('/accounting/payables', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const supplierName = String(req.body.supplier_name || '').trim();
+      const transactionNo =
+        String(req.body.transaction_no || '').trim() || `HTG-${Date.now().toString().slice(-6)}`;
+      const totalAmount = Number(req.body.total_amount || 0);
+      const paidAmount = Number(req.body.paid_amount || 0);
+      const dueDate = req.body.due_date ? String(req.body.due_date).slice(0, 10) : null;
+      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      if (!supplierName || !(totalAmount > 0)) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama supplier dan total tagihan (> 0) wajib diisi' });
+      }
+      const status =
+        paidAmount >= totalAmount ? 'PAID' : paidAmount > 0 ? 'PARTIAL' : 'UNPAID';
+      const r = await pool.query(
+        `INSERT INTO accounting_manual_payables
+           (property_id, supplier_name, transaction_no, total_amount, paid_amount, due_date, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         RETURNING *`,
+        [propertyId, supplierName, transactionNo, totalAmount, paidAmount, dueDate, status, notes]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menambah hutang' });
+    }
+  });
+
+  router.post('/accounting/payables/:id/settle', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      const payAmount = req.body.amount !== undefined ? Number(req.body.amount) : null;
+      await ensureAccountingSchema(pool, 1);
+      if (rawId.startsWith('MANUAL-AP-')) {
+        const id = parsePositiveInt(rawId.replace('MANUAL-AP-', ''));
+        if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID hutang tidak valid' });
+        const cur = await pool.query(`SELECT * FROM accounting_manual_payables WHERE id = $1`, [id]);
+        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Data hutang tidak ditemukan' });
+        const row = cur.rows[0];
+        const total = Number(row.total_amount || 0);
+        const currentPaid = Number(row.paid_amount || 0);
+        const newPaid = payAmount !== null && payAmount > 0 ? Math.min(total, currentPaid + payAmount) : total;
+        const newStatus = newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIAL' : 'UNPAID';
+        await pool.query(
+          `UPDATE accounting_manual_payables SET paid_amount = $2, status = $3, updated_at = NOW() WHERE id = $1`,
+          [id, newPaid, newStatus]
+        );
+        return res.json({ status: 'SUCCESS' });
+      } else if (rawId.startsWith('HIMS-PUR-')) {
+        const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
+        if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi pembelian tidak valid' });
+        const cur = await pool.query(`SELECT id, net_amount, paid_amount FROM transactions WHERE id = $1`, [txId]);
+        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Transaksi pembelian tidak ditemukan' });
+        const row = cur.rows[0];
+        const total = Number(row.net_amount || 0);
+        const currentPaid = Number(row.paid_amount || 0);
+        const newPaid = payAmount !== null && payAmount > 0 ? Math.min(total, currentPaid + payAmount) : total;
+        const newPaymentStatus = newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+        await pool.query(
+          `UPDATE transactions SET paid_amount = $2, payment_status = $3, updated_at = NOW() WHERE id = $1`,
+          [txId, newPaid, newPaymentStatus]
+        );
+        return res.json({ status: 'SUCCESS' });
+      }
+      return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal melunasi hutang' });
+    }
+  });
+
+  router.delete('/accounting/payables/:id', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      await ensureAccountingSchema(pool, 1);
+      if (rawId.startsWith('MANUAL-AP-')) {
+        const id = parsePositiveInt(rawId.replace('MANUAL-AP-', ''));
+        if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+        await pool.query(`DELETE FROM accounting_manual_payables WHERE id = $1`, [id]);
+        return res.json({ status: 'SUCCESS' });
+      }
+      return res.status(400).json({
+        status: 'ERROR',
+        message: 'Transaksi pembelian HIMS hanya dapat dibatalkan melalui menu Pusat Transaksi',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus hutang' });
+    }
+  });
+
+  router.post('/accounting/receivables', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const customerName = String(req.body.customer_name || '').trim();
+      const transactionNo =
+        String(req.body.transaction_no || '').trim() || `PTG-${Date.now().toString().slice(-6)}`;
+      const totalAmount = Number(req.body.total_amount || 0);
+      const paidAmount = Number(req.body.paid_amount || 0);
+      const dueDate = req.body.due_date ? String(req.body.due_date).slice(0, 10) : null;
+      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      if (!customerName || !(totalAmount > 0)) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama pelanggan dan total piutang (> 0) wajib diisi' });
+      }
+      const status =
+        paidAmount >= totalAmount ? 'PAID' : paidAmount > 0 ? 'PARTIAL' : 'UNPAID';
+      const r = await pool.query(
+        `INSERT INTO accounting_manual_receivables
+           (property_id, customer_name, transaction_no, total_amount, paid_amount, due_date, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+         RETURNING *`,
+        [propertyId, customerName, transactionNo, totalAmount, paidAmount, dueDate, status, notes]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menambah piutang' });
+    }
+  });
+
+  router.post('/accounting/receivables/:id/settle', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      const payAmount = req.body.amount !== undefined ? Number(req.body.amount) : null;
+      await ensureAccountingSchema(pool, 1);
+      if (rawId.startsWith('MANUAL-AR-')) {
+        const id = parsePositiveInt(rawId.replace('MANUAL-AR-', ''));
+        if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID piutang tidak valid' });
+        const cur = await pool.query(`SELECT * FROM accounting_manual_receivables WHERE id = $1`, [id]);
+        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Data piutang tidak ditemukan' });
+        const row = cur.rows[0];
+        const total = Number(row.total_amount || 0);
+        const currentPaid = Number(row.paid_amount || 0);
+        const newPaid = payAmount !== null && payAmount > 0 ? Math.min(total, currentPaid + payAmount) : total;
+        const newStatus = newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIAL' : 'UNPAID';
+        await pool.query(
+          `UPDATE accounting_manual_receivables SET paid_amount = $2, status = $3, updated_at = NOW() WHERE id = $1`,
+          [id, newPaid, newStatus]
+        );
+        return res.json({ status: 'SUCCESS' });
+      }
+      return res.status(400).json({
+        status: 'ERROR',
+        message: 'Untuk piutang reservasi kamar, silakan klik tombol Buka Folio / Lunasi di Transaksi & Folio agar tercatat ke Folio Kamar.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memproses penerimaan piutang' });
+    }
+  });
+
+  router.delete('/accounting/receivables/:id', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      await ensureAccountingSchema(pool, 1);
+      if (rawId.startsWith('MANUAL-AR-')) {
+        const id = parsePositiveInt(rawId.replace('MANUAL-AR-', ''));
+        if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
+        await pool.query(`DELETE FROM accounting_manual_receivables WHERE id = $1`, [id]);
+        return res.json({ status: 'SUCCESS' });
+      }
+      return res.status(400).json({
+        status: 'ERROR',
+        message: 'Piutang reservasi kamar berasal dari Sheet Piutang HIMS dan tidak dapat dihapus manual.',
+      });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus piutang' });
     }
   });
 

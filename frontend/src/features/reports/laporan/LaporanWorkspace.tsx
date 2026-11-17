@@ -11,6 +11,11 @@ import { LaporanTabPembelian } from './LaporanTabPembelian';
 import { LaporanTabPemasukan } from './LaporanTabPemasukan';
 import { LaporanTabPengeluaran } from './LaporanTabPengeluaran';
 import { LaporanTabMetodeBayar } from './LaporanTabMetodeBayar';
+import {
+  LaporanTabAkuntansi,
+  AKUNTANSI_SUBVIEW_OPTIONS,
+  type AkuntansiSubView,
+} from './LaporanTabAkuntansi';
 import { useLaporanWorkspace } from './useLaporanWorkspace';
 import { useDailyOperations } from './useDailyOperations';
 import { downloadExportXml, buildLaporanSheets } from './exportLaporan';
@@ -39,7 +44,8 @@ export type LaporanTabKey =
   | 'pembelian'
   | 'pemasukan'
   | 'pengeluaran'
-  | 'metode_bayar';
+  | 'metode_bayar'
+  | 'akuntansi';
 
 const TABS: { key: LaporanTabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'keseluruhan', label: 'Keseluruhan', icon: <IconLayoutGrid className="w-3.5 h-3.5" /> },
@@ -49,6 +55,7 @@ const TABS: { key: LaporanTabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'pemasukan', label: 'Pemasukan', icon: <IconTrendingUp className="w-3.5 h-3.5" /> },
   { key: 'pengeluaran', label: 'Pengeluaran', icon: <IconTrendingDown className="w-3.5 h-3.5" /> },
   { key: 'metode_bayar', label: 'Metode Bayar', icon: <IconCreditCard className="w-3.5 h-3.5" /> },
+  { key: 'akuntansi', label: 'Akuntansi', icon: <IconScale className="w-3.5 h-3.5" /> },
 ];
 
 const KESELURUHAN_SUBVIEW_OPTIONS: {
@@ -115,6 +122,8 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
   const [kinerjaSubView, setKinerjaSubView] = useState<OccupancySubView>('all');
   const [penjualanSubView, setPenjualanSubView] =
     useState<SalesReportMode>('rincian_penjualan');
+  const [akuntansiSubView, setAkuntansiSubView] =
+    useState<AkuntansiSubView>('transaksi');
 
   const workspace = useLaporanWorkspace(propertyId);
   const {
@@ -199,6 +208,16 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         />
       );
     }
+    if (activeTab === 'akuntansi') {
+      return (
+        <LaporanDropdown<AkuntansiSubView>
+          value={akuntansiSubView}
+          options={AKUNTANSI_SUBVIEW_OPTIONS}
+          onChange={setAkuntansiSubView}
+          variant="primary"
+        />
+      );
+    }
     return null;
   };
 
@@ -276,6 +295,23 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
             loading={loading}
             error={financialsError}
             onRetry={onRetry}
+          />
+        );
+      case 'akuntansi':
+        return (
+          <LaporanTabAkuntansi
+            propertyId={propertyId || 1}
+            startDate={range?.start || todayHotelDate}
+            endDate={range?.end || todayHotelDate}
+            dailyOps={dailyOps}
+            dailyOpsError={dailyOpsError}
+            financials={financials}
+            financialsError={financialsError}
+            analytics={analytics}
+            loading={loadingAll}
+            onRetry={onRetry}
+            subView={akuntansiSubView}
+            onChangeSubView={setAkuntansiSubView}
           />
         );
       default:
