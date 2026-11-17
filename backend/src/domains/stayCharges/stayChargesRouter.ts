@@ -8,7 +8,8 @@ import {
   postStayChargeToFolio,
   updateStayChargeRule,
   voidFolioEntry,
-  correctFolioEntry
+  correctFolioEntry,
+  deleteFolioEntry
 } from './stayChargesService';
 import type { StayChargeType } from './stayChargesTypes';
 import { requireAuth, type AuthenticatedRequest } from '../auth/authMiddleware';
@@ -201,6 +202,34 @@ export function createStayChargesRouter(pool: Pool): Router {
 
   router.post('/correct-entry', handleCorrectEntry);
   router.post('/correct-entry/:id', handleCorrectEntry);
+
+  // DELETE /api/stay-charges/folio-entry/:id or POST /api/stay-charges/delete-entry/:id
+  const handleDeleteEntry = async (req: Request, res: Response) => {
+    const authReq = req as AuthenticatedRequest;
+    const client = await pool.connect();
+    try {
+      const propertyId = await resolveScopedPropertyId(authReq);
+      const folioEntryId = Number(req.params.id || req.body?.folio_entry_id);
+      const reservationId = Number(req.query.reservation_id || req.body?.reservation_id || 0);
+      if (!Number.isInteger(folioEntryId) || folioEntryId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'ID item folio tidak valid' });
+      }
+
+      await client.query('BEGIN');
+      const result = await deleteFolioEntry(client, propertyId, reservationId, folioEntryId);
+      await client.query('COMMIT');
+      res.json({ status: 'SUCCESS', data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      sendError(res, err, 400, 'Gagal menghapus item folio');
+    } finally {
+      client.release();
+    }
+  };
+
+  router.delete('/folio-entry/:id', handleDeleteEntry);
+  router.post('/delete-entry', handleDeleteEntry);
+  router.post('/delete-entry/:id', handleDeleteEntry);
 
   return router;
 }

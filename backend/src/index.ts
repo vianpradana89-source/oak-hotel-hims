@@ -9063,7 +9063,15 @@ app.get('/api/reservations/:id/folio', async (req, res) => {
        ORDER BY id DESC`,
       [reservationId, propertyId]
     );
-    const folio = await pool.query('SELECT * FROM folio_entries WHERE reservation_id = $1 ORDER BY id DESC', [reservationId]);
+    const folio = await pool.query(
+      `SELECT * FROM folio_entries
+       WHERE reservation_id = $1
+         AND COALESCE(is_voided, FALSE) = FALSE
+         AND COALESCE(status, 'POSTED') NOT IN ('VOIDED', 'REVERSED')
+         AND COALESCE(entry_type, '') <> 'REVERSAL'
+       ORDER BY id DESC`,
+      [reservationId]
+    );
     const evidences = await pool.query(
       `SELECT pe.* FROM payment_evidences pe
        WHERE pe.property_id = $2

@@ -22,6 +22,7 @@ import { Modal } from '../../design-system/Modal';
 import { useAuth } from '../auth/AuthContext';
 import { fetchPosReceipt } from '../pos/posReceiptApi';
 import type { PosReceiptData } from '../pos/posReceiptTypes';
+import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
 import { buildPosReceiptWhatsAppUrl } from '../pos/posReceiptWhatsApp';
 import type { ThermalWidth } from './thermalReceiptTypes';
 import PosThermalReceiptContent from './PosThermalReceiptContent';
@@ -247,7 +248,7 @@ export default function PosThermalReceiptModal({
   if (!isOpen) return null;
 
   const subtitle = receipt
-    ? `No. Order: ${receipt.order.order_number}`
+    ? `No. Order: ${receipt.order.id ? formatPosOrderDisplayRef(receipt.order.id) : receipt.order.order_number}`
     : undefined;
 
   const footer = (

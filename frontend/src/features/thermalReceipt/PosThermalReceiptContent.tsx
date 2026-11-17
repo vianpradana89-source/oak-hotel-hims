@@ -102,9 +102,6 @@ export default function PosThermalReceiptContent({
       {/* 3. IDENTITAS TRANSAKSI */}
       <div className="thermal-section">
         <Row label="No. Order" value={order.id ? formatPosOrderDisplayRef(order.id) : order.order_number} mono />
-        {order.id && order.order_number ? (
-          <Row label="Ref Bon" value={order.order_number} mono />
-        ) : null}
         <Row label="No. Transaksi" value={sale.transaction_no} mono />
         {txDate && <Row label="Tanggal" value={formatHotelDateTimeIndonesian(txDate)} />}
         {order.guest_name && <Row label="Tamu" value={order.guest_name} />}
@@ -117,29 +114,36 @@ export default function PosThermalReceiptContent({
       {/* 4. ITEM */}
       <div className="thermal-section">
         {itemRows.map((r, i) => (
-          <div key={i}>
-            {/* Item line */}
-            <Row
-              label={r.item_code_snapshot ? `[${r.item_code_snapshot}] ${r.item_name_snapshot}` : r.item_name_snapshot}
-              value={`${r.qty} x ${formatHotelCurrency(r.unitPrice)}`}
-              mono
-            />
+          <div key={i} className="thermal-item">
+            {/* Baris 1: Nama Produk */}
+            <div className="thermal-item-name">
+              {r.item_name_snapshot}
+            </div>
+            {/* Baris 2: Qty x Harga Satuan di kiri, Subtotal di kanan */}
+            <div className="thermal-row thermal-row--mono">
+              <span className="thermal-item-qty">
+                {r.qty} x {formatHotelCurrency(r.unitPrice)}
+              </span>
+              <span className="thermal-value">
+                {formatHotelCurrency(r.gross)}
+              </span>
+            </div>
             {/* Item notes */}
             {r.notes && (
-              <Row label="" value={r.notes} />
+              <div className="thermal-item-note">Catatan: {r.notes}</div>
             )}
             {/* Item discount */}
             {r.discount > 0 && (
               <Row
-                label=" Diskon Item"
+                label="  Diskon Item"
                 value={`- ${formatHotelCurrency(r.discount)}`}
                 mono
               />
             )}
             {/* Item net */}
-            {(r.discount > 0) && (
+            {r.discount > 0 && (
               <Row
-                label=" Nett"
+                label="  Nett"
                 value={formatHotelCurrency(r.net)}
                 mono
               />

@@ -375,6 +375,7 @@ export default function ReservationDetailDrawer({
   const isTabVisible = (tab: 'ringkasan' | 'tamu-kamar' | 'pembayaran' | 'deposit-jaminan' | 'dokumen' | 'riwayat') =>
     activeTab === tab ? '' : 'hidden';
   const [folioData, setFolioData] = useState<any>(null);
+  const [deletingFolioEntryId, setDeletingFolioEntryId] = useState<number | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isRepriceModalOpen, setIsRepriceModalOpen] = useState<boolean>(false);
   const [isRoomMoveModalOpen, setIsRoomMoveModalOpen] = useState<boolean>(false);
@@ -631,6 +632,41 @@ export default function ReservationDetailDrawer({
     } catch (err) {
       console.warn('Failed to load folio', err);
       return null;
+    }
+  };
+
+  const handleDeleteFolioEntry = async (ent: any) => {
+    const entryId = Number(ent?.id);
+    const targetReservationId = Number(detailData?.id || reservation?.id);
+    if (!entryId || !targetReservationId || !activePropId) return;
+
+    const itemLabel = ent?.description || ent?.entry_type || `Item #${entryId}`;
+    const itemAmount = Number(ent?.amount || 0).toLocaleString('id-ID');
+    const confirmed = window.confirm(
+      `Hapus "${itemLabel}" (Rp ${itemAmount}) dari Rincian Folio Transaksi?\n\nSeluruh data dan riwayat biaya tambahan ini akan dihapus.`
+    );
+    if (!confirmed) return;
+
+    try {
+      setDeletingFolioEntryId(entryId);
+      const result = await safeFetchJson<{ status?: string; data?: any; message?: string }>(
+        `/api/stay-charges/folio-entry/${entryId}?property_id=${activePropId}&reservation_id=${targetReservationId}`,
+        { method: 'DELETE' },
+        'Gagal menghapus item folio',
+        authFetch
+      );
+      if (!result.ok) {
+        window.alert(result.errorMessage || 'Gagal menghapus item folio');
+        return;
+      }
+      await loadFolio(targetReservationId);
+      await loadFullReservation(targetReservationId);
+      auditLog.retry();
+      onRefresh();
+    } catch (err: any) {
+      window.alert(err?.message || 'Gagal menghapus item folio');
+    } finally {
+      setDeletingFolioEntryId(null);
     }
   };
 
@@ -2308,19 +2344,41 @@ export default function ReservationDetailDrawer({
                   <div className="divide-y divide-stone-100 max-h-48 overflow-y-auto">
                     {entries.map((ent: any) => {
                       const isDebit = (ent.direction || ent.amount_type) === 'DEBIT';
+                      const entryTypeUpper = String(ent.entry_type || ent.source_type || '').toUpperCase();
+                      const sourceTypeUpper = String(ent.source_type || '').toUpperCase();
+                      const isRoomCharge =
+                        entryTypeUpper === 'ROOM_CHARGE' ||
+                        entryTypeUpper === 'DAY_USE_ROOM' ||
+                        sourceTypeUpper === 'ROOM_CHARGE' ||
+                        sourceTypeUpper === 'DAY_USE_ROOM';
+                      const isDeletingThis = deletingFolioEntryId === Number(ent.id);
                       return (
-                        <div key={ent.id} className="p-2.5 flex items-center justify-between text-xs">
+                        <div key={ent.id} className="p-2.5 flex items-center justify-between text-xs gap-2">
                           <div>
                             <span className="font-semibold text-stone-800 text-xs">{ent.description || ent.entry_type}</span>
                             <span className="text-xs text-stone-400 block font-mono mt-0.5">
                               {ent.entry_type || ent.source_type} • {ent.hotel_date || ent.created_at?.slice(0, 10) || ''}
                             </span>
                           </div>
-                          <div className="font-mono font-bold text-right text-xs">
-                            {isDebit ? (
-                              <span className="text-stone-900">+Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
-                            ) : (
-                              <span className="text-emerald-800">-Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <div className="font-mono font-bold text-right text-xs">
+                              {isDebit ? (
+                                <span className="text-stone-900">+Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
+                              ) : (
+                                <span className="text-emerald-800">-Rp {Number(ent.amount || 0).toLocaleString('id-ID')}</span>
+                              )}
+                            </div>
+                            {!isRoomCharge && (
+                              <button
+                                type="button"
+                                disabled={isDeletingThis}
+                                onClick={() => handleDeleteFolioEntry(ent)}
+                                title={`Hapus ${ent.description || ent.entry_type}`}
+                                aria-label={`Hapus ${ent.description || ent.entry_type}`}
+                                className="w-5 h-5 inline-flex items-center justify-center rounded-md text-stone-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 transition-colors cursor-pointer disabled:opacity-50 text-sm leading-none font-bold"
+                              >
+                                {isDeletingThis ? '…' : '×'}
+                              </button>
                             )}
                           </div>
                         </div>

@@ -1228,6 +1228,183 @@ export async function correctFolioEntry(
   };
 }
 
+export async function deleteFolioEntry(
+  client: PoolClient,
+  propertyId: number,
+  reservationId: number,
+  folioEntryId: number
+): Promise<{
+  deleted: boolean;
+  folio_entry_id: number;
+  reservation: any;
+}> {
+  // 1. Plain read to discover reservation_id from folio_entries
+  const entryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1',
+    [folioEntryId]
+  );
+
+  if ((entryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const discoveredEntry = entryRes.rows[0];
+  const targetReservationId = Number(discoveredEntry.reservation_id);
+
+  // 2. Lock parent reservation first
+  await lockReservationFinancialState(
+    client,
+    targetReservationId,
+    propertyId
+  );
+
+  // 3. Lock child folio_entry
+  const lockEntryRes = await client.query(
+    'SELECT * FROM folio_entries WHERE id = $1 FOR UPDATE',
+    [folioEntryId]
+  );
+
+  if ((lockEntryRes.rowCount ?? 0) === 0) {
+    const err: any = new Error(`Item folio #${folioEntryId} tidak ditemukan`);
+    err.statusCode = 404;
+    throw err;
+  }
+
+  const revalidatedEntry = lockEntryRes.rows[0];
+  if (Number(revalidatedEntry.reservation_id) !== targetReservationId) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (reservationId && Number(revalidatedEntry.reservation_id) !== Number(reservationId)) {
+    const err: any = new Error('ID reservasi tidak cocok dengan item folio');
+    err.statusCode = 400;
+    err.code = 'RESERVATION_MISMATCH';
+    throw err;
+  }
+  if (revalidatedEntry.property_id && Number(revalidatedEntry.property_id) !== propertyId) {
+    const err: any = new Error('Item folio tidak berada pada properti yang aktif');
+    err.statusCode = 403;
+    err.code = 'CROSS_PROPERTY_ACCESS';
+    throw err;
+  }
+
+  const entryTypeUpper = String(revalidatedEntry.entry_type || '').toUpperCase();
+  const sourceTypeUpper = String(revalidatedEntry.source_type || '').toUpperCase();
+
+  if (
+    entryTypeUpper === 'ROOM_CHARGE' ||
+    entryTypeUpper === 'DAY_USE_ROOM' ||
+    sourceTypeUpper === 'ROOM_CHARGE' ||
+    sourceTypeUpper === 'DAY_USE_ROOM'
+  ) {
+    const err: any = new Error('Biaya reservasi kamar utama tidak dapat dihapus dari rincian folio');
+    err.statusCode = 400;
+    err.code = 'ROOM_CHARGE_CANNOT_BE_DELETED';
+    throw err;
+  }
+
+  if (
+    ['DEPOSIT_APPLY', 'DEPOSIT_UNAPPLY', 'DEPOSIT', 'PAYMENT', 'PAYMENT_VOID', 'PAYMENT_REVERSAL', 'CORRECTION_REPLACEMENT'].includes(entryTypeUpper) ||
+    sourceTypeUpper === 'DEPOSIT' ||
+    (revalidatedEntry.direction === 'CREDIT' && entryTypeUpper === 'PAYMENT')
+  ) {
+    const err: any = new Error('Entri pembayaran atau deposit tidak dapat dihapus langsung dari rincian folio');
+    err.statusCode = 400;
+    err.code = 'PAYMENT_OR_DEPOSIT_CANNOT_BE_DELETED';
+    throw err;
+  }
+
+  // 4. Find any reversal folio_entries linked to this entry
+  const revEntriesRes = await client.query(
+    'SELECT id FROM folio_entries WHERE reversal_of_entry_id = $1',
+    [folioEntryId]
+  );
+  const allFolioIds: number[] = [
+    folioEntryId,
+    ...revEntriesRes.rows.map((r: any) => Number(r.id)).filter((n: number) => Number.isInteger(n) && n > 0)
+  ];
+  const allFolioIdStrs: string[] = allFolioIds.map(String);
+
+  // 5. Find and delete projected transactions for these folio entries
+  const txRes = await client.query(
+    `SELECT id FROM transactions
+     WHERE property_id = $1
+       AND reservation_id = $2
+       AND (
+         (source_id = ANY($3::text[]) AND COALESCE(source_type, '') NOT IN ('POS_ORDER', 'POS', 'ROOM_CHARGE', 'DAY_USE_ROOM'))
+         OR (metadata->>'folio_entry_id') = ANY($3::text[])
+       )`,
+    [propertyId, targetReservationId, allFolioIdStrs]
+  );
+  const baseTxIds: number[] = txRes.rows.map((r: any) => Number(r.id)).filter((n: number) => Number.isInteger(n) && n > 0);
+
+  let allTxIds: number[] = [...baseTxIds];
+  if (baseTxIds.length > 0) {
+    const revTxRes = await client.query(
+      `SELECT id FROM transactions
+       WHERE property_id = $1
+         AND reversal_of_transaction_id = ANY($2::int[])`,
+      [propertyId, baseTxIds]
+    );
+    for (const r of revTxRes.rows) {
+      const idNum = Number(r.id);
+      if (Number.isInteger(idNum) && idNum > 0 && !allTxIds.includes(idNum)) {
+        allTxIds.push(idNum);
+      }
+    }
+  }
+
+  if (allTxIds.length > 0) {
+    await client.query(
+      'DELETE FROM transaction_lines WHERE transaction_id = ANY($1::int[])',
+      [allTxIds]
+    );
+    await client.query(
+      'DELETE FROM transactions WHERE id = ANY($1::int[]) AND property_id = $2',
+      [allTxIds, propertyId]
+    );
+  }
+
+  // 6. Delete the folio_entries rows
+  await client.query(
+    'DELETE FROM folio_entries WHERE id = ANY($1::int[])',
+    [allFolioIds]
+  );
+
+  // 7. Remove audit log entries tied to this deleted folio entry so its history is cleanly removed
+  await client.query(
+    `DELETE FROM audit_logs
+     WHERE property_id = $1
+       AND entity = 'RESERVATION_FOLIO'
+       AND record_id = $2
+       AND (new_value::text LIKE $3 OR old_value::text LIKE $3)`,
+    [propertyId, String(targetReservationId), `%"id":${folioEntryId}%`]
+  );
+
+  // 8. Recalculate reservation financials and sync room transaction payment_status
+  const recalc = await recalculateReservationFinancials(client, targetReservationId, propertyId);
+
+  await client.query(
+    `UPDATE transactions
+     SET payment_status = $1, updated_at = CURRENT_TIMESTAMP
+     WHERE property_id = $2
+       AND reservation_id = $3
+       AND source_type IN ('ROOM_CHARGE', 'DAY_USE_ROOM')
+       AND reversal_of_transaction_id IS NULL`,
+    [recalc.payment_status, propertyId, targetReservationId]
+  );
+
+  return {
+    deleted: true,
+    folio_entry_id: folioEntryId,
+    reservation: recalc.reservation
+  };
+}
+
 // ============================================================================
 // HELPER MAPPERS
 // ============================================================================
