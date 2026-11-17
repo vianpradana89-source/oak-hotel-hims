@@ -344,9 +344,14 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const totalDiscountAmount =
     discSummary?.total_discount_amount ?? roomDiscountTotal + posDiscountTotal;
 
+  const isSingleDayPeriod = Boolean(
+    data.start_date && data.end_date && data.start_date === data.end_date
+  );
+  const showRoomRateCol = !isSingleDayPeriod;
+
   // Delegate specialized sub-views (4 through 11)
   if (reportMode === 'overnight_vs_dayuse') {
-    return <SubViewOvernightVsDayUse roomSales={roomSales} />;
+    return <SubViewOvernightVsDayUse roomSales={roomSales} showRoomRateCol={showRoomRateCol} />;
   }
   if (reportMode === 'sumber_penjualan') {
     return <SubViewSumberPenjualan roomSales={roomSales} />;
@@ -849,15 +854,17 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                     activeSort={activeSortCol?.col === 'grossTotal' ? activeSortCol.dir : null}
                     onApply={handleApplyColFilter}
                   />
-                  <ColumnFilterHeader
-                    columnKey="roomRate"
-                    label="Room Rate"
-                    align="right"
-                    allValues={colVals('roomRate')}
-                    activeSelected={columnFilters.roomRate?.selectedValues}
-                    activeSort={activeSortCol?.col === 'roomRate' ? activeSortCol.dir : null}
-                    onApply={handleApplyColFilter}
-                  />
+                  {showRoomRateCol && (
+                    <ColumnFilterHeader
+                      columnKey="roomRate"
+                      label="Room Rate"
+                      align="right"
+                      allValues={colVals('roomRate')}
+                      activeSelected={columnFilters.roomRate?.selectedValues}
+                      activeSort={activeSortCol?.col === 'roomRate' ? activeSortCol.dir : null}
+                      onApply={handleApplyColFilter}
+                    />
+                  )}
                   <ColumnFilterHeader
                     columnKey="discountAmount"
                     label="Diskon"
@@ -929,7 +936,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                 {filteredRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={isRoomOnlyView ? 14 : 15}
+                      colSpan={(isRoomOnlyView ? 13 : 14) + (showRoomRateCol ? 1 : 0)}
                       className="py-10 text-center text-slate-400"
                     >
                       Tidak ada data penjualan pada filter ini
@@ -991,10 +998,12 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                         {formatIdr(row.grossTotal)}
                       </td>
 
-                      {/* 7b. Room Rate (Total Biaya / Malam, atau sama dengan Total Biaya untuk Day Use) */}
-                      <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
-                        {row.source === 'KAMAR' ? formatIdr(row.roomRate) : '-'}
-                      </td>
+                      {/* 7b. Room Rate (Total Biaya / Malam, hanya ditampilkan jika periode > 1 hari) */}
+                      {showRoomRateCol && (
+                        <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
+                          {row.source === 'KAMAR' ? formatIdr(row.roomRate) : '-'}
+                        </td>
+                      )}
 
                       {/* 8. Diskon */}
                       <td className="py-2.5 px-3 text-right tabular-nums text-purple-700 whitespace-nowrap">

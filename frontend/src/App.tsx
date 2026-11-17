@@ -1841,6 +1841,8 @@ function AppContent() {
          if (expectedPrimaryGuestId !== null && expectedPrimaryGuestId !== undefined) {
            body.expected_primary_guest_id = expectedPrimaryGuestId;
          }
+       } else if (action === 'checkout') {
+         body.allow_unpaid_checkout = true;
        }
        const response = await authFetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
          method: 'POST',

@@ -171,8 +171,19 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
           loadStatus,
         });
 
-        // FOLIO GATE takes precedence over GUARANTEE GATE:
-        // HARD_BLOCK_FOLIO and HARD_BLOCK_FOLIO_UNVERIFIED prevent proceeding entirely.
+        // Physical identity held in custody remains a hard block before checkout:
+        if (guaranteeDecision.action === 'HARD_BLOCK_ROOM_IDENTITY') {
+          setDecision({
+            ...guaranteeDecision,
+            appliedDeposit,
+            totalCharges,
+          });
+          return;
+        }
+
+        // FOLIO GATE:
+        // HARD_BLOCK_FOLIO_UNVERIFIED prevents proceeding entirely.
+        // FOLIO_BALANCE_OUTSTANDING displays a notification that the unpaid balance will enter Piutang.
         if (folioError) {
           setDecision({
             action: 'HARD_BLOCK_FOLIO_UNVERIFIED',
@@ -342,7 +353,7 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     );
   }
 
-  // 2. HARD BLOCK: Folio balance outstanding
+  // 2. NOTIFICATION: Folio balance outstanding -> enters Piutang on checkout
   if (decision.action === 'HARD_BLOCK_FOLIO_OUTSTANDING') {
     const balance = Number(decision.remainingBalance ?? 0);
     const formattedBalance = new Intl.NumberFormat('id-ID').format(balance);
@@ -353,16 +364,18 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
     return (
       <Modal
         isOpen={isOpen}
-        onClose={onClose}
-        title="Check-out Diblokir: Saldo Folio Belum Lunas"
+        onClose={handleModalClose}
+        title="Pemberitahuan Check-out: Pembayaran Belum Lunas"
         size="sm"
         closeOnOverlayClick={false}
+        closeOnEscape={submitting ? false : undefined}
+        closeOnCloseClick={submitting ? false : undefined}
         footer={
-          <div className="flex gap-2">
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
               type="button"
               className="btn btn-ghost text-xs"
-              onClick={onClose}
+              onClick={handleModalClose}
               disabled={submitting}
             >
               Tutup
@@ -370,24 +383,34 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
             {onOpenFolioSection && reservationId && (
               <button
                 type="button"
-                className="btn btn-primary text-xs"
+                className="px-3 py-1.5 text-xs font-semibold border border-stone-300 rounded-lg text-stone-700 bg-white hover:bg-stone-50 disabled:opacity-50 transition-colors cursor-pointer"
                 onClick={() => onOpenFolioSection(reservationId)}
                 disabled={submitting}
               >
                 Buka Folio
               </button>
             )}
+            <button
+              type="button"
+              className="btn btn-primary text-xs"
+              onClick={handleCheckout}
+              disabled={submitting}
+            >
+              {submitting ? 'Memproses…' : 'Lanjutkan Check-out (Masuk Piutang)'}
+            </button>
           </div>
         }
       >
         <div className="space-y-3">
-          <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-900 flex items-start gap-2.5">
-            <span className="text-lg">🚫</span>
+          <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-900 flex items-start gap-2.5">
+            <span className="text-lg">⚠️</span>
             <div className="text-xs leading-relaxed">
-              <p className="font-semibold text-rose-950 mb-1">Folio Reservasi Belum Seimbang</p>
+              <p className="font-semibold text-amber-950 mb-1">
+                Pembayaran Belum Lunas — Akan Masuk ke Piutang
+              </p>
               <p>
-                Checkout untuk Kamar <strong className="font-semibold">{roomNumber}</strong> tidak dapat diproses karena masih ada sisa pembayaran sebesar{' '}
-                <strong className="font-semibold text-rose-950">Rp {formattedBalance}</strong>.
+                Kamar <strong className="font-semibold">{roomNumber}</strong> ({guestName}) masih memiliki sisa pembayaran sebesar{' '}
+                <strong className="font-semibold text-amber-950">Rp {formattedBalance}</strong>.
                 {Number(decision.appliedDeposit ?? 0) > 0 ? (
                   <span className="mt-1 block">
                     (Sudah terdapat deposit yang diterapkan: Rp {formattedApplied})
@@ -398,8 +421,8 @@ export const CheckoutGuaranteeConfirmationModal: React.FC<CheckoutGuaranteeConfi
                   </span>
                 )}
               </p>
-              <p className="mt-2 text-rose-800">
-                Selesaikan pembayaran atau terapkan deposit yang tersedia di bagian Folio sebelum melakukan check-out.
+              <p className="mt-2 text-amber-800">
+                Jika Anda melanjutkan proses check-out sekarang, transaksi reservasi ini akan otomatis tercatat sebagai <strong>Piutang Tamu</strong> di menu <strong>Transaksi Penjualan → Sheet Piutang</strong>.
               </p>
             </div>
           </div>

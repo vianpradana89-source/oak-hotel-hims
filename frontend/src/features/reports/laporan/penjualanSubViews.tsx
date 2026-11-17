@@ -1506,7 +1506,8 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
 // ============================================================================
 export const SubViewOvernightVsDayUse: React.FC<{
   roomSales: RoomSaleRow[];
-}> = ({ roomSales }) => {
+  showRoomRateCol?: boolean;
+}> = ({ roomSales, showRoomRateCol = true }) => {
   const [stayFilter, setStayFilter] = useState<'ALL' | 'OVERNIGHT' | 'DAY_USE'>('ALL');
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -1949,7 +1950,7 @@ export const SubViewOvernightVsDayUse: React.FC<{
                 <th className="py-2.5 px-3 text-center">Durasi</th>
                 <th className="py-2.5 px-3 text-right">Diskon</th>
                 <th className="py-2.5 px-3 text-right">Total Biaya</th>
-                <th className="py-2.5 px-3 text-right">Room Rate</th>
+                {showRoomRateCol && <th className="py-2.5 px-3 text-right">Room Rate</th>}
                 <th className="py-2.5 px-3 text-left">Metode Bayar</th>
                 <th className="py-2.5 px-3 text-center">Status</th>
               </tr>
@@ -1957,7 +1958,7 @@ export const SubViewOvernightVsDayUse: React.FC<{
             <tbody className="divide-y divide-slate-100">
               {filteredDetailRows.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="py-10 text-center text-slate-400">
+                  <td colSpan={showRoomRateCol ? 12 : 11} className="py-10 text-center text-slate-400">
                     Tidak ada data reservasi untuk filter ini.
                   </td>
                 </tr>
@@ -2008,9 +2009,11 @@ export const SubViewOvernightVsDayUse: React.FC<{
                       <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700 whitespace-nowrap">
                         {r.is_complimentary ? 'Complimentary' : formatIdr(totalBiaya)}
                       </td>
-                      <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
-                        {r.is_complimentary ? '-' : formatIdr(roomRate)}
-                      </td>
+                      {showRoomRateCol && (
+                        <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
+                          {r.is_complimentary ? '-' : formatIdr(roomRate)}
+                        </td>
+                      )}
                       <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                         {r.payment_method || '-'}
                       </td>

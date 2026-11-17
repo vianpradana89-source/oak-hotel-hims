@@ -309,7 +309,11 @@ export function createReservationCheckoutHandler(deps: ReservationCheckoutDeps) 
             message: 'Data keuangan reservasi tidak dapat diverifikasi. Silakan periksa folio terlebih dahulu sebelum check-out.'
           });
         }
-        if (validatedBalance > 0.01) {
+        const allowUnpaidCheckout =
+          req.body?.allow_unpaid_checkout === true ||
+          req.body?.allow_unpaid_checkout === 'true' ||
+          req.body?.force === true;
+        if (validatedBalance > 0.01 && !allowUnpaidCheckout) {
           await client.query('ROLLBACK');
           return res.status(409).json({
             status: 'ERROR',

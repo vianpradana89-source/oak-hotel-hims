@@ -43,7 +43,6 @@ const DOC_TYPES = [
 // DEPOSIT-PURPOSE-PHASE-A: purpose choices + human labels.
 // null/undefined = LEGACY / belum terklasifikasi (baris lama, hanya untuk tampilan).
 const PURPOSE_OPTIONS: Array<{ value: DepositPurpose; label: string; hint: string }> = [
-  { value: 'ADVANCE_PAYMENT', label: 'Uang Muka / DP', hint: 'Menyimpan uang tamu. Kurangi tagihan hanya setelah "Gunakan ke Tagihan".' },
   { value: 'SECURITY_DEPOSIT', label: 'Jaminan', hint: 'Custody. Dikembalikan setelah check-out, tidak mengurangi tagihan.' },
 ];
 
@@ -770,7 +769,7 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
 }) {
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState('CASH');
-  const [purpose, setPurpose] = useState<DepositPurpose>('ADVANCE_PAYMENT');
+  const [purpose, setPurpose] = useState<DepositPurpose>('SECURITY_DEPOSIT');
   const [notes, setNotes] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
@@ -802,7 +801,7 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
 
   const handleClose = () => {
     setJustReceived(null);
-    setAmount(''); setMethod('CASH'); setPurpose('ADVANCE_PAYMENT'); setNotes(''); setFile(null);
+    setAmount(''); setMethod('CASH'); setPurpose('SECURITY_DEPOSIT'); setNotes(''); setFile(null);
     setError(null);
     onClose();
   };
