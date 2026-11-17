@@ -367,7 +367,7 @@ export async function executeRoomMove(pool: Pool, reservationId: number, input: 
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ('PMS','ROOM_MOVE','RESERVATION',$1,$2,$3,$4)`,
-      [reservation.id, JSON.stringify({ room_move_id: movement.rows[0].id, from_room_id: reservation.room_id, to_room_id: target.id, reason_category: category, pricing_treatment: pricingTreatment, effective_from_date: effectiveFrom }), correlationId || null, propertyId]
+      [reservation.id, JSON.stringify({ room_move_id: movement.rows[0].id, from_room_id: reservation.room_id, to_room_id: target.id, reason_category: category, pricing_treatment: pricingTreatment, effective_from_date: effectiveFrom, ...(actorName ? { actor: actorName, actor_name_snapshot: actorName } : {}) }), correlationId || null, propertyId]
     );
     await client.query('COMMIT');
     return { movement: movement.rows[0], reservation_id: Number(reservation.id), from_room_id: Number(reservation.room_id), to_room_id: Number(target.id), pricing };

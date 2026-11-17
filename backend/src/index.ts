@@ -4146,7 +4146,7 @@ app.post('/api/bookings/:bid/reservations', async (req, res) => {
       stay_type: payload.stay_type || 'OVERNIGHT',
       start_at: payload.start_at || null,
       end_at: payload.end_at || null,
-      created_by: payload.created_by ? String(payload.created_by) : null,
+      created_by: payload.created_by ? String(payload.created_by) : (resolveAuditActorName(req) || null),
       correlation_id: payload.correlation_id || null,
       special_requests: payload.special_requests || null,
       ktp_path: payload.ktp_path || null,
@@ -4438,10 +4438,11 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
         throw new Error(`CANCELLATION_INTEGRITY_ERROR: reservation ${reservation.id} was not updated`);
       }
 
+      const cancelActor = req?.user?.username || req?.user?.full_name || (req?.user as any)?.name || req.body?.actor || undefined;
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        ['PMS', 'CANCEL', 'RESERVATION', reservation.id, JSON.stringify(updatedReservation.rows[0]), correlationId, booking.property_id]
+        ['PMS', 'CANCEL', 'RESERVATION', reservation.id, JSON.stringify({ ...updatedReservation.rows[0], ...(cancelActor ? { actor: cancelActor, actor_name_snapshot: cancelActor } : {}) }), correlationId, booking.property_id]
       );
     }
 
@@ -4540,7 +4541,11 @@ function parseAuditLimit(raw: any): number | null {
 function deriveActor(row: any, payload: any): string {
   // 1) Snapshot name fields actually written in new_value by PMS/PAYMENT/DEPOSIT writers
   if (payload && typeof payload === 'object') {
-    for (const key of ['actor_name_snapshot', 'actor_name', 'performed_by', 'actor']) {
+    for (const key of ['actor_name_snapshot', 'actor_name', 'performed_by', 'actor', 'edited_by', 'checked_in_by', 'checked_out_by', 'cancelled_by', 'created_by']) {
+      const v = payload[key];
+      if (typeof v === 'string' && v.trim() && v.trim() !== 'USER') return v.trim();
+    }
+    for (const key of ['actor_name_snapshot', 'actor_name', 'performed_by', 'actor', 'edited_by']) {
       const v = payload[key];
       if (typeof v === 'string' && v.trim()) return v.trim();
     }
@@ -4548,6 +4553,27 @@ function deriveActor(row: any, payload: any): string {
   // 2) actor_user_id column is a user ID — NOT a display name.
   //    Do not surface it as actor. Fall through to "Tidak tercatat".
   return 'Tidak tercatat';
+}
+
+function resolveAuditActorName(req: any, explicitActor?: unknown): string | undefined {
+  const candidates = [
+    explicitActor,
+    req?.body?.actor_name_snapshot,
+    req?.body?.actor_name,
+    req?.body?.actor,
+    req?.user?.username,
+    req?.user?.full_name,
+    (req?.user as any)?.name,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim() && c.trim() !== 'USER') {
+      return c.trim();
+    }
+  }
+  if (typeof explicitActor === 'string' && explicitActor.trim()) {
+    return explicitActor.trim();
+  }
+  return undefined;
 }
 
 // Human-readable summary from module:action. Amount only when finite number.
@@ -4948,6 +4974,7 @@ app.patch('/api/reservations/:id', async (req, res) => {
 
     const beforeDto = withReservationHotelDates(existing);
     const afterDto = withReservationHotelDates(updated.rows[0]);
+    const patchActor = resolveAuditActorName(req);
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -4959,7 +4986,8 @@ app.patch('/api/reservations/:id', async (req, res) => {
         JSON.stringify({
           ...afterDto,
           before: beforeDto,
-          after: afterDto
+          after: afterDto,
+          ...(patchActor ? { actor: patchActor, actor_name_snapshot: patchActor } : {})
         }),
         req.headers['x-correlation-id'] || null,
         reservationPropertyId
@@ -5098,7 +5126,7 @@ const handleReservationEdit = async (req: any, res: any) => {
       return res.status(400).json({ status: 'ERROR', message: 'ID reservasi tidak valid' });
     }
 
-    const actor = req.body?.actor || req.user?.username || 'USER';
+    const actor = resolveAuditActorName(req, req.body?.actor) || 'USER';
     const updated = await executeReservationEdit(pool, reservationId, req.body || {}, actor);
 
     broadcastEvent('ReservationUpdated', {
@@ -5185,7 +5213,7 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUp
       booker_guest_id: nullableId(body.booker_guest_id),
       idempotency_key: idempotencyKey
     };
-    const actor = body.actor || req.user?.username || 'USER';
+    const actor = resolveAuditActorName(req, body.actor) || 'USER';
     const file = req.file ? {
       buffer: req.file.buffer,
       mimetype: req.file.mimetype,
@@ -5318,10 +5346,11 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
       cancelledReservation = updated.rows[0];
       lockedChildren[targetIndex] = cancelledReservation;
 
+      const cancelResActor = resolveAuditActorName(req);
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-        ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(cancelledReservation)), req.headers['x-correlation-id'] || null, propertyId]
+        ['PMS', 'CANCEL', 'RESERVATION', reservationId, JSON.stringify({ ...withReservationHotelDates(cancelledReservation), ...(cancelResActor ? { actor: cancelResActor, actor_name_snapshot: cancelResActor } : {}) }), req.headers['x-correlation-id'] || null, propertyId]
       );
 
       const legacyAudit = buildLegacyPreLedgerCancellationAudit(inventoryPlan, currentStatus, 'CANCELLED');
@@ -7762,6 +7791,7 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       }
     }
 
+    const extendActor = resolveAuditActorName(req, req.body?.actor_name);
     const auditPayload = {
       operation: 'EXTEND',
       reservation_id: reservationId,
@@ -7777,7 +7807,8 @@ app.post('/api/reservations/:id/extend', async (req, res) => {
       amount_paid: totalPaid,
       remaining_balance: newRemainingBalance,
       room_type: roomType.roomTypeName,
-      room_type_id: roomType.roomTypeId
+      room_type_id: roomType.roomTypeId,
+      ...(extendActor ? { actor: extendActor, actor_name_snapshot: extendActor } : {})
     };
 
     await client.query(
@@ -8045,6 +8076,7 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       }
     }
 
+    const shortenActor = resolveAuditActorName(req, req.body?.actor_name);
     const auditPayload = {
       operation: 'SHORTEN',
       reservation_id: reservationId,
@@ -8060,7 +8092,8 @@ app.post('/api/reservations/:id/shorten', async (req, res) => {
       remaining_balance: newRemainingBalance,
       overpayment: totalPaid > finalTotalPrice ? totalPaid - finalTotalPrice : 0,
       room_type: roomType.roomTypeName,
-      room_type_id: roomType.roomTypeId
+      room_type_id: roomType.roomTypeId,
+      ...(shortenActor ? { actor: shortenActor, actor_name_snapshot: shortenActor } : {})
     };
 
     await client.query(
@@ -8335,10 +8368,11 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
       ['OCCUPIED_CLEAN', roomId]
     );
 
+    const checkinActor = resolveAuditActorName(req);
     await client.query(
       `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify(withReservationHotelDates(updated.rows[0])), req.headers['x-correlation-id'] || null, propertyId]
+      ['PMS', 'CHECK_IN', 'RESERVATION', reservationId, JSON.stringify({ ...withReservationHotelDates(updated.rows[0]), ...(checkinActor ? { actor: checkinActor, actor_name_snapshot: checkinActor } : {}) }), req.headers['x-correlation-id'] || null, propertyId]
     );
 
     await client.query('COMMIT');
@@ -8447,9 +8481,9 @@ app.post('/api/reservations/:id/payments', handlePaymentUpload, async (req: any,
       } : null,
       evidenceType: evidence_type,
       evidenceNote: evidence_note || req.body.note || null,
-      actorUserId: req.body.actor_user_id || req.body.actor_id || null,
-      actorNameSnapshot: req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || null,
-      actorRoleSnapshot: req.body.actor_role_snapshot || req.body.actor_role || null,
+      actorUserId: req.body.actor_user_id || req.body.actor_id || req.user?.id || null,
+      actorNameSnapshot: req.body.actor_name_snapshot || req.body.actor_name || req.body.created_by || resolveAuditActorName(req) || null,
+      actorRoleSnapshot: req.body.actor_role_snapshot || req.body.actor_role || req.user?.role || null,
       correlationId: req.body.correlation_id || req.headers['x-correlation-id'] || null
     });
 

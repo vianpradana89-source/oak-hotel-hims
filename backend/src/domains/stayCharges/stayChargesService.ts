@@ -103,6 +103,10 @@ async function logAudit(
   }
 ) {
   try {
+    const rawPayload = params.after ?? params.before ?? null;
+    const enrichedPayload = rawPayload && typeof rawPayload === 'object' && params.actor
+      ? { ...rawPayload, actor: params.actor, actor_name_snapshot: params.actor }
+      : rawPayload;
     await client.query(
       `INSERT INTO audit_logs (
         module, action, entity, record_id, new_value, property_id
@@ -112,7 +116,7 @@ async function logAudit(
         params.action,
         params.entity_type,
         String(params.entity_id),
-        params.after ? JSON.stringify(params.after) : (params.before ? JSON.stringify(params.before) : null),
+        enrichedPayload ? JSON.stringify(enrichedPayload) : null,
         params.property_id
       ]
     );

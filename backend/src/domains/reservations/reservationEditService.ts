@@ -1349,7 +1349,9 @@ export async function applyReservationEdit(
         price_difference: priceDifference,
         quoted_price_difference: quotedPriceDifference,
         keep_current_price: keepCurrentPrice,
-        edited_by: actor
+        edited_by: actor,
+        actor: actor,
+        actor_name_snapshot: actor
       }),
       `EDIT-RES-${reservationId}-${Date.now()}`,
       propertyId
@@ -1790,10 +1792,16 @@ export async function executeReservationEditWithPayment(
     let savedEvidence: { storageKey: string; absolutePath: string; fileSizeBytes: number } | null = null;
 
     const requestedPaymentMethod = String(payload.payment_method || '').trim();
+    const explicitEditPaymentAmount = payload.allow_checked_in && Number(payload.payment_amount) > 0
+      ? Math.round(Number(payload.payment_amount))
+      : 0;
+    const effectivePaymentAmount = explicitEditPaymentAmount > 0
+      ? explicitEditPaymentAmount
+      : settlement.paymentRequired;
     const paymentRequested = requestedPaymentMethod.length > 0 || Boolean(file);
 
-    if (!payload.keep_current_price && settlement.paymentRequired > 0 && paymentRequested) {
-      const paymentAmount = settlement.paymentRequired;
+    if (!payload.keep_current_price && effectivePaymentAmount > 0 && paymentRequested) {
+      const paymentAmount = effectivePaymentAmount;
       const paymentMethod = requestedPaymentMethod;
 
       if (!paymentMethod) {

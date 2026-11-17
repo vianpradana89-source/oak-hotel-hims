@@ -1648,7 +1648,7 @@ export default function QuickBookingModal({
               </div>
               <div>
                 <div className="flex items-center gap-2">
-                  <h2 className="text-lg font-bold tracking-tight text-white">Reservasi Cepat (Quick Booking)</h2>
+                  <h2 className="text-lg font-bold tracking-tight text-white">Reservasi</h2>
                   <span className="text-[11px] px-2 py-0.5 rounded-full bg-emerald-700/80 text-emerald-100 font-semibold border border-emerald-600/50">
                     Multi-Kamar
                   </span>

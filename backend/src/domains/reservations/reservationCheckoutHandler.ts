@@ -380,10 +380,29 @@ export function createReservationCheckoutHandler(deps: ReservationCheckoutDeps) 
 
         await deps.ensureCheckoutRoomCleaningTask(client, propertyId, currentRoomId, reservationId);
 
+        const checkoutActor =
+          (typeof req.body?.actor_name_snapshot === 'string' && req.body.actor_name_snapshot.trim()) ||
+          (typeof req.body?.actor_name === 'string' && req.body.actor_name.trim()) ||
+          (typeof req.body?.actor === 'string' && req.body.actor.trim()) ||
+          (typeof (req as any).user?.username === 'string' && (req as any).user.username.trim()) ||
+          (typeof (req as any).user?.full_name === 'string' && (req as any).user.full_name.trim()) ||
+          undefined;
+
         await client.query(
           `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          ['PMS', 'CHECK_OUT', 'RESERVATION', reservationId, JSON.stringify(deps.withReservationHotelDates(checkoutReservation)), req.headers['x-correlation-id'] || null, propertyId]
+          [
+            'PMS',
+            'CHECK_OUT',
+            'RESERVATION',
+            reservationId,
+            JSON.stringify({
+              ...deps.withReservationHotelDates(checkoutReservation),
+              ...(checkoutActor ? { actor: checkoutActor, actor_name_snapshot: checkoutActor } : {})
+            }),
+            req.headers['x-correlation-id'] || null,
+            propertyId
+          ]
         );
         lockedChildren[lockedChildren.findIndex((row: any) => Number(row.id) === targetReservationId)] = checkoutReservation;
       }

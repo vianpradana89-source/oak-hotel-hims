@@ -762,7 +762,8 @@ export async function addRoomToBooking(
           check_out: reservation.check_out ? hotelDateKey(reservation.check_out) : blockCheckOut,
           rate_plan_id: ratePlanId,
           total_price: Number(reservation.total_price ?? totalPrice),
-          payment_status: reservation.payment_status || 'UNPAID'
+          payment_status: reservation.payment_status || 'UNPAID',
+          ...(payload.created_by ? { actor: payload.created_by, actor_name_snapshot: payload.created_by, created_by: payload.created_by } : {})
         }),
         correlationId,
         propertyId
