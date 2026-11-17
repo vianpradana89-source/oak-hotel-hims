@@ -231,27 +231,65 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       [ctx.propertyId]
     ),
     pool.query(
-      `SELECT
-         t.id,
-         t.transaction_no,
-         to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
-         COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
-         COALESCE(NULLIF(BTRIM(t.description), ''), 'Pembelian Operasional / PO') AS notes,
-         COALESCE(t.net_amount, 0)::numeric(16,2) AS total_amount,
-         CASE
-           WHEN UPPER(COALESCE(t.payment_status, 'UNPAID')) = 'PAID' THEN COALESCE(t.net_amount, 0)
-           ELSE COALESCE(t.paid_amount, 0)
-         END::numeric(16,2) AS paid_amount,
-         to_char(t.due_date, 'YYYY-MM-DD') AS due_date,
-         COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Cash') AS payment_method,
-         UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status
-       FROM transactions t
-       LEFT JOIN suppliers s ON s.id = t.supplier_id
-       WHERE t.property_id = $1
-         AND t.transaction_type = 'PURCHASE'
-         AND t.deleted_at IS NULL
-         AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-       ORDER BY t.transaction_date DESC, t.id DESC
+      `SELECT * FROM (
+         SELECT
+           t.id,
+           t.transaction_no,
+           to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
+           COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
+           COALESCE(NULLIF(BTRIM(t.description), ''), 'Pembelian Operasional / PO') AS notes,
+           COALESCE(t.net_amount, 0)::numeric(16,2) AS total_amount,
+           CASE
+             WHEN UPPER(COALESCE(t.payment_status, 'UNPAID')) = 'PAID' THEN COALESCE(t.net_amount, 0)
+             ELSE LEAST(COALESCE(t.net_amount, 0), COALESCE(pmt.total_paid, 0))
+           END::numeric(16,2) AS paid_amount,
+           NULL::text AS due_date,
+           COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Cash') AS payment_method,
+           UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status
+         FROM transactions t
+         LEFT JOIN suppliers s ON s.id = t.supplier_id
+         LEFT JOIN LATERAL (
+           SELECT COALESCE(SUM(pt.amount), 0)::numeric(16,2) AS total_paid
+           FROM payment_transactions pt
+           WHERE pt.transaction_id = t.id
+             AND pt.status = 'SUCCESS'
+             AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+         ) pmt ON TRUE
+         WHERE t.property_id = $1
+           AND t.transaction_type = 'PURCHASE'
+           AND t.deleted_at IS NULL
+           AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+
+         UNION ALL
+
+         SELECT
+           ppo.id,
+           ppo.po_number AS transaction_no,
+           to_char(ppo.order_date, 'YYYY-MM-DD') AS tx_date,
+           COALESCE(ps.name, 'Supplier PO') AS supplier_name,
+           'Purchase Order POS' AS notes,
+           COALESCE(ppo.total_estimated_amount, 0)::numeric(16,2) AS total_amount,
+           CASE
+             WHEN ppo.status = 'COMPLETED' THEN COALESCE(ppo.total_estimated_amount, 0)
+             ELSE 0
+           END::numeric(16,2) AS paid_amount,
+           NULL::text AS due_date,
+           'Cash' AS payment_method,
+           CASE WHEN ppo.status = 'COMPLETED' THEN 'PAID' ELSE 'UNPAID' END AS payment_status
+         FROM pos_purchase_orders ppo
+         LEFT JOIN pos_suppliers ps ON ps.id = ppo.supplier_id AND ps.property_id = ppo.property_id
+         WHERE ppo.property_id = $1
+           AND COALESCE(ppo.status, 'DRAFT') != 'CANCELLED'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM transactions t
+             WHERE t.property_id = ppo.property_id
+               AND t.transaction_type = 'PURCHASE'
+               AND t.deleted_at IS NULL
+               AND t.source_reference = ppo.po_number
+           )
+       ) combined_pur
+       ORDER BY tx_date DESC, id DESC
        LIMIT 500`,
       [ctx.propertyId]
     ),

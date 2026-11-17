@@ -2134,16 +2134,11 @@ export function createReportsRouter(pool: Pool): Router {
       } else if (rawId.startsWith('HIMS-PUR-')) {
         const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
         if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi pembelian tidak valid' });
-        const cur = await pool.query(`SELECT id, net_amount, paid_amount FROM transactions WHERE id = $1`, [txId]);
+        const cur = await pool.query(`SELECT id, net_amount FROM transactions WHERE id = $1`, [txId]);
         if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Transaksi pembelian tidak ditemukan' });
-        const row = cur.rows[0];
-        const total = Number(row.net_amount || 0);
-        const currentPaid = Number(row.paid_amount || 0);
-        const newPaid = payAmount !== null && payAmount > 0 ? Math.min(total, currentPaid + payAmount) : total;
-        const newPaymentStatus = newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
         await pool.query(
-          `UPDATE transactions SET paid_amount = $2, payment_status = $3, updated_at = NOW() WHERE id = $1`,
-          [txId, newPaid, newPaymentStatus]
+          `UPDATE transactions SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
+          [txId]
         );
         return res.json({ status: 'SUCCESS' });
       }
