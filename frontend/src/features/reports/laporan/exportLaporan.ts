@@ -174,7 +174,52 @@ export function buildLaporanSheets(opts: {
   }
   sheets.push({ name: 'Pembelian', rows: purchaseRows });
 
-  // Penjualan
+  // Penjualan Kamar
+  const roomSalesRows: ExportRow[] = [
+    [
+      'No. Booking',
+      'Tanggal',
+      'Pelanggan',
+      'Room',
+      'Durasi (Malam)',
+      'Total Biaya',
+      'Room Rate',
+      'Diskon',
+      'Jumlah Bayar',
+      'Status',
+      'Metode Bayar',
+    ],
+  ];
+  if (analytics) {
+    for (const r of analytics.room_sales || []) {
+      const totalBiaya = money(r.total_price);
+      const nights = Math.max(1, Number(r.period_nights ?? r.nights) || 1);
+      const isDayUse =
+        String(r.stay_type || '').toUpperCase().includes('DAY') ||
+        String(r.stay_type || '').toUpperCase().includes('SHORT');
+      const roomRate = isDayUse
+        ? totalBiaya
+        : money(r.room_rate) > 0
+        ? money(r.room_rate)
+        : Math.round(totalBiaya / nights);
+      roomSalesRows.push([
+        r.booking_code,
+        r.tx_datetime || r.tx_date,
+        r.guest_name,
+        `${r.room_number} ${r.room_type_name}`,
+        isDayUse ? 'Day Use' : `${nights} malam`,
+        totalBiaya,
+        roomRate,
+        money(r.discount_amount),
+        money(r.amount_paid),
+        r.reservation_status,
+        r.payment_method,
+      ]);
+    }
+  }
+  sheets.push({ name: 'Penjualan Kamar', rows: roomSalesRows });
+
+  // Penjualan POS
   const salesRows: ExportRow[] = [
     ['Tanggal', 'No. Order', 'Item', 'Kategori', 'Qty', 'Harga', 'Total', 'HPP', 'Metode'],
   ];

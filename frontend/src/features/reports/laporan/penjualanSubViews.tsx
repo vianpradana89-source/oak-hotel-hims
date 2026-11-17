@@ -1948,7 +1948,8 @@ export const SubViewOvernightVsDayUse: React.FC<{
                 <th className="py-2.5 px-3 text-left">Check-Out</th>
                 <th className="py-2.5 px-3 text-center">Durasi</th>
                 <th className="py-2.5 px-3 text-right">Diskon</th>
-                <th className="py-2.5 px-3 text-right">Total Tagihan</th>
+                <th className="py-2.5 px-3 text-right">Total Biaya</th>
+                <th className="py-2.5 px-3 text-right">Room Rate</th>
                 <th className="py-2.5 px-3 text-left">Metode Bayar</th>
                 <th className="py-2.5 px-3 text-center">Status</th>
               </tr>
@@ -1956,13 +1957,20 @@ export const SubViewOvernightVsDayUse: React.FC<{
             <tbody className="divide-y divide-slate-100">
               {filteredDetailRows.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="py-10 text-center text-slate-400">
+                  <td colSpan={12} className="py-10 text-center text-slate-400">
                     Tidak ada data reservasi untuk filter ini.
                   </td>
                 </tr>
               ) : (
                 filteredDetailRows.map((r) => {
                   const dayUse = isDayUseStay(r);
+                  const totalBiaya = Number(r.total_price) || 0;
+                  const nights = Math.max(1, Number(r.period_nights ?? r.nights) || 1);
+                  const roomRate = dayUse
+                    ? totalBiaya
+                    : Number(r.room_rate) > 0
+                    ? Number(r.room_rate)
+                    : Math.round(totalBiaya / nights);
                   return (
                     <tr key={r.reservation_id} className="hover:bg-slate-50/80">
                       <td className="py-2.5 px-3 font-mono text-[11px] font-semibold text-blue-700 whitespace-nowrap">
@@ -1998,7 +2006,10 @@ export const SubViewOvernightVsDayUse: React.FC<{
                         {Number(r.discount_amount) > 0 ? formatIdr(r.discount_amount) : '-'}
                       </td>
                       <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700 whitespace-nowrap">
-                        {r.is_complimentary ? 'Complimentary' : formatIdr(r.total_price)}
+                        {r.is_complimentary ? 'Complimentary' : formatIdr(totalBiaya)}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
+                        {r.is_complimentary ? '-' : formatIdr(roomRate)}
                       </td>
                       <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
                         {r.payment_method || '-'}

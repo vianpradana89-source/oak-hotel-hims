@@ -173,6 +173,21 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
     ? sb.pos_total
     : posSalesFromAnalytics;
   const totalSales = roomSalesTotal + posSalesTotal;
+  const roomPaidTotal = activeRoomSalesRows.reduce((s, r) => {
+    const net = Number(r.total_price) || 0;
+    const paidRaw = Number(r.amount_paid) || 0;
+    const remRaw = Number(r.remaining_balance) || 0;
+    const isOtaCollect = String(r.payment_method || '').toUpperCase().includes('OTA COLLECT');
+    const paid = paidRaw > 0 ? Math.min(net, paidRaw) : remRaw <= 0 || isOtaCollect ? net : 0;
+    return s + paid;
+  }, 0);
+  const posPaidTotal = activePosSalesRows.reduce((s, p) => {
+    const st = String(p.payment_status || 'PAID').toUpperCase();
+    const isUnpaid = st === 'UNPAID' || st === 'OPEN';
+    return s + (isUnpaid ? 0 : Number(p.line_total) || 0);
+  }, 0);
+  const paidSalesTotal = hasAnalyticsSales ? roomPaidTotal + posPaidTotal : totalSales;
+  const unpaidSalesTotal = Math.max(0, totalSales - paidSalesTotal);
   const activePosOrderCount = new Set(activePosSalesRows.map((i) => i.order_id)).size;
   const salesTxCount = hasAnalyticsSales
     ? activeRoomSalesRows.length + activePosOrderCount
@@ -1244,7 +1259,18 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
               <span className="text-xs font-bold text-slate-700">Total:</span>
               <span className="text-sm font-extrabold text-slate-900 tabular-nums">{formatIdr(totalSales)}</span>
             </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">{formatNumber(salesTxCount)} transaksi</div>
+            <div className="flex items-center justify-between text-[11px] text-slate-500 mt-1">
+              <span>{formatNumber(salesTxCount)} transaksi</span>
+              <span className="text-emerald-700 font-semibold tabular-nums">
+                Bayar: {formatIdr(paidSalesTotal)}
+              </span>
+            </div>
+            {unpaidSalesTotal > 0 && (
+              <div className="flex items-center justify-between text-[10px] text-amber-700 font-medium mt-0.5">
+                <span>Belum Lunas / Sisa:</span>
+                <span className="tabular-nums font-semibold">{formatIdr(unpaidSalesTotal)}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -1814,8 +1840,13 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                             • {r.room_number} {r.room_type_name}
                           </span>
                         </div>
-                        <div className="text-sm font-extrabold text-slate-900 tabular-nums shrink-0">
-                          {formatIdr(r.total_price)}
+                        <div className="text-sm font-extrabold text-slate-900 tabular-nums shrink-0 text-right">
+                          <div>{formatIdr(r.room_rate ?? r.total_price)}</div>
+                          {Number(r.total_stay_nights || r.nights) > 1 && (
+                            <div className="text-[10px] font-medium text-slate-400">
+                              Total {r.total_stay_nights || r.nights} mlm: {formatIdr(r.full_total_price ?? r.total_price)}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-400">
@@ -1910,8 +1941,13 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                         <div className="text-xs font-bold text-slate-900 min-w-0 truncate">
                           {r.guest_name}
                         </div>
-                        <div className="text-sm font-extrabold text-slate-900 tabular-nums shrink-0">
-                          {formatIdr(r.total_price)}
+                        <div className="text-sm font-extrabold text-slate-900 tabular-nums shrink-0 text-right">
+                          <div>{formatIdr(r.total_price)}</div>
+                          {Number(r.room_rate) > 0 && Number(r.nights) > 1 && (
+                            <div className="text-[10px] font-medium text-slate-400">
+                              Rate: {formatIdr(r.room_rate)} / mlm
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center justify-between text-[11px] text-slate-400">

@@ -596,13 +596,25 @@ export function createReportsRouter(pool: Pool): Router {
           COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Kamar') AS room_type_name,
           to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in,
           to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out,
-          GREATEST(1, (r.check_out::date - r.check_in::date))::int AS nights,
+          GREATEST(
+            1,
+            (LEAST(GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date), ($3::date + INTERVAL '1 day')::date) - GREATEST(r.check_in::date, $2::date))
+          )::int AS nights,
+          GREATEST(1, (r.check_out::date - r.check_in::date))::int AS total_stay_nights,
           COALESCE(r.total_price, 0)::numeric(14,2) AS total_price,
           COALESCE(rt.base_rate, 0)::numeric(14,2) AS reference_rate,
-          COALESCE(
-            NULLIF(rcr.applied_adjustment_amount, 0),
-            NULLIF(rcr.original_gross_amount, 0),
-            (GREATEST(1, (r.check_out::date - r.check_in::date)) * COALESCE(rt.base_rate, 0))
+          ROUND(
+            COALESCE(
+              NULLIF(rcr.applied_adjustment_amount, 0),
+              NULLIF(rcr.original_gross_amount, 0),
+              (GREATEST(1, (r.check_out::date - r.check_in::date)) * COALESCE(rt.base_rate, 0))
+            )
+            * GREATEST(
+                1,
+                (LEAST(GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date), ($3::date + INTERVAL '1 day')::date) - GREATEST(r.check_in::date, $2::date))
+              )::numeric
+            / GREATEST(1, (r.check_out::date - r.check_in::date))::numeric,
+            2
           )::numeric(14,2) AS estimated_comp_value,
           COALESCE(rcr.category, NULLIF(BTRIM(r.payment_status), ''), 'COMPLIMENTARY') AS payment_method,
           r.status,
@@ -927,151 +939,213 @@ export function createReportsRouter(pool: Pool): Router {
         [propertyId, startDate, endDate]
       );
 
-      // 6. Enriched Room Sales (used for Penjualan Kamar, Grafik Okupansi click popup, and Okupansi Per Kamar click popup)
+      // 6. Enriched Room Sales (Opsi 1: Daily / Period-Prorated Room Revenue + Room Rate per Night)
       const roomSalesRes = await pool.query(
         `
-        SELECT
-          r.id AS reservation_id,
-          r.booking_id,
-          r.room_id,
-          COALESCE(b.bid, r.booking_number, 'RES-' || r.id::text) AS booking_code,
-          to_char(r.check_in::date, 'YYYY-MM-DD') AS tx_date,
-          to_char(COALESCE(b.created_at, r.check_in) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD HH24:MI') AS tx_datetime,
-          to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in,
-          to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out,
-          GREATEST(1, (r.check_out::date - r.check_in::date))::int AS nights,
-          GREATEST(
-            1,
-            (LEAST(r.check_out::date, ($3::date + INTERVAL '1 day')::date) - GREATEST(r.check_in::date, $2::date))
-          )::int AS period_nights,
-          COALESCE(r.stay_type, 'OVERNIGHT') AS stay_type,
-          COALESCE(to_char(r.start_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI'), '14:00') AS start_time,
-          COALESCE(to_char(r.end_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI'), '12:00') AS end_time,
-          COALESCE(NULLIF(BTRIM(r.guest_name), ''), NULLIF(BTRIM(b.guest_name_snapshot), ''), 'Tamu Hotel') AS guest_name,
-          COALESCE(rm.room_number, '-') AS room_number,
-          COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Kamar') AS room_type_name,
-          COALESCE(
-            NULLIF(r.total_price, 0),
-            (
-              SELECT COALESCE(SUM(t.net_amount), 0)
-              FROM transactions t
-              WHERE t.property_id = b.property_id
-                AND t.reservation_id = r.id
-                AND t.transaction_type = 'SALE'
-                AND t.deleted_at IS NULL
-                AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-            ),
-            0
-          )::numeric(14,2) AS total_price,
-          COALESCE(
-            NULLIF(r.discount_amount, 0),
-            CASE
-              WHEN COALESCE(r.discount_percent, 0) > 0 AND COALESCE(r.discount_percent, 0) < 100
-                THEN ROUND((GREATEST(1, (r.check_out::date - r.check_in::date)) * COALESCE(rt.base_rate, 0)) * (r.discount_percent / 100.0))
-              ELSE 0
-            END,
-            0
-          )::numeric(14,2) AS discount_amount,
-          COALESCE(r.discount_percent, 0)::numeric(5,2) AS discount_percent,
-          COALESCE(NULLIF(BTRIM(r.discount_reason), ''), NULLIF(BTRIM(b.global_discount_reason), ''), '') AS discount_reason,
-          COALESCE(r.amount_paid, 0)::numeric(14,2) AS amount_paid,
-          COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0)))::numeric(14,2) AS remaining_balance,
-          COALESCE(r.payment_status, 'UNPAID') AS payment_status,
-          COALESCE(
-            (
-              SELECT NULLIF(BTRIM(pt.payment_method), '')
-              FROM payment_transactions pt
-              WHERE pt.reservation_id = r.id
-                AND pt.status = 'SUCCESS'
-                AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-              ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
-              LIMIT 1
-            ),
-            (
-              SELECT NULLIF(BTRIM(pt.payment_method), '')
-              FROM payment_allocations pa
-              JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
-              WHERE pa.booking_id = r.booking_id
-                AND pa.status = 'ACTIVE'
-                AND pt.status = 'SUCCESS'
-              ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
-              LIMIT 1
-            ),
-            (
-              SELECT NULLIF(BTRIM(t.payment_method), '')
-              FROM transactions t
-              WHERE t.property_id = b.property_id
-                AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
-                AND t.transaction_type = 'SALE'
-                AND t.deleted_at IS NULL
-                AND NULLIF(BTRIM(t.payment_method), '') IS NOT NULL
-              ORDER BY t.id DESC
-              LIMIT 1
-            ),
+        WITH raw_room_sales AS (
+          SELECT
+            r.id AS reservation_id,
+            r.booking_id,
+            r.room_id,
+            COALESCE(b.bid, r.booking_number, 'RES-' || r.id::text) AS booking_code,
+            to_char(r.check_in::date, 'YYYY-MM-DD') AS tx_date,
+            to_char(COALESCE(b.created_at, r.check_in) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD HH24:MI') AS tx_datetime,
+            to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in,
+            to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out,
+            GREATEST(1, (r.check_out::date - r.check_in::date))::int AS total_stay_nights,
+            GREATEST(
+              1,
+              (LEAST(GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date), ($3::date + INTERVAL '1 day')::date) - GREATEST(r.check_in::date, $2::date))
+            )::int AS period_nights,
+            COALESCE(r.stay_type, 'OVERNIGHT') AS stay_type,
+            COALESCE(to_char(r.start_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI'), '14:00') AS start_time,
+            COALESCE(to_char(r.end_at AT TIME ZONE 'Asia/Jakarta', 'HH24:MI'), '12:00') AS end_time,
+            COALESCE(NULLIF(BTRIM(r.guest_name), ''), NULLIF(BTRIM(b.guest_name_snapshot), ''), 'Tamu Hotel') AS guest_name,
+            COALESCE(rm.room_number, '-') AS room_number,
+            COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Kamar') AS room_type_name,
+            COALESCE(
+              NULLIF(r.total_price, 0),
+              (
+                SELECT COALESCE(SUM(t.net_amount), 0)
+                FROM transactions t
+                WHERE t.property_id = b.property_id
+                  AND t.reservation_id = r.id
+                  AND t.transaction_type = 'SALE'
+                  AND t.deleted_at IS NULL
+                  AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+              ),
+              0
+            )::numeric(14,2) AS full_total_price,
+            COALESCE(
+              NULLIF(r.discount_amount, 0),
+              CASE
+                WHEN COALESCE(r.discount_percent, 0) > 0 AND COALESCE(r.discount_percent, 0) < 100
+                  THEN ROUND((GREATEST(1, (r.check_out::date - r.check_in::date)) * COALESCE(rt.base_rate, 0)) * (r.discount_percent / 100.0))
+                ELSE 0
+              END,
+              0
+            )::numeric(14,2) AS full_discount_amount,
+            COALESCE(r.discount_percent, 0)::numeric(5,2) AS discount_percent,
+            COALESCE(NULLIF(BTRIM(r.discount_reason), ''), NULLIF(BTRIM(b.global_discount_reason), ''), '') AS discount_reason,
+            COALESCE(r.amount_paid, 0)::numeric(14,2) AS full_amount_paid,
+            COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0)))::numeric(14,2) AS full_remaining_balance,
+            COALESCE(r.payment_status, 'UNPAID') AS payment_status,
             CASE
               WHEN ${isCompReservationSql} THEN 'Complimentary'
-              ELSE 'Belum Diisi'
-            END
-          ) AS payment_method,
-          COALESCE(os.name, NULLIF(BTRIM(r.booking_channel), ''), NULLIF(BTRIM(b.booking_channel), ''), NULLIF(BTRIM(b.channel), ''), r.booking_type, 'Walk-In') AS booking_channel,
-          COALESCE(os.name, '') AS ota_source_name,
-          COALESCE(
-            NULLIF(BTRIM(r.guest_segment), ''),
-            NULLIF(BTRIM(g.guest_segment), ''),
-            CASE
-              WHEN UPPER(COALESCE(g.vip_status, '')) IN ('VIP', 'VVIP') THEN 'VIP'
-              WHEN os.id IS NOT NULL OR UPPER(COALESCE(r.booking_channel, b.booking_channel, '')) LIKE '%OTA%' THEN 'OTA Guest'
-              ELSE 'Reguler'
-            END
-          ) AS guest_segment,
-          COALESCE(
-            NULLIF(r.tax_amount, 0),
+              WHEN UPPER(COALESCE(b.payment_responsibility, '')) = 'OTA_COLLECT' THEN 'OTA COLLECT'
+              ELSE COALESCE(
+                (
+                  SELECT NULLIF(BTRIM(pt.payment_method), '')
+                  FROM payment_transactions pt
+                  WHERE pt.reservation_id = r.id
+                    AND pt.status = 'SUCCESS'
+                    AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+                  ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
+                  LIMIT 1
+                ),
+                (
+                  SELECT NULLIF(BTRIM(pt.payment_method), '')
+                  FROM payment_allocations pa
+                  JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
+                  WHERE pa.booking_id = r.booking_id
+                    AND pa.status = 'ACTIVE'
+                    AND pt.status = 'SUCCESS'
+                  ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
+                  LIMIT 1
+                ),
+                (
+                  SELECT NULLIF(BTRIM(t.payment_method), '')
+                  FROM transactions t
+                  WHERE t.property_id = b.property_id
+                    AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
+                    AND t.transaction_type = 'SALE'
+                    AND t.deleted_at IS NULL
+                    AND NULLIF(BTRIM(t.payment_method), '') IS NOT NULL
+                  ORDER BY t.id DESC
+                  LIMIT 1
+                ),
+                'BELUM BAYAR / PIUTANG'
+              )
+            END AS payment_method,
+            COALESCE(os.name, NULLIF(BTRIM(r.booking_channel), ''), NULLIF(BTRIM(b.booking_channel), ''), NULLIF(BTRIM(b.channel), ''), r.booking_type, 'Walk-In') AS booking_channel,
+            COALESCE(os.name, '') AS ota_source_name,
+            COALESCE(
+              NULLIF(BTRIM(r.guest_segment), ''),
+              NULLIF(BTRIM(g.guest_segment), ''),
+              CASE
+                WHEN UPPER(COALESCE(g.vip_status, '')) IN ('VIP', 'VVIP') THEN 'VIP'
+                WHEN os.id IS NOT NULL OR UPPER(COALESCE(r.booking_channel, b.booking_channel, '')) LIKE '%OTA%' THEN 'OTA Guest'
+                ELSE 'Reguler'
+              END
+            ) AS guest_segment,
+            COALESCE(
+              NULLIF(r.tax_amount, 0),
+              (
+                SELECT COALESCE(SUM(t.tax_amount), 0)
+                FROM transactions t
+                WHERE t.property_id = b.property_id
+                  AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
+                  AND t.transaction_type = 'SALE'
+                  AND t.deleted_at IS NULL
+                  AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+              ),
+              0
+            )::numeric(14,2) AS full_tax_amount,
             (
-              SELECT COALESCE(SUM(t.tax_amount), 0)
-              FROM transactions t
+              SELECT ta.id
+              FROM transaction_attachments ta
+              JOIN transactions t ON t.id = ta.transaction_id
               WHERE t.property_id = b.property_id
                 AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
-                AND t.transaction_type = 'SALE'
                 AND t.deleted_at IS NULL
-                AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-            ),
-            0
-          )::numeric(14,2) AS tax_amount,
-          (
-            SELECT ta.id
-            FROM transaction_attachments ta
-            JOIN transactions t ON t.id = ta.transaction_id
-            WHERE t.property_id = b.property_id
-              AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
-              AND t.deleted_at IS NULL
-            ORDER BY CASE WHEN UPPER(COALESCE(ta.attachment_purpose, '')) = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
-            LIMIT 1
-          ) AS attachment_id,
-          (
-            SELECT pe.id
-            FROM payment_evidences pe
-            WHERE pe.reservation_id = r.id
-              AND pe.is_active = TRUE
-            ORDER BY pe.uploaded_at DESC NULLS LAST, pe.id DESC
-            LIMIT 1
-          ) AS payment_evidence_id,
-          r.status AS reservation_status,
-          ${isCompReservationSql} AS is_complimentary,
-          (GREATEST(1, (r.check_out::date - r.check_in::date)) * COALESCE(rt.base_rate, 0))::numeric(14,2) AS estimated_comp_value
-        FROM reservations r
-        JOIN bookings b ON b.id = r.booking_id
-        LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = b.property_id
-        LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) AND rt.property_id = b.property_id
-        LEFT JOIN ota_sources os ON os.id = COALESCE(r.ota_source_id, b.ota_source_id)
-        LEFT JOIN reservation_guests rg ON rg.reservation_id = r.id AND rg.role = 'PRIMARY_GUEST'
-        LEFT JOIN guests g ON g.id = rg.guest_id
-        WHERE b.property_id = $1
-          AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
-          AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
-          AND COALESCE(b.booking_status, '') != 'CANCELLED'
-          AND r.check_in::date <= $3::date
-          AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
-        ORDER BY r.check_in DESC, r.id DESC
+              ORDER BY CASE WHEN UPPER(COALESCE(ta.attachment_purpose, '')) = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
+              LIMIT 1
+            ) AS attachment_id,
+            (
+              SELECT pe.id
+              FROM payment_evidences pe
+              WHERE pe.reservation_id = r.id
+                AND pe.is_active = TRUE
+              ORDER BY pe.uploaded_at DESC NULLS LAST, pe.id DESC
+              LIMIT 1
+            ) AS payment_evidence_id,
+            r.status AS reservation_status,
+            ${isCompReservationSql} AS is_complimentary,
+            COALESCE(rt.base_rate, 0)::numeric(14,2) AS base_rate
+          FROM reservations r
+          JOIN bookings b ON b.id = r.booking_id
+          LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = b.property_id
+          LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) AND rt.property_id = b.property_id
+          LEFT JOIN ota_sources os ON os.id = COALESCE(r.ota_source_id, b.ota_source_id)
+          LEFT JOIN reservation_guests rg ON rg.reservation_id = r.id AND rg.role = 'PRIMARY_GUEST'
+          LEFT JOIN guests g ON g.id = rg.guest_id
+          WHERE b.property_id = $1
+            AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+            AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+            AND COALESCE(b.booking_status, '') != 'CANCELLED'
+            AND r.check_in::date <= $3::date
+            AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
+        )
+        SELECT
+          reservation_id,
+          booking_id,
+          room_id,
+          booking_code,
+          tx_date,
+          tx_datetime,
+          check_in,
+          check_out,
+          period_nights AS nights,
+          period_nights,
+          total_stay_nights,
+          stay_type,
+          start_time,
+          end_time,
+          guest_name,
+          room_number,
+          room_type_name,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_total_price
+            ELSE ROUND(full_total_price / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS room_rate,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_total_price
+            ELSE ROUND(full_total_price * period_nights::numeric / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS total_price,
+          full_total_price,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_discount_amount
+            ELSE ROUND(full_discount_amount * period_nights::numeric / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS discount_amount,
+          full_discount_amount,
+          discount_percent,
+          discount_reason,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_amount_paid
+            ELSE ROUND(full_amount_paid * period_nights::numeric / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS amount_paid,
+          full_amount_paid,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_remaining_balance
+            ELSE ROUND(full_remaining_balance * period_nights::numeric / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS remaining_balance,
+          full_remaining_balance,
+          payment_status,
+          payment_method,
+          booking_channel,
+          ota_source_name,
+          guest_segment,
+          CASE
+            WHEN UPPER(COALESCE(stay_type, '')) IN ('DAY_USE', 'SHORT_TIME') THEN full_tax_amount
+            ELSE ROUND(full_tax_amount * period_nights::numeric / GREATEST(1, total_stay_nights)::numeric, 2)
+          END::numeric(14,2) AS tax_amount,
+          attachment_id,
+          payment_evidence_id,
+          reservation_status,
+          is_complimentary,
+          (period_nights * base_rate)::numeric(14,2) AS estimated_comp_value
+        FROM raw_room_sales
+        ORDER BY check_in DESC, reservation_id DESC
         `,
         [propertyId, startDate, endDate]
       );

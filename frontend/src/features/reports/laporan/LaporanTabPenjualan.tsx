@@ -154,6 +154,7 @@ interface UnifiedSaleRow {
   roomLabel: string;
   durationOrQty: string;
   grossTotal: number;
+  roomRate: number;
   discountAmount: number;
   amountPaid: number;
   statusBadge: string;
@@ -243,6 +244,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       roomLabel: i.room_or_table && i.room_or_table !== '-' ? i.room_or_table : '-',
       durationOrQty: `${qty} item`,
       grossTotal,
+      roomRate: unitPrice,
       discountAmount: disc,
       amountPaid,
       statusBadge,
@@ -260,11 +262,34 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const unifiedRoomRows: UnifiedSaleRow[] = roomSales.map((r) => {
     const netTotal = Number(r.total_price) || 0;
     const disc = Number(r.discount_amount) || 0;
-    const grossTotal = netTotal + disc;
+    const grossTotal = netTotal;
     const paidRaw = Number(r.amount_paid) || 0;
+    const remRaw = Number(r.remaining_balance) || 0;
     const isComp = Boolean(r.is_complimentary);
-    const amountPaid = isComp ? 0 : paidRaw > 0 ? paidRaw : netTotal;
-    const nights = Number(r.nights) || 1;
+    const isOtaCollect = String(r.payment_method || '').toUpperCase().includes('OTA COLLECT');
+    const amountPaid = isComp
+      ? 0
+      : paidRaw > 0
+      ? Math.min(grossTotal, paidRaw)
+      : remRaw <= 0 || isOtaCollect
+      ? grossTotal
+      : 0;
+    const nights = Number(r.period_nights ?? r.nights) || 1;
+    const totalStayNights = Number(r.total_stay_nights ?? r.nights) || nights;
+    const stayUpper = String(r.stay_type || '').toUpperCase();
+    const isDayUse = stayUpper.includes('DAY') || stayUpper.includes('SHORT');
+    const roomRate = isDayUse
+      ? grossTotal
+      : Number(r.room_rate) > 0
+      ? Number(r.room_rate)
+      : nights > 0
+      ? Math.round(grossTotal / nights)
+      : grossTotal;
+    const durationLabel = isDayUse
+      ? 'Day Use'
+      : nights < totalStayNights
+      ? `${nights} malam (dari ${totalStayNights} mlm)`
+      : `${nights} malam`;
     const roomLabel =
       r.room_number && r.room_number !== '-'
         ? `${r.room_number} ${r.room_type_name} (${r.room_number})`
@@ -280,8 +305,9 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       customerName: r.guest_name || 'Tamu Hotel',
       itemName: '-',
       roomLabel,
-      durationOrQty: `${nights} malam`,
+      durationOrQty: durationLabel,
       grossTotal,
+      roomRate,
       discountAmount: disc,
       amountPaid,
       statusBadge,
@@ -289,8 +315,8 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       attachmentId: r.attachment_id ?? null,
       paymentEvidenceId: r.payment_evidence_id ?? null,
       hpp: 0,
-      unitPrice: nights > 0 ? Math.round(grossTotal / nights) : grossTotal,
-      profit: amountPaid,
+      unitPrice: roomRate,
+      profit: isComp ? 0 : grossTotal,
       isComplimentary: isComp,
       estimatedCompValue: Number(r.estimated_comp_value) || 0,
     };
@@ -380,6 +406,8 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
         return r.durationOrQty || '-';
       case 'grossTotal':
         return formatIdr(r.grossTotal);
+      case 'roomRate':
+        return r.source === 'KAMAR' ? formatIdr(r.roomRate) : '-';
       case 'discountAmount':
         return r.discountAmount > 0 ? formatIdr(r.discountAmount) : '-';
       case 'amountPaid':
@@ -444,6 +472,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       const { col, dir } = activeSortCol;
       const numericCols = new Set([
         'grossTotal',
+        'roomRate',
         'discountAmount',
         'amountPaid',
         'hpp',
@@ -821,6 +850,15 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                     onApply={handleApplyColFilter}
                   />
                   <ColumnFilterHeader
+                    columnKey="roomRate"
+                    label="Room Rate"
+                    align="right"
+                    allValues={colVals('roomRate')}
+                    activeSelected={columnFilters.roomRate?.selectedValues}
+                    activeSort={activeSortCol?.col === 'roomRate' ? activeSortCol.dir : null}
+                    onApply={handleApplyColFilter}
+                  />
+                  <ColumnFilterHeader
                     columnKey="discountAmount"
                     label="Diskon"
                     align="right"
@@ -891,7 +929,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                 {filteredRows.length === 0 ? (
                   <tr>
                     <td
-                      colSpan={isRoomOnlyView ? 13 : 14}
+                      colSpan={isRoomOnlyView ? 14 : 15}
                       className="py-10 text-center text-slate-400"
                     >
                       Tidak ada data penjualan pada filter ini
@@ -951,6 +989,11 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                       {/* 7. Total Biaya */}
                       <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-emerald-700 whitespace-nowrap">
                         {formatIdr(row.grossTotal)}
+                      </td>
+
+                      {/* 7b. Room Rate (Total Biaya / Malam, atau sama dengan Total Biaya untuk Day Use) */}
+                      <td className="py-2.5 px-3 text-right font-semibold tabular-nums text-slate-700 whitespace-nowrap">
+                        {row.source === 'KAMAR' ? formatIdr(row.roomRate) : '-'}
                       </td>
 
                       {/* 8. Diskon */}
