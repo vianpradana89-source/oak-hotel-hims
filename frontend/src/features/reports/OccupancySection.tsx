@@ -12,6 +12,14 @@ import {
   formatInclusivePeriodDisplay,
   getKpiLabels,
 } from './occupancyDateHelpers.ts';
+import {
+  IconAlertTriangle,
+  IconChevronDown,
+  IconChevronUp,
+  IconRefreshCw,
+} from './laporan/LaporanIcons.tsx';
+
+export type OccupancySubView = 'all' | 'kpi_fin' | 'daily_trend' | 'room_types';
 
 export interface OccupancySectionProps {
   propertyId: number | null;
@@ -33,6 +41,8 @@ export interface OccupancySectionProps {
   hidePeriodSelector?: boolean;
   /** Render a compact KPI row instead of the full 7-card grid. */
   compact?: boolean;
+  /** Optional sub-view filter when driven from LaporanTabKinerjaKamar */
+  subView?: OccupancySubView;
 }
 
 export const OccupancySection: React.FC<OccupancySectionProps> = ({
@@ -41,6 +51,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
   controlled,
   hidePeriodSelector = false,
   compact = false,
+  subView = 'all',
 }) => {
   const [internalPeriod, setInternalPeriod] = useState<OccupancyPeriodPreset>('today');
   const todayHotelDate = hotelDateFromInstant(new Date());
@@ -139,105 +150,105 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
   const renderPeriodSelector = () => {
     if (hidePeriodSelector) return null;
     return (
-    <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
-      <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
-        <button
-          type="button"
-          onClick={() => setPeriod('today')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === 'today'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          Hari Ini
-        </button>
-        <button
-          type="button"
-          onClick={() => setPeriod('yesterday')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === 'yesterday'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          Kemarin
-        </button>
-        <button
-          type="button"
-          onClick={() => setPeriod('7days')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === '7days'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          7 Hari
-        </button>
-        <button
-          type="button"
-          onClick={() => setPeriod('last_month')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === 'last_month'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          Bulan Lalu
-        </button>
-        <button
-          type="button"
-          onClick={() => setPeriod('this_month')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === 'this_month'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          Bulan Ini
-        </button>
-        <button
-          type="button"
-          onClick={() => setPeriod('custom')}
-          className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-            period === 'custom'
-              ? 'bg-white text-emerald-800 shadow-xs'
-              : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-          }`}
-        >
-          Kustom
-        </button>
+      <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
+          <button
+            type="button"
+            onClick={() => setPeriod('today')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === 'today'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            Hari Ini
+          </button>
+          <button
+            type="button"
+            onClick={() => setPeriod('yesterday')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === 'yesterday'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            Kemarin
+          </button>
+          <button
+            type="button"
+            onClick={() => setPeriod('7days')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === '7days'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            7 Hari
+          </button>
+          <button
+            type="button"
+            onClick={() => setPeriod('last_month')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === 'last_month'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            Bulan Lalu
+          </button>
+          <button
+            type="button"
+            onClick={() => setPeriod('this_month')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === 'this_month'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            Bulan Ini
+          </button>
+          <button
+            type="button"
+            onClick={() => setPeriod('custom')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
+              period === 'custom'
+                ? 'bg-white text-emerald-800 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
+            }`}
+          >
+            Kustom
+          </button>
+        </div>
+
+        {period === 'custom' && (
+          <div className="flex flex-wrap items-center gap-2 text-xs">
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500 font-medium">Dari:</span>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => setCustomStart(e.target.value)}
+                className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500 font-medium">Sampai:</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => setCustomEnd(e.target.value)}
+                className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+              />
+            </div>
+          </div>
+        )}
+
+        {data && (
+          <div className="text-xs text-slate-600 font-medium ml-auto bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200/80">
+            {formatInclusivePeriodDisplay(data.start_date, data.end_date, data.nights)}
+          </div>
+        )}
       </div>
-
-      {period === 'custom' && (
-        <div className="flex flex-wrap items-center gap-2 text-xs">
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500 font-medium">Dari:</span>
-            <input
-              type="date"
-              value={customStart}
-              onChange={(e) => setCustomStart(e.target.value)}
-              className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
-            />
-          </div>
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500 font-medium">Sampai:</span>
-            <input
-              type="date"
-              value={customEnd}
-              onChange={(e) => setCustomEnd(e.target.value)}
-              className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
-            />
-          </div>
-        </div>
-      )}
-
-      {data && (
-        <div className="text-xs text-slate-600 font-medium ml-auto bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200/80">
-          {formatInclusivePeriodDisplay(data.start_date, data.end_date, data.nights)}
-        </div>
-      )}
-    </div>
     );
   };
 
@@ -251,7 +262,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
       return (
         <div className="bg-amber-50 border border-amber-200 rounded-xl p-4 text-amber-900 text-sm">
           <div className="flex items-center gap-2 font-bold text-amber-800 mb-1">
-            <span>⚠️</span> Data Kapasitas Kamar Belum Tersedia
+            <IconAlertTriangle className="w-4 h-4 text-amber-700" /> Data Kapasitas Kamar Belum Tersedia
           </div>
           <p className="text-xs text-amber-700">
             Data kapasitas kamar belum tersedia untuk periode yang dipilih.
@@ -269,7 +280,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
       return (
         <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-900 text-sm">
           <div className="flex items-center gap-2 font-bold text-red-800 mb-1">
-            <span>🚫</span> Inkonsistensi Data Inventory Terdeteksi
+            <IconAlertTriangle className="w-4 h-4 text-red-700" /> Inkonsistensi Data Inventory Terdeteksi
           </div>
           <p className="text-xs text-red-700">
             Data occupancy tidak dapat dihitung karena ditemukan inkonsistensi inventory.
@@ -281,7 +292,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
     return (
       <div className="bg-red-50 border border-red-200 rounded-xl p-4 text-red-900 text-sm">
         <div className="flex items-center gap-2 font-bold text-red-800 mb-1">
-          <span>⚠️</span> Gagal Memuat Data Kinerja Kamar
+          <IconAlertTriangle className="w-4 h-4 text-red-700" /> Gagal Memuat Data Kinerja Kamar
         </div>
         <p className="text-xs text-red-700">{error.message}</p>
       </div>
@@ -300,10 +311,20 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         <button
           type="button"
           onClick={() => setShowFinCard((prev) => !prev)}
-          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors"
+          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
         >
           <span>Metrik Finansial Kamar (ADR / RevPAR / ALOS)</span>
-          <span className="text-slate-400">{showFinCard ? '▲ Tutup' : '▼ Tampilkan'}</span>
+          <span className="text-slate-400 flex items-center gap-1">
+            {showFinCard ? (
+              <>
+                <IconChevronUp className="w-3.5 h-3.5" /> Tutup
+              </>
+            ) : (
+              <>
+                <IconChevronDown className="w-3.5 h-3.5" /> Tampilkan
+              </>
+            )}
+          </span>
         </button>
         {showFinCard && (
           <div className="p-4 space-y-3">
@@ -379,7 +400,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
     }
 
     return (
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-8 gap-3">
         {/* Occupancy */}
         <div className="col-span-2 md:col-span-4 lg:col-span-1 bg-emerald-900 text-white border border-emerald-950 rounded-xl p-4 shadow-sm">
           <div className="text-[11px] uppercase font-bold text-emerald-200 tracking-wide">
@@ -422,6 +443,17 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
             {totals.sold_room_nights}
           </div>
           <div className="text-[10px] text-slate-400 mt-1">Reservasi aktif terisi</div>
+        </div>
+
+        {/* Complimentary Room Nights (8th Card) */}
+        <div className="bg-white border border-amber-300 rounded-xl p-4 shadow-sm bg-amber-50/40">
+          <div className="text-[11px] uppercase font-bold text-amber-800 tracking-wide">
+            Room Nights Comp
+          </div>
+          <div className="text-2xl font-bold text-amber-900 mt-1">
+            {data.financials?.complimentary_room_nights ?? 0}
+          </div>
+          <div className="text-[10px] text-amber-700/80 mt-1">Complimentary / Free</div>
         </div>
 
         {/* Available Room Nights */}
@@ -468,10 +500,20 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         <button
           type="button"
           onClick={() => setShowDailyTable((prev) => !prev)}
-          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors"
+          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
         >
           <span>Tren Kinerja Harian ({data.daily.length} Hari)</span>
-          <span className="text-slate-400">{showDailyTable ? '▲ Tutup' : '▼ Tampilkan'}</span>
+          <span className="text-slate-400 flex items-center gap-1">
+            {showDailyTable ? (
+              <>
+                <IconChevronUp className="w-3.5 h-3.5" /> Tutup
+              </>
+            ) : (
+              <>
+                <IconChevronDown className="w-3.5 h-3.5" /> Tampilkan
+              </>
+            )}
+          </span>
         </button>
 
         {showDailyTable && (
@@ -522,10 +564,20 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         <button
           type="button"
           onClick={() => setShowRoomTypeTable((prev) => !prev)}
-          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors"
+          className="w-full flex items-center justify-between px-4 py-3 bg-slate-50 border-b border-slate-200 text-left text-xs font-bold text-slate-700 hover:bg-slate-100 transition-colors cursor-pointer"
         >
           <span>Occupancy per Tipe Kamar ({data.room_types.length} Tipe)</span>
-          <span className="text-slate-400">{showRoomTypeTable ? '▲ Tutup' : '▼ Tampilkan'}</span>
+          <span className="text-slate-400 flex items-center gap-1">
+            {showRoomTypeTable ? (
+              <>
+                <IconChevronUp className="w-3.5 h-3.5" /> Tutup
+              </>
+            ) : (
+              <>
+                <IconChevronDown className="w-3.5 h-3.5" /> Tampilkan
+              </>
+            )}
+          </span>
         </button>
 
         {showRoomTypeTable && (
@@ -589,17 +641,17 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
         </div>
         {loading && (
           <div className="text-xs text-emerald-700 font-semibold flex items-center gap-1.5">
-            <span className="animate-spin">⟳</span> Memuat data...
+            <IconRefreshCw className="w-3.5 h-3.5 animate-spin" /> Memuat data...
           </div>
         )}
       </div>
 
       {renderPeriodSelector()}
       {renderError()}
-      {renderKpiCards()}
-      {renderFinCard()}
-      {renderDailyTable()}
-      {renderRoomTypeBreakdown()}
+      {(subView === 'all' || subView === 'kpi_fin') && renderKpiCards()}
+      {(subView === 'all' || subView === 'kpi_fin') && renderFinCard()}
+      {(subView === 'all' || subView === 'daily_trend') && renderDailyTable()}
+      {(subView === 'all' || subView === 'room_types') && renderRoomTypeBreakdown()}
     </div>
   );
 };

@@ -1,8 +1,12 @@
 import React, { useState } from 'react';
 import { LaporanPeriodFilter } from './LaporanPeriodFilter';
-import { LaporanTabKeseluruhan } from './LaporanTabKeseluruhan';
+import { LaporanTabKeseluruhan, type KeseluruhanSubView } from './LaporanTabKeseluruhan';
 import { LaporanTabKinerjaKamar } from './LaporanTabKinerjaKamar';
-import { LaporanTabPenjualan } from './LaporanTabPenjualan';
+import {
+  LaporanTabPenjualan,
+  SALES_MODE_OPTIONS,
+  type SalesReportMode,
+} from './LaporanTabPenjualan';
 import { LaporanTabPembelian } from './LaporanTabPembelian';
 import { LaporanTabPemasukan } from './LaporanTabPemasukan';
 import { LaporanTabPengeluaran } from './LaporanTabPengeluaran';
@@ -11,7 +15,22 @@ import { useLaporanWorkspace } from './useLaporanWorkspace';
 import { useDailyOperations } from './useDailyOperations';
 import { downloadExportXml, buildLaporanSheets } from './exportLaporan';
 import { formatInclusiveRangeDisplay } from './laporanPeriods';
-// import type { PeriodPreset, PeriodRange } from './laporanPeriods';
+import { LaporanDropdown } from './laporanUi';
+import type { OccupancySubView } from '../OccupancySection';
+import {
+  IconBarChart3,
+  IconBedDouble,
+  IconBuilding2,
+  IconCreditCard,
+  IconDollarSign,
+  IconDownload,
+  IconLayoutGrid,
+  IconScale,
+  IconShoppingCart,
+  IconTrendingDown,
+  IconTrendingUp,
+  IconWallet,
+} from './LaporanIcons';
 
 export type LaporanTabKey =
   | 'keseluruhan'
@@ -22,14 +41,68 @@ export type LaporanTabKey =
   | 'pengeluaran'
   | 'metode_bayar';
 
-const TABS: { key: LaporanTabKey; label: string; icon: string }[] = [
-  { key: 'keseluruhan', label: 'Keseluruhan', icon: '◉' },
-  { key: 'kinerja_kamar', label: 'Kinerja Kamar', icon: '▦' },
-  { key: 'penjualan', label: 'Penjualan', icon: '🛒' },
-  { key: 'pembelian', label: 'Pembelian', icon: '📦' },
-  { key: 'pemasukan', label: 'Pemasukan', icon: '↓' },
-  { key: 'pengeluaran', label: 'Pengeluaran', icon: '↑' },
-  { key: 'metode_bayar', label: 'Metode Bayar', icon: '💳' },
+const TABS: { key: LaporanTabKey; label: string; icon: React.ReactNode }[] = [
+  { key: 'keseluruhan', label: 'Keseluruhan', icon: <IconLayoutGrid className="w-3.5 h-3.5" /> },
+  { key: 'kinerja_kamar', label: 'Kinerja Kamar & Okupansi', icon: <IconBuilding2 className="w-3.5 h-3.5" /> },
+  { key: 'penjualan', label: 'Penjualan', icon: <IconDollarSign className="w-3.5 h-3.5" /> },
+  { key: 'pembelian', label: 'Pembelian', icon: <IconShoppingCart className="w-3.5 h-3.5" /> },
+  { key: 'pemasukan', label: 'Pemasukan', icon: <IconTrendingUp className="w-3.5 h-3.5" /> },
+  { key: 'pengeluaran', label: 'Pengeluaran', icon: <IconTrendingDown className="w-3.5 h-3.5" /> },
+  { key: 'metode_bayar', label: 'Metode Bayar', icon: <IconCreditCard className="w-3.5 h-3.5" /> },
+];
+
+const KESELURUHAN_SUBVIEW_OPTIONS: {
+  value: KeseluruhanSubView;
+  label: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    value: 'ringkasan',
+    label: 'Ringkasan Keseluruhan',
+    icon: <IconLayoutGrid className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'laba_rugi',
+    label: 'Laporan Laba / Rugi',
+    icon: <IconBarChart3 className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'arus_kas',
+    label: 'Laporan Arus Kas',
+    icon: <IconWallet className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'neraca',
+    label: 'Laporan Neraca',
+    icon: <IconScale className="w-3.5 h-3.5" />,
+  },
+];
+
+const KINERJA_SUBVIEW_OPTIONS: {
+  value: OccupancySubView;
+  label: string;
+  icon: React.ReactNode;
+}[] = [
+  {
+    value: 'all',
+    label: 'Semua Kinerja Kamar & Okupansi',
+    icon: <IconBuilding2 className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'kpi_fin',
+    label: 'Ringkasan KPI & Metrik Finansial (ADR/RevPAR)',
+    icon: <IconBarChart3 className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'daily_trend',
+    label: 'Tren Kinerja Harian',
+    icon: <IconTrendingUp className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'room_types',
+    label: 'Occupancy per Tipe Kamar',
+    icon: <IconBedDouble className="w-3.5 h-3.5" />,
+  },
 ];
 
 export interface LaporanWorkspaceProps {
@@ -38,7 +111,10 @@ export interface LaporanWorkspaceProps {
 
 export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }) => {
   const [activeTab, setActiveTab] = useState<LaporanTabKey>('keseluruhan');
-  const [exportOpen, setExportOpen] = useState(false);
+  const [keseluruhanSubView, setKeseluruhanSubView] = useState<KeseluruhanSubView>('ringkasan');
+  const [kinerjaSubView, setKinerjaSubView] = useState<OccupancySubView>('all');
+  const [penjualanSubView, setPenjualanSubView] =
+    useState<SalesReportMode>('rincian_penjualan');
 
   const workspace = useLaporanWorkspace(propertyId);
   const {
@@ -59,7 +135,6 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
     lastReloadToken,
   } = workspace;
 
-  // Daily operations + KPIs: use the hotel date of the period start
   const dailyHotelDate = range ? range.start : todayHotelDate;
   const { dailyOps, dailyKpis, dailyOpsError, loading: dailyLoading } = useDailyOperations(
     propertyId,
@@ -73,6 +148,13 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
     refresh();
   };
 
+  const handleSelectTab = (tabKey: LaporanTabKey) => {
+    setActiveTab(tabKey);
+    if (analyticsError || financialsError || dailyOpsError) {
+      refresh();
+    }
+  };
+
   const handleExport = () => {
     if (!range) return;
     const rangeLabel = formatInclusiveRangeDisplay(range.start, range.end);
@@ -83,8 +165,41 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
       financials,
       analytics,
     });
-    downloadExportXml(`laporan-${range.start}_${range.end}.xml`, sheets);
-    setExportOpen(false);
+    downloadExportXml(`Laporan_HIMS_${range.start}_sd_${range.end}.xls`, sheets);
+  };
+
+  const renderFilterLeftSlot = () => {
+    if (activeTab === 'keseluruhan') {
+      return (
+        <LaporanDropdown<KeseluruhanSubView>
+          value={keseluruhanSubView}
+          options={KESELURUHAN_SUBVIEW_OPTIONS}
+          onChange={setKeseluruhanSubView}
+          variant="primary"
+        />
+      );
+    }
+    if (activeTab === 'kinerja_kamar') {
+      return (
+        <LaporanDropdown<OccupancySubView>
+          value={kinerjaSubView}
+          options={KINERJA_SUBVIEW_OPTIONS}
+          onChange={setKinerjaSubView}
+          variant="primary"
+        />
+      );
+    }
+    if (activeTab === 'penjualan') {
+      return (
+        <LaporanDropdown<SalesReportMode>
+          value={penjualanSubView}
+          options={SALES_MODE_OPTIONS}
+          onChange={setPenjualanSubView}
+          variant="primary"
+        />
+      );
+    }
+    return null;
   };
 
   const renderTab = () => {
@@ -96,8 +211,10 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
             dailyOpsError={dailyOpsError}
             financials={financials}
             financialsError={financialsError}
+            analytics={analytics}
             loading={loadingAll}
             onRetry={onRetry}
+            subView={keseluruhanSubView}
           />
         );
       case 'kinerja_kamar':
@@ -109,21 +226,26 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
             range={range}
             customStart={customStart}
             customEnd={customEnd}
+            subView={kinerjaSubView}
           />
         );
       case 'penjualan':
         return (
           <LaporanTabPenjualan
             data={analytics}
+            financials={financials}
             loading={loading}
             error={analyticsError}
             onRetry={onRetry}
+            subView={penjualanSubView}
+            onSubViewChange={setPenjualanSubView}
           />
         );
       case 'pembelian':
         return (
           <LaporanTabPembelian
             data={analytics}
+            financials={financials}
             loading={loading}
             error={analyticsError}
             onRetry={onRetry}
@@ -169,7 +291,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
           <div className="text-xs uppercase tracking-wider text-emerald-800 font-bold">
             Laporan & Analitik Operasional
           </div>
-          <h3 className="text-xl font-bold text-gray-900 mt-0.5">Laporan 7-Tab HIMS</h3>
+          <h3 className="text-xl font-bold text-gray-900 mt-0.5">Laporan</h3>
           <p className="text-xs text-gray-500 mt-1">
             {range
               ? formatInclusiveRangeDisplay(range.start, range.end)
@@ -180,24 +302,36 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         <div className="flex items-center gap-2">
           <button
             type="button"
-            onClick={() => setExportOpen(true)}
+            onClick={handleExport}
             disabled={!range}
-            className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="px-3.5 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 shadow-xs disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
           >
-            ⬇ Export
+            <IconDownload className="w-3.5 h-3.5 text-slate-600" />
+            <span>Export Excel</span>
           </button>
-          {exportOpen && range ? (
-            <div className="flex items-center gap-2 text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 shadow-sm">
-              <span className="text-slate-600">Mengekspor…</span>
-              <button type="button" onClick={handleExport} className="text-emerald-700 font-bold">
-                OK
-              </button>
-            </div>
-          ) : null}
         </div>
       </div>
 
-      {/* Global period filter */}
+      {/* Tab bar with Lucide SVG Icons */}
+      <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80">
+        {TABS.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            onClick={() => handleSelectTab(t.key)}
+            className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+              activeTab === t.key
+                ? 'bg-emerald-900 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-white/70'
+            }`}
+          >
+            <span>{t.icon}</span>
+            <span>{t.label}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Global period filter + Left Mode Selector */}
       <LaporanPeriodFilter
         period={period}
         range={range}
@@ -208,26 +342,8 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         onCustomStartChange={setCustomStart}
         onCustomEndChange={setCustomEnd}
         onRefresh={refresh}
+        leftSlot={renderFilterLeftSlot()}
       />
-
-      {/* Tab bar */}
-      <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => setActiveTab(t.key)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-              activeTab === t.key
-                ? 'bg-white text-emerald-800 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-            }`}
-          >
-            <span className="mr-1">{t.icon}</span>
-            {t.label}
-          </button>
-        ))}
-      </div>
 
       {/* Active tab */}
       {renderTab()}

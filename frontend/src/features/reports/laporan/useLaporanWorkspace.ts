@@ -59,6 +59,10 @@ export function resolvePeriodRange(
       const lastPrev = addHotelDays(firstOfMonth(today), -1);
       return { start: firstOfMonth(lastPrev), end: lastPrev };
     }
+    case 'all_time': {
+      const [y] = today.split('-');
+      return { start: `${y}-01-01`, end: today };
+    }
     case 'custom':
       if (!customStart || !customEnd || customStart > customEnd) return null;
       return { start: customStart, end: customEnd };
@@ -68,7 +72,7 @@ export function resolvePeriodRange(
 }
 
 async function fetchJson(url: string): Promise<{ ok: boolean; status: number; json: any }> {
-  const res = await authenticatedFetch(url);
+  const res = await authenticatedFetch(url, { cache: 'no-store' });
   const json = await res.json().catch(() => null);
   return { ok: res.ok, status: res.status, json };
 }
@@ -84,7 +88,7 @@ export function useLaporanWorkspace(
 ): LaporanWorkspaceData {
   const todayHotelDate = hotelDateFromInstant(new Date());
 
-  const [period, setPeriod] = useState<PeriodPreset>('today');
+  const [period, setPeriod] = useState<PeriodPreset>('this_month');
   const [customStart, setCustomStart] = useState<string>(todayHotelDate);
   const [customEnd, setCustomEnd] = useState<string>(todayHotelDate);
   const [reloadToken, setReloadToken] = useState<number>(0);

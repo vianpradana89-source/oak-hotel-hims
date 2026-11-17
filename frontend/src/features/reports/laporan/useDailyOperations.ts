@@ -114,7 +114,8 @@ export function useDailyOperations(
     const fetchOps = async () => {
       try {
         const res = await authenticatedFetch(
-          `/api/reports/daily-operations?property_id=${propertyId}${dateParam}`
+          `/api/reports/daily-operations?property_id=${propertyId}${dateParam}`,
+          { cache: 'no-store' }
         );
         const json = await res.json().catch(() => null);
         if (cancelled) return;

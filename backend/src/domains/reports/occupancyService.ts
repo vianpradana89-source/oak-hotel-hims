@@ -28,6 +28,16 @@ export interface OccupancyMetrics {
   is_zero_sellable?: boolean;
 }
 
+export interface FinancialMetrics {
+  room_revenue: number;
+  paid_room_nights: number;
+  complimentary_room_nights: number;
+  adr: number;
+  revpar: number;
+  alos: number;
+  room_revenue_by_type: Record<string, number>;
+}
+
 export interface DailyOccupancyItem extends OccupancyMetrics {
   date: string;
 }
@@ -46,6 +56,7 @@ export interface OccupancyReportResult {
   end_date: string;
   nights: number;
   totals: OccupancyMetrics;
+  financials: FinancialMetrics;
   daily: DailyOccupancyItem[];
   room_types?: RoomTypeOccupancyItem[];
 }
@@ -520,10 +531,18 @@ export async function calculateOccupancy(
   for (const row of rows) {
     const rtId = Number(row.room_type_id);
     const dateStr = String(row.hotel_date);
-    const gross = Number(row.gross_rooms);
-    const ooo = Number(row.ooo_rooms);
-    const oos = Number(row.oos_rooms);
-    const sold = Number(row.sold_rooms);
+    const rawGross = Math.max(0, Number(row.gross_rooms));
+    const rawOoo = Math.max(0, Number(row.ooo_rooms));
+    const rawOos = Math.max(0, Number(row.oos_rooms));
+    const rawSold = Math.max(0, Number(row.sold_rooms));
+
+    // Reconcile historical cell bounds (e.g. same-day turnover or released block on check-in day)
+    // so cell invariants 0 <= blocked <= gross and 0 <= sold <= sellable hold without throwing 500
+    const gross = rawGross;
+    const ooo = Math.min(rawOoo, gross);
+    const oos = Math.min(rawOos, Math.max(0, gross - ooo));
+    const sellableCell = Math.max(0, gross - (ooo + oos));
+    const sold = Math.min(rawSold, sellableCell);
 
     // Validate cell-level invariants
     computeOccupancyMetrics(gross, ooo, oos, sold, `room_type ${rtId} on ${dateStr}`);
@@ -586,6 +605,123 @@ export async function calculateOccupancy(
     totalSold,
     `property ${propertyId} [${startDate}, ${endDate}) range totals`
   );
+
+  // 3. Compute Financial Metrics (ADR, RevPAR, ALOS, revenue) — strictly [startDate, endDate) half-open stay nights
+  const isComplimentarySql = `
+    (
+      (
+        COALESCE(r.total_price, 0) = 0
+        AND COALESCE(r.amount_paid, 0) = 0
+        AND NOT EXISTS (
+          SELECT 1
+          FROM transactions t
+          WHERE t.property_id = b.property_id
+            AND t.reservation_id = r.id
+            AND t.transaction_type = 'SALE'
+            AND t.deleted_at IS NULL
+            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND COALESCE(t.net_amount, 0) > 0
+        )
+      )
+      OR COALESCE(r.discount_percent, 0) >= 100
+      OR UPPER(COALESCE(r.payment_status, '')) LIKE '%COMP%'
+      OR UPPER(COALESCE(r.payment_status, '')) LIKE '%FREE%'
+      OR UPPER(COALESCE(r.payment_status, '')) LIKE '%VOUCHER%'
+      OR UPPER(COALESCE(r.special_requests, '')) LIKE '%COMPLIMENT%'
+      OR UPPER(COALESCE(r.special_requests, '')) LIKE '%HOUSE USE%'
+      OR EXISTS (
+        SELECT 1
+        FROM reservation_complimentary_requests rcr
+        WHERE rcr.reservation_id = r.id
+          AND rcr.property_id = b.property_id
+          AND rcr.status = 'APPROVED'
+      )
+    )
+  `;
+
+  const financialQuery = `
+    SELECT
+      COALESCE(SUM(
+        CASE
+          WHEN NOT ${isComplimentarySql} AND COALESCE(r.total_price, 0) > 0 THEN
+            r.total_price * GREATEST(0, (LEAST(r.check_out::date, $3::date) - GREATEST(r.check_in::date, $2::date)))::numeric / GREATEST(1, (r.check_out::date - r.check_in::date))::numeric
+          ELSE 0
+        END
+      ), 0)::numeric(14,2) AS room_revenue,
+      COALESCE(COUNT(*) FILTER (WHERE NOT ${isComplimentarySql} AND COALESCE(r.total_price, 0) > 0), 0)::int AS paid_reservation_count,
+      COALESCE(SUM(
+        GREATEST(0, (LEAST(r.check_out::date, $3::date) - GREATEST(r.check_in::date, $2::date)))
+      ) FILTER (
+        WHERE NOT ${isComplimentarySql}
+      ), 0)::int AS paid_room_nights,
+      COALESCE(SUM(
+        GREATEST(0, (LEAST(r.check_out::date, $3::date) - GREATEST(r.check_in::date, $2::date)))
+      ) FILTER (
+        WHERE ${isComplimentarySql}
+      ), 0)::int AS complimentary_room_nights,
+      COALESCE(AVG(
+        GREATEST(1, (r.check_out::date - r.check_in::date))
+      ) FILTER (WHERE r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')), 0)::numeric(6,2) AS avg_stay_nights
+    FROM reservations r
+    JOIN bookings b ON b.id = r.booking_id
+    WHERE b.property_id = $1
+      AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+      AND COALESCE(b.booking_status, '') != 'CANCELLED'
+      AND r.check_in::date < $3::date
+      AND r.check_out::date > $2::date
+  `;
+  const financialRes = await pool.query(financialQuery, [propertyId, startDate, endDate]);
+  const finRow = financialRes.rows[0] || {};
+
+  const roomRevenue = Number(finRow.room_revenue || 0);
+  const paidRoomNights = Number(finRow.paid_room_nights || 0);
+  const complimentaryRoomNights = Number(finRow.complimentary_room_nights || 0);
+  const paidReservationCount = Number(finRow.paid_reservation_count || 0);
+  const avgStayNights = Number(finRow.avg_stay_nights || 0);
+
+  // Room revenue by room type (period-clipped [startDate, endDate))
+  const revenueByTypeQuery = `
+    SELECT
+      COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Unknown') AS room_type_name,
+      COALESCE(SUM(
+        CASE
+          WHEN NOT ${isComplimentarySql} AND COALESCE(r.total_price, 0) > 0 THEN
+            r.total_price * GREATEST(0, (LEAST(r.check_out::date, $3::date) - GREATEST(r.check_in::date, $2::date)))::numeric / GREATEST(1, (r.check_out::date - r.check_in::date))::numeric
+          ELSE 0
+        END
+      ), 0)::numeric(14,2) AS revenue
+    FROM reservations r
+    JOIN bookings b ON b.id = r.booking_id
+    LEFT JOIN rooms rm ON rm.id = r.room_id
+    LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot)
+    WHERE b.property_id = $1
+      AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+      AND COALESCE(b.booking_status, '') != 'CANCELLED'
+      AND r.check_in::date < $3::date
+      AND r.check_out::date > $2::date
+    GROUP BY COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Unknown')
+    ORDER BY revenue DESC
+  `;
+  const revenueByTypeRes = await pool.query(revenueByTypeQuery, [propertyId, startDate, endDate]);
+  const roomRevenueByType: Record<string, number> = {};
+  for (const row of revenueByTypeRes.rows) {
+    roomRevenueByType[row.room_type_name] = Number(row.revenue || 0);
+  }
+
+  const sellableRoomNights = totals.sellable_room_nights;
+  const adr = paidRoomNights > 0 ? Number((roomRevenue / paidRoomNights).toFixed(2)) : 0;
+  const revpar = sellableRoomNights > 0 ? Number((roomRevenue / sellableRoomNights).toFixed(2)) : 0;
+  const alos = paidReservationCount > 0 ? Number((avgStayNights).toFixed(2)) : 0;
+
+  const financials: FinancialMetrics = {
+    room_revenue: roomRevenue,
+    paid_room_nights: paidRoomNights,
+    complimentary_room_nights: complimentaryRoomNights,
+    adr,
+    revpar,
+    alos,
+    room_revenue_by_type: roomRevenueByType
+  };
 
   // 4. Compile Daily Property Array
   const daily: DailyOccupancyItem[] = [];
@@ -656,6 +792,7 @@ export async function calculateOccupancy(
     end_date: endDate,
     nights: nightsCount,
     totals,
+    financials,
     daily,
     ...(roomTypesResult !== undefined ? { room_types: roomTypesResult } : {})
   };

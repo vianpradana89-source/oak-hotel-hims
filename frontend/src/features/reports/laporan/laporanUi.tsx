@@ -1,4 +1,11 @@
-import React from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import {
+  IconAlertTriangle,
+  IconCheck,
+  IconChevronDown,
+  IconInbox,
+  IconRefreshCw,
+} from './LaporanIcons';
 
 /**
  * Shared visual primitives for the 7-tab Laporan workspace.
@@ -15,9 +22,119 @@ export function formatIdr(value: number | string | null | undefined): string {
   }).format(Number.isFinite(n) ? n : 0);
 }
 
+export function formatDecimalIdr(value: number | string | null | undefined): string {
+  const n = Number(value ?? 0);
+  const safe = Number.isFinite(n) ? n : 0;
+  return new Intl.NumberFormat('id-ID', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(safe);
+}
+
 export function formatNumber(value: number | string | null | undefined): string {
   const n = Number(value ?? 0);
   return Number.isFinite(n) ? n.toLocaleString('id-ID') : '0';
+}
+
+export interface DropdownOption<T extends string = string> {
+  value: T;
+  label: string;
+  icon?: React.ReactNode;
+}
+
+export interface LaporanDropdownProps<T extends string = string> {
+  value: T;
+  options: DropdownOption<T>[];
+  onChange: (val: T) => void;
+  buttonLabel?: string;
+  leadingIcon?: React.ReactNode;
+  variant?: 'primary' | 'outline';
+  align?: 'left' | 'right';
+  className?: string;
+}
+
+export function LaporanDropdown<T extends string = string>({
+  value,
+  options,
+  onChange,
+  buttonLabel,
+  leadingIcon,
+  variant = 'primary',
+  align = 'left',
+  className = '',
+}: LaporanDropdownProps<T>) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleOutside = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutside);
+    return () => document.removeEventListener('mousedown', handleOutside);
+  }, [open]);
+
+  const selectedOption = options.find((o) => o.value === value);
+  const displayLabel = buttonLabel ?? selectedOption?.label ?? 'Pilih';
+
+  const btnClass =
+    variant === 'primary'
+      ? 'bg-emerald-900 hover:bg-emerald-800 text-white border border-emerald-950 shadow-xs'
+      : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 shadow-xs';
+
+  return (
+    <div ref={containerRef} className={`relative inline-block ${className}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((p) => !p)}
+        className={`px-3.5 py-2 rounded-lg text-xs font-semibold flex items-center justify-between gap-2.5 transition-colors cursor-pointer min-w-[200px] ${btnClass}`}
+      >
+        <span className="flex items-center gap-2 truncate">
+          {leadingIcon ?? selectedOption?.icon ?? null}
+          <span className="truncate">{displayLabel}</span>
+        </span>
+        <IconChevronDown
+          className={`w-3.5 h-3.5 transition-transform duration-150 ${open ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {open && (
+        <div
+          className={`absolute z-40 mt-1.5 min-w-[220px] max-h-72 overflow-y-auto rounded-xl bg-white border border-slate-200 shadow-lg p-1.5 ${
+            align === 'right' ? 'right-0' : 'left-0'
+          }`}
+        >
+          {options.map((opt) => {
+            const isSelected = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={`w-full text-left px-3 py-2 rounded-lg text-xs flex items-center gap-2.5 transition-colors cursor-pointer ${
+                  isSelected
+                    ? 'bg-emerald-50 text-emerald-900 font-bold'
+                    : 'text-slate-700 hover:bg-slate-100 font-medium'
+                }`}
+              >
+                <span className="w-4 h-4 flex items-center justify-center shrink-0">
+                  {isSelected ? <IconCheck className="w-3.5 h-3.5 text-emerald-800" /> : null}
+                </span>
+                {opt.icon ? <span className="shrink-0 text-slate-500">{opt.icon}</span> : null}
+                <span className="truncate">{opt.label}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 type Accent = 'default' | 'emerald' | 'blue' | 'amber' | 'rose' | 'teal' | 'slate';
@@ -106,13 +223,15 @@ export const SectionTitle: React.FC<{ title: string; hint?: string; right?: Reac
   </div>
 );
 
-export const EmptyState: React.FC<{ title: string; message?: string; icon?: string }> = ({
+export const EmptyState: React.FC<{ title: string; message?: string; icon?: React.ReactNode }> = ({
   title,
   message,
-  icon = '◇',
+  icon,
 }) => (
   <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center">
-    <div className="text-2xl text-slate-300 mb-1">{icon}</div>
+    <div className="flex justify-center text-slate-300 mb-1.5">
+      {icon ?? <IconInbox className="w-6 h-6" />}
+    </div>
     <div className="text-sm font-semibold text-slate-600">{title}</div>
     {message ? <div className="text-xs text-slate-400 mt-1">{message}</div> : null}
   </div>
@@ -121,7 +240,7 @@ export const EmptyState: React.FC<{ title: string; message?: string; icon?: stri
 export const LoadingState: React.FC<{ label?: string }> = ({ label = 'Memuat data...' }) => (
   <div className="bg-slate-50 border border-slate-200 rounded-xl p-6 text-center">
     <div className="text-emerald-700 font-semibold text-xs flex items-center justify-center gap-2">
-      <span className="animate-spin">⟳</span> {label}
+      <IconRefreshCw className="w-4 h-4 animate-spin" /> {label}
     </div>
   </div>
 );
@@ -132,7 +251,7 @@ export const ErrorState: React.FC<{ message: string; onRetry?: () => void }> = (
 }) => (
   <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-rose-900 text-sm">
     <div className="flex items-center gap-2 font-bold text-rose-800 mb-1">
-      <span>⚠️</span> Gagal memuat data
+      <IconAlertTriangle className="w-4 h-4 text-rose-700" /> Gagal memuat data
     </div>
     <p className="text-xs text-rose-700">{message}</p>
     {onRetry ? (

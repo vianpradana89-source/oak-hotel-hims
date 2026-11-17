@@ -1,6 +1,11 @@
 import React from 'react';
-import { PERIOD_PRESETS, formatInclusiveRangeDisplay } from './laporanPeriods';
+import {
+  PERIOD_PRESETS,
+  formatPeriodDropdownButtonLabel,
+} from './laporanPeriods';
 import type { PeriodPreset, PeriodRange } from './laporanPeriods';
+import { LaporanDropdown } from './laporanUi';
+import { IconCalendar, IconDownload, IconRefreshCw } from './LaporanIcons';
 
 export interface LaporanPeriodFilterProps {
   period: PeriodPreset;
@@ -12,6 +17,8 @@ export interface LaporanPeriodFilterProps {
   onCustomStartChange: (v: string) => void;
   onCustomEndChange: (v: string) => void;
   onRefresh: () => void;
+  onExport?: () => void;
+  leftSlot?: React.ReactNode;
 }
 
 export const LaporanPeriodFilter: React.FC<LaporanPeriodFilterProps> = ({
@@ -24,65 +31,79 @@ export const LaporanPeriodFilter: React.FC<LaporanPeriodFilterProps> = ({
   onCustomStartChange,
   onCustomEndChange,
   onRefresh,
+  onExport,
+  leftSlot,
 }) => {
+  const buttonLabel = formatPeriodDropdownButtonLabel(period, range);
+
+  const dropdownOptions = PERIOD_PRESETS.map((p) => ({
+    value: p.key,
+    label: p.label,
+  }));
+
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-slate-200">
-      <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1 rounded-lg">
-        {PERIOD_PRESETS.map((preset) => (
-          <button
-            key={preset.key}
-            type="button"
-            onClick={() => onPeriodChange(preset.key)}
-            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors ${
-              period === preset.key
-                ? 'bg-white text-emerald-800 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/60'
-            }`}
-          >
-            {preset.label}
-          </button>
-        ))}
+      <div className="flex flex-wrap items-center gap-2.5">
+        {leftSlot ?? null}
       </div>
 
-      <div className="flex items-center gap-3">
-        {range ? (
-          <div className="text-xs text-slate-600 font-medium bg-slate-50 px-2.5 py-1 rounded-md border border-slate-200/80">
-            {formatInclusiveRangeDisplay(range.start, range.end)}
+      <div className="flex flex-wrap items-center gap-2 ml-auto">
+        {period === 'custom' && (
+          <div className="flex flex-wrap items-center gap-2 text-xs bg-white border border-slate-300 rounded-lg px-2.5 py-1 shadow-xs">
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500 font-medium">Dari:</span>
+              <input
+                type="date"
+                value={customStart}
+                onChange={(e) => onCustomStartChange(e.target.value)}
+                className="border border-slate-200 rounded px-1.5 py-0.5 text-xs bg-slate-50 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+              />
+            </div>
+            <div className="flex items-center gap-1">
+              <span className="text-slate-500 font-medium">Sampai:</span>
+              <input
+                type="date"
+                value={customEnd}
+                onChange={(e) => onCustomEndChange(e.target.value)}
+                className="border border-slate-200 rounded px-1.5 py-0.5 text-xs bg-slate-50 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+              />
+            </div>
           </div>
-        ) : null}
+        )}
+
+        <LaporanDropdown<PeriodPreset>
+          value={period}
+          options={dropdownOptions}
+          onChange={onPeriodChange}
+          buttonLabel={buttonLabel}
+          leadingIcon={<IconCalendar className="w-3.5 h-3.5" />}
+          variant="primary"
+          align="right"
+        />
 
         <button
           type="button"
           onClick={onRefresh}
-          className="hotel-action-btn text-xs font-semibold px-3 py-1.5"
+          className="px-3 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 shadow-xs disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
           disabled={loading}
+          title="Segarkan Data"
         >
-          {loading ? 'Memuat...' : '⟳ Segarkan'}
+          <IconRefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-700' : 'text-slate-600'}`} />
+          <span>{loading ? 'Memuat...' : 'Segarkan'}</span>
         </button>
-      </div>
 
-      {period === 'custom' ? (
-        <div className="flex flex-wrap items-center gap-2 text-xs w-full sm:w-auto">
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500 font-medium">Dari:</span>
-            <input
-              type="date"
-              value={customStart}
-              onChange={(e) => onCustomStartChange(e.target.value)}
-              className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
-            />
-          </div>
-          <div className="flex items-center gap-1">
-            <span className="text-slate-500 font-medium">Sampai:</span>
-            <input
-              type="date"
-              value={customEnd}
-              onChange={(e) => onCustomEndChange(e.target.value)}
-              className="border border-slate-300 rounded px-2 py-1 text-xs bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
-            />
-          </div>
-        </div>
-      ) : null}
+        {onExport && (
+          <button
+            type="button"
+            onClick={onExport}
+            disabled={!range}
+            className="px-3.5 py-2 text-xs font-semibold rounded-lg border border-slate-300 bg-white text-slate-700 hover:bg-slate-50 shadow-xs disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1.5 cursor-pointer"
+          >
+            <IconDownload className="w-3.5 h-3.5 text-slate-600" />
+            <span>Export</span>
+          </button>
+        )}
+      </div>
     </div>
   );
 };
