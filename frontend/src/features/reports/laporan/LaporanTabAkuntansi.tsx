@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+import React, { useMemo, useRef, useState } from 'react';
+import { authenticatedFetch } from '../../../lib/authenticatedFetch';
 import {
   EmptyState,
   ErrorState,
@@ -23,12 +24,15 @@ import {
 } from './LaporanIcons';
 import { LaporanTabKeseluruhan } from './LaporanTabKeseluruhan';
 import { downloadExportXml } from './exportLaporan';
+import { downloadAssetsXlsx, parseUploadedAssetsFile } from './xlsxAsetUtils';
 import {
   AddAssetModal,
   AddBankModal,
   AddPayableOrReceivableModal,
   CoaAccountModal,
+  ConfirmDeleteModal,
   InvestorTransferModal,
+  SettlePaymentModal,
 } from './akuntansiModals';
 import type { DailyOperationsData } from './useDailyOperations';
 import type {
@@ -127,7 +131,25 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const [showAddAssetModal, setShowAddAssetModal] = useState(false);
   const [showAddPayableModal, setShowAddPayableModal] = useState(false);
   const [showAddReceivableModal, setShowAddReceivableModal] = useState(false);
-  const [busyActionId, setBusyActionId] = useState<string | null>(null);
+
+  // Settle modal state (Gambar 2 reference popup)
+  const [settleModalState, setSettleModalState] = useState<{
+    mode: 'PAYABLE' | 'RECEIVABLE';
+    item: AccountingPayableItem | AccountingReceivableItem;
+  } | null>(null);
+
+  // Confirm delete modal state
+  const [confirmDeleteState, setConfirmDeleteState] = useState<{
+    title: string;
+    description: string;
+    endpoint: string;
+  } | null>(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+
+  // XLSX Import ref & state
+  const assetFileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importingXlsx, setImportingXlsx] = useState(false);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
 
   const subledger = analytics?.accounting_subledger;
 
@@ -228,137 +250,61 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     );
   }
 
-  const handleSettlePayable = async (item: AccountingPayableItem) => {
-    setBusyActionId(item.id);
+  const executeConfirmDelete = async () => {
+    if (!confirmDeleteState) return;
+    setDeleteBusy(true);
     try {
-      const res = await fetch(`/api/reports/accounting/payables/${encodeURIComponent(item.id)}/settle`, {
+      const res = await authenticatedFetch(confirmDeleteState.endpoint, { method: 'DELETE' });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        alert(json.message || 'Gagal menghapus data');
+      } else {
+        setConfirmDeleteState(null);
+        onRetry();
+      }
+    } catch (err: any) {
+      alert(err.message || 'Gagal menghapus data');
+    } finally {
+      setDeleteBusy(false);
+    }
+  };
+
+  const handleExportAssetsXlsx = () => {
+    const items = subledger?.fixed_assets.items || [];
+    downloadAssetsXlsx(`Data_Aset_Tetap_HIMS_${endDate}.xlsx`, items);
+  };
+
+  const handleImportAssetsFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    e.target.value = '';
+    setImportingXlsx(true);
+    setImportNotice(null);
+    try {
+      const parsedRows = await parseUploadedAssetsFile(file);
+      if (parsedRows.length === 0) {
+        throw new Error(
+          'Tidak ditemukan baris aset yang valid di dalam file. Pastikan kolom pertama berisi Nama Aset.'
+        );
+      }
+      const res = await authenticatedFetch('/api/reports/accounting/assets/bulk-import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: item.remaining_amount }),
+        body: JSON.stringify({
+          property_id: propertyId,
+          items: parsedRows,
+        }),
       });
       const json = await res.json();
       if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal melunasi hutang');
-      } else {
-        onRetry();
+        throw new Error(json.message || 'Gagal mengimpor file XLSX');
       }
+      setImportNotice(`Berhasil mengimpor ${json.imported_count || parsedRows.length} data aset tetap.`);
+      onRetry();
     } catch (err: any) {
-      alert(err.message || 'Gagal melunasi hutang');
+      alert(err.message || 'Gagal membaca/mengimpor file XLSX');
     } finally {
-      setBusyActionId(null);
-    }
-  };
-
-  const handleDeletePayable = async (item: AccountingPayableItem) => {
-    if (!window.confirm(`Hapus hutang ${item.supplier_name} (${item.transaction_no})?`)) return;
-    setBusyActionId(item.id);
-    try {
-      const res = await fetch(`/api/reports/accounting/payables/${encodeURIComponent(item.id)}`, {
-        method: 'DELETE',
-      });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal menghapus hutang');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal menghapus hutang');
-    } finally {
-      setBusyActionId(null);
-    }
-  };
-
-  const handleSettleReceivable = async (item: AccountingReceivableItem) => {
-    if (item.source === 'HIMS_RESERVATION') {
-      alert(
-        `Piutang Reservasi ${item.transaction_no} (${item.customer_name}) terhubung langsung dengan Folio Kamar.\n\nSilakan lunasi melalui menu Transaksi & Folio -> Sheet Piutang agar pembayaran masuk ke Folio dan otomatis berpindah ke Sheet Selesai.`
-      );
-      return;
-    }
-    setBusyActionId(item.id);
-    try {
-      const res = await fetch(`/api/reports/accounting/receivables/${encodeURIComponent(item.id)}/settle`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: item.remaining_amount }),
-      });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal memproses pelunasan piutang');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal memproses pelunasan piutang');
-    } finally {
-      setBusyActionId(null);
-    }
-  };
-
-  const handleDeleteReceivable = async (item: AccountingReceivableItem) => {
-    if (!window.confirm(`Hapus piutang ${item.customer_name} (${item.transaction_no})?`)) return;
-    setBusyActionId(item.id);
-    try {
-      const res = await fetch(`/api/reports/accounting/receivables/${encodeURIComponent(item.id)}`, {
-        method: 'DELETE',
-      });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal menghapus piutang');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal menghapus piutang');
-    } finally {
-      setBusyActionId(null);
-    }
-  };
-
-  const handleDeleteAsset = async (assetId: number, assetName: string) => {
-    if (!window.confirm(`Hapus aset tetap "${assetName}"?`)) return;
-    try {
-      const res = await fetch(`/api/reports/accounting/assets/${assetId}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal menghapus aset');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal menghapus aset');
-    }
-  };
-
-  const handleDeleteManualBank = async (manualId: number, bankName: string) => {
-    if (!window.confirm(`Hapus rekening bank manual "${bankName}"?`)) return;
-    try {
-      const res = await fetch(`/api/reports/accounting/banks/${manualId}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal menghapus rekening bank');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal menghapus rekening bank');
-    }
-  };
-
-  const handleDeleteCoa = async (coa: CoaAccountItem) => {
-    if (coa.is_system) return;
-    if (!window.confirm(`Hapus akun COA "${coa.account_number} - ${coa.account_name}"?`)) return;
-    try {
-      const res = await fetch(`/api/reports/accounting/coa/${coa.id}`, { method: 'DELETE' });
-      const json = await res.json();
-      if (!res.ok || json.status === 'ERROR') {
-        alert(json.message || 'Gagal menghapus akun COA');
-      } else {
-        onRetry();
-      }
-    } catch (err: any) {
-      alert(err.message || 'Gagal menghapus akun COA');
+      setImportingXlsx(false);
     }
   };
 
@@ -713,7 +659,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             </div>
             <button
               onClick={() => setShowAddPayableModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
             >
               + Tambah Hutang
             </button>
@@ -732,7 +678,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <button
                   key={tab.key}
                   onClick={() => setHutangFilter(tab.key)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
                     hutangFilter === tab.key
                       ? 'bg-[#123524] text-[#E6C786]'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -817,18 +763,22 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
-                                disabled={busyActionId === item.id}
-                                onClick={() => handleSettlePayable(item)}
-                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold disabled:opacity-50"
+                                onClick={() => setSettleModalState({ mode: 'PAYABLE', item })}
+                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold cursor-pointer"
                               >
                                 Lunasi
                               </button>
                             )}
                             {item.source === 'MANUAL' && (
                               <button
-                                disabled={busyActionId === item.id}
-                                onClick={() => handleDeletePayable(item)}
-                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold"
+                                onClick={() =>
+                                  setConfirmDeleteState({
+                                    title: 'Hapus Data Hutang',
+                                    description: `Apakah Anda yakin ingin menghapus data hutang "${item.supplier_name}" (${item.transaction_no}) sebesar ${formatIdr(item.total_amount)}?`,
+                                    endpoint: `/api/reports/accounting/payables/${encodeURIComponent(item.id)}`,
+                                  })
+                                }
+                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
                               >
                                 Hapus
                               </button>
@@ -876,7 +826,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             </div>
             <button
               onClick={() => setShowAddReceivableModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
             >
               + Tambah Piutang
             </button>
@@ -895,7 +845,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <button
                   key={tab.key}
                   onClick={() => setPiutangFilter(tab.key)}
-                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition ${
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
                     piutangFilter === tab.key
                       ? 'bg-[#123524] text-[#E6C786]'
                       : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -985,18 +935,22 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
-                                disabled={busyActionId === item.id}
-                                onClick={() => handleSettleReceivable(item)}
-                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold disabled:opacity-50"
+                                onClick={() => setSettleModalState({ mode: 'RECEIVABLE', item })}
+                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold cursor-pointer"
                               >
-                                {item.source === 'HIMS_RESERVATION' ? 'Info Folio' : 'Terima'}
+                                Lunasi
                               </button>
                             )}
                             {item.source === 'MANUAL' && (
                               <button
-                                disabled={busyActionId === item.id}
-                                onClick={() => handleDeleteReceivable(item)}
-                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold"
+                                onClick={() =>
+                                  setConfirmDeleteState({
+                                    title: 'Hapus Data Piutang',
+                                    description: `Apakah Anda yakin ingin menghapus piutang "${item.customer_name}" (${item.transaction_no}) sebesar ${formatIdr(item.total_amount)}?`,
+                                    endpoint: `/api/reports/accounting/receivables/${encodeURIComponent(item.id)}`,
+                                  })
+                                }
+                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
                               >
                                 Hapus
                               </button>
@@ -1031,7 +985,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
       )}
 
       {/* =====================================================================
-          8. SUB-VIEW: ASET (Daftar Aset Tetap — Terintegrasi ke COA 12000 & Neraca)
+          8. SUB-VIEW: ASET (Daftar Aset Tetap + Lokasi Penyimpanan + Export/Import XLSX)
          ===================================================================== */}
       {subView === 'aset' && (
         <div className="space-y-4">
@@ -1051,13 +1005,53 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 Total nilai aset aktif otomatis mengisi akun <code className="font-bold">12000 - Aset Tetap</code> di Daftar Akun (COA) dan Laporan Neraca.
               </p>
             </div>
-            <button
-              onClick={() => setShowAddAssetModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
-            >
-              + Tambah Aset
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                ref={assetFileInputRef}
+                type="file"
+                accept=".xlsx,.xls,.csv"
+                onChange={handleImportAssetsFileChange}
+                className="hidden"
+              />
+              <button
+                type="button"
+                disabled={importingXlsx}
+                onClick={() => assetFileInputRef.current?.click()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-emerald-800/30 bg-white hover:bg-emerald-50 text-[#123524] text-xs font-bold shadow-xs transition disabled:opacity-50 cursor-pointer"
+              >
+                <IconFileSpreadsheet className="w-3.5 h-3.5 text-emerald-700" />
+                {importingXlsx ? 'Mengimpor...' : 'Import XLSX'}
+              </button>
+              <button
+                type="button"
+                onClick={handleExportAssetsXlsx}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-emerald-800/30 bg-white hover:bg-emerald-50 text-[#123524] text-xs font-bold shadow-xs transition cursor-pointer"
+              >
+                <IconDownload className="w-3.5 h-3.5 text-emerald-700" />
+                Export XLSX
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowAddAssetModal(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
+              >
+                + Tambah Aset
+              </button>
+            </div>
           </div>
+
+          {importNotice && (
+            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-center justify-between">
+              <span>{importNotice}</span>
+              <button
+                type="button"
+                onClick={() => setImportNotice(null)}
+                className="text-emerald-700 hover:text-emerald-950 font-bold"
+              >
+                Tutup
+              </button>
+            </div>
+          )}
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
             {(subledger?.fixed_assets.items || []).length === 0 ? (
@@ -1065,7 +1059,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <IconPackage className="w-10 h-10 text-slate-300 mx-auto mb-2" />
                 <div className="text-sm font-bold text-slate-600">Belum ada data aset</div>
                 <p className="text-xs text-slate-400 mt-1">
-                  Klik tombol &ldquo;+ Tambah Aset&rdquo; untuk mencatat inventaris & aset tetap hotel.
+                  Klik tombol &ldquo;+ Tambah Aset&rdquo; atau &ldquo;Import XLSX&rdquo; untuk mencatat inventaris & aset tetap hotel.
                 </p>
               </div>
             ) : (
@@ -1075,6 +1069,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <tr className="bg-[#123524] text-white text-left">
                       <th className="py-3 px-4 font-semibold">Nama Aset</th>
                       <th className="py-3 px-4 font-semibold">Kategori</th>
+                      <th className="py-3 px-4 font-semibold">Lokasi Penyimpanan</th>
                       <th className="py-3 px-4 font-semibold">Tanggal Beli</th>
                       <th className="py-3 px-4 font-semibold text-right">Harga Beli</th>
                       <th className="py-3 px-4 font-semibold text-right">Nilai Saat Ini</th>
@@ -1092,6 +1087,9 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                             {asset.category}
                           </span>
                         </td>
+                        <td className="py-3 px-4 font-medium text-slate-700">
+                          {asset.storage_location || '-'}
+                        </td>
                         <td className="py-3 px-4 text-slate-600">{formatMediumDateId(asset.purchase_date)}</td>
                         <td className="py-3 px-4 text-right font-semibold text-slate-700">
                           {formatIdr(asset.purchase_price)}
@@ -1105,8 +1103,14 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                         <td className="py-3 px-4 text-slate-500">{asset.notes || '-'}</td>
                         <td className="py-3 px-4 text-center">
                           <button
-                            onClick={() => handleDeleteAsset(asset.id, asset.asset_name)}
-                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold"
+                            onClick={() =>
+                              setConfirmDeleteState({
+                                title: 'Hapus Aset Tetap',
+                                description: `Apakah Anda yakin ingin menghapus aset tetap "${asset.asset_name}" (${asset.category})?`,
+                                endpoint: `/api/reports/accounting/assets/${asset.id}`,
+                              })
+                            }
+                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
                           >
                             Hapus
                           </button>
@@ -1136,13 +1140,13 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => setShowInvestorTransferModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold transition"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-xs font-bold transition cursor-pointer"
               >
                 Transfer Investor
               </button>
               <button
                 onClick={() => setShowAddBankModal(true)}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
               >
                 + Tambah Bank
               </button>
@@ -1186,8 +1190,14 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                       <td className="py-3.5 px-4 text-center">
                         {bank.source_type === 'MANUAL' && bank.manual_id ? (
                           <button
-                            onClick={() => handleDeleteManualBank(bank.manual_id!, bank.bank_name)}
-                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold"
+                            onClick={() =>
+                              setConfirmDeleteState({
+                                title: 'Hapus Rekening Bank Manual',
+                                description: `Apakah Anda yakin ingin menghapus rekening bank manual "${bank.bank_name}"?`,
+                                endpoint: `/api/reports/accounting/banks/${bank.manual_id}`,
+                              })
+                            }
+                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
                           >
                             Hapus
                           </button>
@@ -1260,7 +1270,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             </div>
             <button
               onClick={() => setCoaModalItem(null)}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
             >
               + Tambah Akun
             </button>
@@ -1312,14 +1322,20 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                         <div className="flex items-center justify-center gap-1.5">
                           <button
                             onClick={() => setCoaModalItem(acc)}
-                            className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold"
+                            className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer"
                           >
                             Edit Saldo Awal
                           </button>
                           {!acc.is_system && (
                             <button
-                              onClick={() => handleDeleteCoa(acc)}
-                              className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold"
+                              onClick={() =>
+                                setConfirmDeleteState({
+                                  title: 'Hapus Akun COA',
+                                  description: `Apakah Anda yakin ingin menghapus akun "${acc.account_number} - ${acc.account_name}"?`,
+                                  endpoint: `/api/reports/accounting/coa/${acc.id}`,
+                                })
+                              }
+                              className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
                             >
                               Hapus
                             </button>
@@ -1481,6 +1497,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
         <AddAssetModal
           propertyId={propertyId}
           defaultDate={endDate}
+          categories={subledger?.fixed_assets.categories}
           onClose={() => setShowAddAssetModal(false)}
           onSaved={onRetry}
         />
@@ -1499,6 +1516,24 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           propertyId={propertyId}
           onClose={() => setShowAddReceivableModal(false)}
           onSaved={onRetry}
+        />
+      )}
+      {settleModalState && (
+        <SettlePaymentModal
+          mode={settleModalState.mode}
+          propertyId={propertyId}
+          item={settleModalState.item}
+          onClose={() => setSettleModalState(null)}
+          onSaved={onRetry}
+        />
+      )}
+      {confirmDeleteState && (
+        <ConfirmDeleteModal
+          title={confirmDeleteState.title}
+          description={confirmDeleteState.description}
+          busy={deleteBusy}
+          onCancel={() => setConfirmDeleteState(null)}
+          onConfirm={executeConfirmDelete}
         />
       )}
     </div>

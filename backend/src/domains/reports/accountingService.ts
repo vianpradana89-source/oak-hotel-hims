@@ -67,6 +67,7 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
         property_id INT NOT NULL DEFAULT 1,
         asset_name VARCHAR(180) NOT NULL,
         category VARCHAR(100) NOT NULL DEFAULT 'Peralatan',
+        storage_location VARCHAR(160) NULL DEFAULT '-',
         purchase_date DATE NOT NULL DEFAULT CURRENT_DATE,
         purchase_price NUMERIC(16, 2) NOT NULL DEFAULT 0,
         current_value NUMERIC(16, 2) NOT NULL DEFAULT 0,
@@ -75,6 +76,18 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
         notes TEXT NULL,
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      ALTER TABLE accounting_fixed_assets
+        ADD COLUMN IF NOT EXISTS storage_location VARCHAR(160) NULL DEFAULT '-';
+
+      CREATE TABLE IF NOT EXISTS accounting_asset_categories (
+        id SERIAL PRIMARY KEY,
+        property_id INT NOT NULL DEFAULT 1,
+        category_name VARCHAR(100) NOT NULL,
+        is_system BOOLEAN NOT NULL DEFAULT FALSE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE (property_id, category_name)
       );
 
       CREATE TABLE IF NOT EXISTS accounting_manual_payables (
@@ -115,6 +128,22 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
        VALUES ($1, $2, $3, $4, 0, TRUE)
        ON CONFLICT (property_id, account_number) DO NOTHING`,
       [propertyId, acc.account_number, acc.account_name, acc.classification]
+    );
+  }
+
+  const defaultAssetCategories = [
+    'Peralatan',
+    'Elektronik',
+    'Furniture & Interior',
+    'Kendaraan',
+    'Bangunan & Renovasi',
+  ];
+  for (const cat of defaultAssetCategories) {
+    await pool.query(
+      `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+       VALUES ($1, $2, TRUE)
+       ON CONFLICT (property_id, category_name) DO NOTHING`,
+      [propertyId, cat]
     );
   }
 }
@@ -173,9 +202,11 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     manualBanksRes,
     investorTransfersRes,
     fixedAssetsRes,
+    assetCategoriesRes,
     manualPayablesRes,
     himsPurchasesRes,
     manualReceivablesRes,
+    settledHimsArRes,
   ] = await Promise.all([
     pool.query(
       `SELECT id, property_id, account_number, account_name, classification,
@@ -208,6 +239,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     ),
     pool.query(
       `SELECT id, property_id, asset_name, category,
+              COALESCE(NULLIF(BTRIM(storage_location), ''), '-') AS storage_location,
               to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date,
               purchase_price::numeric(16,2) AS purchase_price,
               current_value::numeric(16,2) AS current_value,
@@ -216,6 +248,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
        FROM accounting_fixed_assets
        WHERE property_id = $1
        ORDER BY purchase_date DESC, id DESC`,
+      [ctx.propertyId]
+    ),
+    pool.query(
+      `SELECT id, property_id, category_name, is_system
+       FROM accounting_asset_categories
+       WHERE property_id = $1
+       ORDER BY is_system DESC, category_name ASC`,
       [ctx.propertyId]
     ),
     pool.query(
@@ -305,6 +344,38 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
        ORDER BY created_at DESC, id DESC`,
       [ctx.propertyId]
     ),
+    pool.query(
+      `SELECT
+         COALESCE(b.bid, r.booking_number, t.transaction_no) AS bid,
+         MAX(COALESCE(NULLIF(BTRIM(r.guest_name), ''), NULLIF(BTRIM(t.party_name), ''), 'Tamu Hotel')) AS guest_name,
+         STRING_AGG(DISTINCT COALESCE(rm.room_number, '') || ' ' || COALESCE(rt.name, ''), ', ') AS room_summary,
+         MIN(to_char(r.check_in::date, 'YYYY-MM-DD')) AS check_in,
+         MAX(to_char(r.check_out::date, 'YYYY-MM-DD')) AS check_out,
+         SUM(COALESCE(t.net_amount, 0))::numeric(16,2) AS net_amount
+       FROM transactions t
+       JOIN reservations r ON r.id = t.reservation_id
+       LEFT JOIN bookings b ON b.id = r.booking_id
+       LEFT JOIN rooms rm ON rm.id = r.room_id
+       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+       WHERE t.property_id = $1
+         AND t.transaction_type = 'SALE'
+         AND t.deleted_at IS NULL
+         AND r.status = 'CHECKED_OUT'
+         AND UPPER(COALESCE(t.payment_status, '')) = 'PAID'
+         AND EXISTS (
+           SELECT 1 FROM payment_transactions pt
+           WHERE (pt.transaction_id = t.id OR pt.reservation_id = r.id)
+             AND pt.status = 'SUCCESS'
+             AND (
+               COALESCE(pt.reference_code, '') ILIKE 'PELUNASAN-%'
+               OR COALESCE(pt.reference_code, '') ILIKE 'PIUTANG-%'
+             )
+         )
+       GROUP BY COALESCE(b.bid, r.booking_number, t.transaction_no)
+       ORDER BY MAX(r.check_out) DESC
+       LIMIT 100`,
+      [ctx.propertyId]
+    ),
   ]);
 
   // 1. Investor transfers aggregation
@@ -339,6 +410,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       property_id: Number(a.property_id || ctx.propertyId),
       asset_name: String(a.asset_name || '-'),
       category: String(a.category || 'Peralatan'),
+      storage_location: String(a.storage_location || '-'),
       purchase_date: String(a.purchase_date || ''),
       purchase_price: purchasePrice,
       current_value: effectiveValue,
@@ -445,18 +517,21 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     notes: string | null;
   }> = [];
 
+  const activePiutangBids = new Set<string>();
   for (const item of ctx.allTimePiutangItems || []) {
     const total = Math.max(0, Math.round(Number(item.net) || 0));
     const paid = Math.max(0, Math.round(Number(item.paid) || 0));
     const remaining = Math.max(0, Math.round(Number(item.remaining) || 0));
     const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
       remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+    const bidStr = String(item.bid || '-');
+    activePiutangBids.add(bidStr);
     receivablesItems.push({
-      id: `HIMS-AR-${item.bid}`,
+      id: `HIMS-AR-${bidStr}`,
       source: 'HIMS_RESERVATION',
-      raw_id: String(item.bid),
+      raw_id: bidStr,
       customer_name: String(item.guest_name || '-'),
-      transaction_no: String(item.bid || '-'),
+      transaction_no: bidStr,
       tx_date: String(item.tx_date || item.check_in || ''),
       due_date: item.check_out || null,
       room_summary: String(item.room_summary || ''),
@@ -465,6 +540,28 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       remaining_amount: remaining,
       status,
       notes: 'Reservasi Check-Out Belum Lunas (Sheet Piutang)',
+    });
+  }
+
+  for (const sItem of settledHimsArRes.rows) {
+    const bidStr = String(sItem.bid || '-');
+    if (activePiutangBids.has(bidStr)) continue;
+    const total = Math.max(0, Math.round(Number(sItem.net_amount) || 0));
+    if (total <= 0) continue;
+    receivablesItems.push({
+      id: `HIMS-AR-${bidStr}`,
+      source: 'HIMS_RESERVATION',
+      raw_id: bidStr,
+      customer_name: String(sItem.guest_name || '-'),
+      transaction_no: bidStr,
+      tx_date: String(sItem.check_in || ''),
+      due_date: sItem.check_out || null,
+      room_summary: String(sItem.room_summary || '').trim(),
+      total_amount: total,
+      paid_amount: total,
+      remaining_amount: 0,
+      status: 'PAID',
+      notes: 'Reservasi Piutang Lunas (Sheet Selesai)',
     });
   }
 
@@ -865,6 +962,11 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     })),
     fixed_assets: {
       items: assetsItems,
+      categories: assetCategoriesRes.rows.map((c: any) => ({
+        id: Number(c.id),
+        category_name: String(c.category_name || ''),
+        is_system: Boolean(c.is_system),
+      })),
       active_count: activeAssets.length,
       active_total_value: activeAssetsTotalValue,
       period_purchase_total: periodAssetPurchases,

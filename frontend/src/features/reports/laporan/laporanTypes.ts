@@ -328,6 +328,7 @@ export interface FixedAssetItem {
   property_id: number;
   asset_name: string;
   category: string;
+  storage_location?: string;
   purchase_date: string;
   purchase_price: number;
   current_value: number;
@@ -387,6 +388,7 @@ export interface AccountingSubledgerData {
   investor_transfers: InvestorTransferItem[];
   fixed_assets: {
     items: FixedAssetItem[];
+    categories?: Array<{ id: number; category_name: string; is_system: boolean }>;
     active_count: number;
     active_total_value: number;
     period_purchase_total: number;

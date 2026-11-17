@@ -1,7 +1,13 @@
 import React, { useState } from 'react';
+import { authenticatedFetch } from '../../../lib/authenticatedFetch';
 import { IconX } from './LaporanIcons';
 import { formatIdr } from './laporanUi';
-import type { BankListItem, CoaAccountItem } from './laporanTypes';
+import type {
+  AccountingPayableItem,
+  AccountingReceivableItem,
+  BankListItem,
+  CoaAccountItem,
+} from './laporanTypes';
 
 export interface CoaModalProps {
   propertyId: number;
@@ -33,7 +39,7 @@ export const CoaAccountModal: React.FC<CoaModalProps> = ({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch('/api/reports/accounting/coa', {
+      const res = await authenticatedFetch('/api/reports/accounting/coa', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -173,7 +179,7 @@ export const AddBankModal: React.FC<AddBankModalProps> = ({ propertyId, onClose,
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch('/api/reports/accounting/banks', {
+      const res = await authenticatedFetch('/api/reports/accounting/banks', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -308,7 +314,7 @@ export const InvestorTransferModal: React.FC<InvestorTransferModalProps> = ({
     setSaving(true);
     setError(null);
     try {
-      const res = await fetch('/api/reports/accounting/investor-transfers', {
+      const res = await authenticatedFetch('/api/reports/accounting/investor-transfers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -431,21 +437,51 @@ export const InvestorTransferModal: React.FC<InvestorTransferModalProps> = ({
   );
 };
 
+// ============================================================================
+// ADD ASSET MODAL + KELOLA KATEGORI (WITH SLIDERS ICON) + LOKASI PENYIMPANAN
+// ============================================================================
+
 export interface AddAssetModalProps {
   propertyId: number;
   defaultDate: string;
+  categories?: Array<{ id: number; category_name: string; is_system: boolean }>;
   onClose: () => void;
   onSaved: () => void;
 }
 
+const DEFAULT_CATEGORIES = [
+  'Peralatan',
+  'Elektronik',
+  'Furniture & Interior',
+  'Kendaraan',
+  'Bangunan & Renovasi',
+];
+
+const DEFAULT_STORAGE_LOCATIONS = [
+  'Lobby & Resepsionis',
+  'Kantor Front Office',
+  'Gudang Housekeeping',
+  'Dapur / Restoran',
+  'Kamar Tamu',
+  'Ruang Server / Back Office',
+  'Area Parkir / Outdoor',
+];
+
 export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   propertyId,
   defaultDate,
+  categories,
   onClose,
   onSaved,
 }) => {
+  const categoryList =
+    categories && categories.length > 0
+      ? categories
+      : DEFAULT_CATEGORIES.map((c, idx) => ({ id: -(idx + 1), category_name: c, is_system: true }));
+
   const [assetName, setAssetName] = useState('');
-  const [category, setCategory] = useState('Peralatan');
+  const [category, setCategory] = useState(categoryList[0]?.category_name || 'Peralatan');
+  const [storageLocation, setStorageLocation] = useState('');
   const [purchaseDate, setPurchaseDate] = useState(defaultDate);
   const [purchasePrice, setPurchasePrice] = useState('');
   const [currentValue, setCurrentValue] = useState('');
@@ -453,6 +489,59 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   const [notes, setNotes] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Kelola Kategori state
+  const [showManageCategory, setShowManageCategory] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
+  const [catBusy, setCatBusy] = useState(false);
+
+  const handleAddCategory = async () => {
+    const trimmed = newCategoryName.trim();
+    if (!trimmed) return;
+    setCatBusy(true);
+    setError(null);
+    try {
+      const res = await authenticatedFetch('/api/reports/accounting/asset-categories', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ property_id: propertyId, category_name: trimmed }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal menambah kategori');
+      }
+      setCategory(trimmed);
+      setNewCategoryName('');
+      onSaved();
+    } catch (err: any) {
+      setError(err.message || 'Gagal menambah kategori');
+    } finally {
+      setCatBusy(false);
+    }
+  };
+
+  const handleDeleteCategory = async (id: number, name: string) => {
+    if (id <= 0) return;
+    setCatBusy(true);
+    setError(null);
+    try {
+      const res = await authenticatedFetch(`/api/reports/accounting/asset-categories/${id}`, {
+        method: 'DELETE',
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal menghapus kategori');
+      }
+      if (category === name) {
+        setCategory(categoryList[0]?.category_name || 'Peralatan');
+      }
+      onSaved();
+    } catch (err: any) {
+      setError(err.message || 'Gagal menghapus kategori');
+    } finally {
+      setCatBusy(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -465,13 +554,14 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
     try {
       const priceNum = Number(purchasePrice || 0);
       const curValNum = currentValue !== '' ? Number(currentValue) : priceNum;
-      const res = await fetch('/api/reports/accounting/assets', {
+      const res = await authenticatedFetch('/api/reports/accounting/assets', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: propertyId,
           asset_name: assetName.trim(),
           category,
+          storage_location: storageLocation.trim() || '-',
           purchase_date: purchaseDate,
           purchase_price: priceNum,
           current_value: curValNum,
@@ -495,14 +585,14 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
-      <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden">
-        <div className="flex items-center justify-between px-6 py-4 bg-[#123524] text-white">
+      <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[92vh] flex flex-col">
+        <div className="flex items-center justify-between px-6 py-4 bg-[#123524] text-white shrink-0">
           <h3 className="text-base font-bold">Tambah Aset</h3>
           <button onClick={onClose} className="text-white/75 hover:text-white">
             <IconX className="w-5 h-5" />
           </button>
         </div>
-        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm">
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm overflow-y-auto">
           {error && (
             <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
               {error}
@@ -518,20 +608,52 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
             />
           </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Kategori</label>
-              <select
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
-              >
-                <option value="Peralatan">Peralatan</option>
-                <option value="Elektronik">Elektronik</option>
-                <option value="Furniture & Interior">Furniture & Interior</option>
-                <option value="Kendaraan">Kendaraan</option>
-                <option value="Bangunan & Renovasi">Bangunan & Renovasi</option>
-              </select>
+              <div className="flex items-center gap-2">
+                <select
+                  value={category}
+                  onChange={(e) => setCategory(e.target.value)}
+                  className="flex-1 min-w-0 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+                >
+                  {categoryList.map((cat) => (
+                    <option key={cat.category_name} value={cat.category_name}>
+                      {cat.category_name}
+                    </option>
+                  ))}
+                </select>
+                {/* Ikon Kelola Kategori (Gambar 2 — Sliders Horizontal button) */}
+                <button
+                  type="button"
+                  onClick={() => setShowManageCategory((v) => !v)}
+                  title="Kelola Kategori Aset"
+                  className={`w-9 h-9 rounded-xl border flex items-center justify-center transition shrink-0 cursor-pointer ${
+                    showManageCategory
+                      ? 'bg-[#123524] text-[#E6C786] border-[#123524]'
+                      : 'bg-cyan-50/90 hover:bg-cyan-100 text-slate-800 border-cyan-200'
+                  }`}
+                >
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth={2}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className="w-4 h-4"
+                  >
+                    <line x1="4" x2="10" y1="8" y2="8" />
+                    <line x1="14" x2="20" y1="8" y2="8" />
+                    <circle cx="12" cy="8" r="2" />
+                    <line x1="4" x2="12" y1="16" y2="16" />
+                    <line x1="16" x2="20" y1="16" y2="16" />
+                    <circle cx="14" cy="16" r="2" />
+                  </svg>
+                </button>
+              </div>
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Beli</label>
@@ -543,6 +665,81 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               />
             </div>
           </div>
+
+          {/* Panel Kelola Kategori Aset */}
+          {showManageCategory && (
+            <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-bold text-[#123524]">Kelola Kategori Aset</span>
+                <button
+                  type="button"
+                  onClick={() => setShowManageCategory(false)}
+                  className="text-[11px] text-slate-500 hover:text-slate-800 font-semibold"
+                >
+                  Tutup
+                </button>
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={newCategoryName}
+                  onChange={(e) => setNewCategoryName(e.target.value)}
+                  placeholder="Nama kategori baru (misal: Linen & Bedding)..."
+                  className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+                />
+                <button
+                  type="button"
+                  disabled={catBusy || !newCategoryName.trim()}
+                  onClick={handleAddCategory}
+                  className="px-3 py-1.5 rounded-lg bg-[#123524] text-[#E6C786] text-xs font-bold disabled:opacity-50"
+                >
+                  + Tambah
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1.5 pt-1">
+                {categoryList.map((cat) => (
+                  <span
+                    key={cat.category_name}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white border border-emerald-200 text-xs font-semibold text-slate-700"
+                  >
+                    <span>{cat.category_name}</span>
+                    {!cat.is_system && cat.id > 0 && (
+                      <button
+                        type="button"
+                        disabled={catBusy}
+                        onClick={() => handleDeleteCategory(cat.id, cat.category_name)}
+                        className="text-rose-500 hover:text-rose-700 font-bold"
+                        title="Hapus kategori"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Lokasi Penyimpanan */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">
+              Lokasi Penyimpanan
+            </label>
+            <input
+              type="text"
+              list="oak-asset-storage-locations"
+              value={storageLocation}
+              onChange={(e) => setStorageLocation(e.target.value)}
+              placeholder="Contoh: Kamar 101, Lobby, Gudang HK, Dapur..."
+              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+            />
+            <datalist id="oak-asset-storage-locations">
+              {DEFAULT_STORAGE_LOCATIONS.map((loc) => (
+                <option key={loc} value={loc} />
+              ))}
+            </datalist>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Harga Beli (Rp)</label>
@@ -664,7 +861,7 @@ export const AddPayableOrReceivableModal: React.FC<AddPayableOrReceivableModalPr
             due_date: dueDate || null,
             notes: notes.trim() || null,
           };
-      const res = await fetch(endpoint, {
+      const res = await authenticatedFetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -782,6 +979,206 @@ export const AddPayableOrReceivableModal: React.FC<AddPayableOrReceivableModalPr
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// POPUP MODAL BAYAR HUTANG / TERIMA PIUTANG (SESUAI REFERENSI GAMBAR 2 ANKA)
+// ============================================================================
+
+export interface SettlePaymentModalProps {
+  mode: 'PAYABLE' | 'RECEIVABLE';
+  propertyId: number;
+  item: AccountingPayableItem | AccountingReceivableItem;
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
+  mode,
+  propertyId,
+  item,
+  onClose,
+  onSaved,
+}) => {
+  const isPayable = mode === 'PAYABLE';
+  const partyName = isPayable
+    ? (item as AccountingPayableItem).supplier_name
+    : (item as AccountingReceivableItem).customer_name;
+  const remaining = Math.max(0, Number(item.remaining_amount || 0));
+  const [payAmount, setPayAmount] = useState(String(remaining));
+  const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const numAmt = Math.round(Number(payAmount || 0));
+    if (!(numAmt > 0)) {
+      setError('Jumlah pembayaran harus lebih besar dari Rp 0.');
+      return;
+    }
+    if (numAmt > remaining) {
+      setError(`Jumlah pembayaran tidak boleh melebihi sisa tagihan (${formatIdr(remaining)}).`);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const endpoint = isPayable
+        ? `/api/reports/accounting/payables/${encodeURIComponent(item.id)}/settle`
+        : `/api/reports/accounting/receivables/${encodeURIComponent(item.id)}/settle`;
+      const res = await authenticatedFetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          amount: numAmt,
+          payment_method: paymentMethod,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal memproses pembayaran');
+      }
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err.message || 'Gagal memproses pembayaran');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+      <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="flex items-center justify-between px-6 pt-5 pb-2">
+          <div>
+            <h3 className="text-base font-extrabold text-slate-900">
+              {isPayable ? `Bayar Hutang – ${partyName}` : `Terima Piutang – ${partyName}`}
+            </h3>
+            <div className="text-xs font-semibold text-slate-500 mt-1">
+              Sisa:{' '}
+              <span className="text-rose-600 font-extrabold">
+                {formatIdr(remaining)}
+              </span>{' '}
+              <span className="text-slate-400">({item.transaction_no})</span>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-slate-400 hover:text-slate-700 p-1 rounded-lg"
+          >
+            <IconX className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="px-6 pb-6 pt-3 space-y-4 text-sm">
+          {error && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+              Jumlah Pembayaran
+            </label>
+            <input
+              type="number"
+              autoFocus
+              min={1}
+              max={remaining}
+              value={payAmount}
+              onChange={(e) => setPayAmount(e.target.value)}
+              placeholder={String(remaining)}
+              className="w-full px-3.5 py-2.5 rounded-xl border-2 border-emerald-700/70 bg-white text-slate-900 font-bold focus:outline-hidden focus:ring-2 focus:ring-emerald-700"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+              Metode Pembayaran
+            </label>
+            <select
+              value={paymentMethod}
+              onChange={(e) => setPaymentMethod(e.target.value)}
+              className="w-full px-3.5 py-2 rounded-xl border border-slate-300 bg-white text-slate-800 font-medium"
+            >
+              <option value="CASH">Cash / Tunai</option>
+              <option value="TRANSFER">Transfer Bank</option>
+              <option value="QRIS">QRIS</option>
+            </select>
+          </div>
+
+          <button
+            type="submit"
+            disabled={saving}
+            className="w-full py-2.5 rounded-xl bg-[#123524] hover:bg-emerald-900 text-[#E6C786] font-extrabold text-sm shadow-sm transition disabled:opacity-50 cursor-pointer"
+          >
+            {saving ? 'Memproses Pembayaran...' : 'Konfirmasi Pembayaran'}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// POPUP MODAL KONFIRMASI HAPUS (MENGGANTIKAN WINDOW.CONFIRM)
+// ============================================================================
+
+export interface ConfirmDeleteModalProps {
+  title: string;
+  description: string;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+export const ConfirmDeleteModal: React.FC<ConfirmDeleteModalProps> = ({
+  title,
+  description,
+  busy,
+  onCancel,
+  onConfirm,
+}) => {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+      <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden p-6 space-y-4">
+        <div className="flex items-start justify-between gap-3">
+          <h3 className="text-base font-extrabold text-slate-900">{title}</h3>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="text-slate-400 hover:text-slate-700"
+          >
+            <IconX className="w-5 h-5" />
+          </button>
+        </div>
+        <p className="text-xs text-slate-600 leading-relaxed">{description}</p>
+        <div className="flex items-center justify-end gap-2 pt-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onCancel}
+            className="px-4 py-2 rounded-xl border border-slate-300 text-slate-700 text-xs font-bold hover:bg-slate-100"
+          >
+            Batal
+          </button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onConfirm}
+            className="px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-bold shadow-xs disabled:opacity-50"
+          >
+            {busy ? 'Menghapus...' : 'Ya, Hapus'}
+          </button>
+        </div>
       </div>
     </div>
   );

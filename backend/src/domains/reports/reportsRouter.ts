@@ -4,7 +4,7 @@ import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate'
 import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
-import { getTransactions } from '../transactions/transactionService';
+import { getTransactions, settleTransactionPayment } from '../transactions/transactionService';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 
 function parsePositiveInt(value: any): number | null {
@@ -2043,6 +2043,7 @@ export function createReportsRouter(pool: Pool): Router {
       await ensureAccountingSchema(pool, propertyId);
       const assetName = String(req.body.asset_name || '').trim();
       const category = String(req.body.category || 'Peralatan').trim();
+      const storageLocation = String(req.body.storage_location || '-').trim() || '-';
       const purchaseDate = req.body.purchase_date
         ? String(req.body.purchase_date).slice(0, 10)
         : hotelDateFromInstant(new Date());
@@ -2057,16 +2058,121 @@ export function createReportsRouter(pool: Pool): Router {
       if (!assetName) {
         return res.status(400).json({ status: 'ERROR', message: 'Nama aset wajib diisi' });
       }
+      await pool.query(
+        `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (property_id, category_name) DO NOTHING`,
+        [propertyId, category]
+      );
       const r = await pool.query(
         `INSERT INTO accounting_fixed_assets
-           (property_id, asset_name, category, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+           (property_id, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
          RETURNING *`,
-        [propertyId, assetName, category, purchaseDate, purchasePrice, currentValue, depreciationRate, status, notes]
+        [
+          propertyId,
+          assetName,
+          category,
+          storageLocation,
+          purchaseDate,
+          purchasePrice,
+          currentValue,
+          depreciationRate,
+          status,
+          notes,
+        ]
       );
       return res.json({ status: 'SUCCESS', data: r.rows[0] });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menyimpan aset tetap' });
+    }
+  });
+
+  router.post('/accounting/assets/bulk-import', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const items = Array.isArray(req.body.items) ? req.body.items : [];
+      if (items.length === 0) {
+        return res.status(400).json({ status: 'ERROR', message: 'Tidak ada baris aset yang valid untuk diimpor' });
+      }
+      let importedCount = 0;
+      for (const item of items) {
+        const assetName = String(item.asset_name || '').trim();
+        if (!assetName) continue;
+        const category = String(item.category || 'Peralatan').trim() || 'Peralatan';
+        const storageLocation = String(item.storage_location || '-').trim() || '-';
+        const purchaseDate = item.purchase_date
+          ? String(item.purchase_date).slice(0, 10)
+          : hotelDateFromInstant(new Date());
+        const purchasePrice = Math.max(0, Number(item.purchase_price || 0));
+        const currentValue =
+          item.current_value !== undefined && item.current_value !== ''
+            ? Math.max(0, Number(item.current_value))
+            : purchasePrice;
+        const depreciationRate = Math.max(0, Number(item.depreciation_rate || 0));
+        const notes = item.notes ? String(item.notes).trim() : null;
+
+        await pool.query(
+          `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+           VALUES ($1, $2, FALSE)
+           ON CONFLICT (property_id, category_name) DO NOTHING`,
+          [propertyId, category]
+        );
+        await pool.query(
+          `INSERT INTO accounting_fixed_assets
+             (property_id, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, NOW())`,
+          [
+            propertyId,
+            assetName,
+            category,
+            storageLocation,
+            purchaseDate,
+            purchasePrice,
+            currentValue,
+            depreciationRate,
+            notes,
+          ]
+        );
+        importedCount++;
+      }
+      return res.json({ status: 'SUCCESS', imported_count: importedCount });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal mengimpor data aset' });
+    }
+  });
+
+  router.post('/accounting/asset-categories', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+      const categoryName = String(req.body.category_name || '').trim();
+      if (!categoryName) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama kategori wajib diisi' });
+      }
+      const r = await pool.query(
+        `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (property_id, category_name) DO UPDATE SET category_name = EXCLUDED.category_name
+         RETURNING *`,
+        [propertyId, categoryName]
+      );
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menambah kategori aset' });
+    }
+  });
+
+  router.delete('/accounting/asset-categories/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID kategori tidak valid' });
+      await ensureAccountingSchema(pool, 1);
+      await pool.query(`DELETE FROM accounting_asset_categories WHERE id = $1`, [id]);
+      return res.json({ status: 'SUCCESS' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus kategori aset' });
     }
   });
 
@@ -2114,8 +2220,10 @@ export function createReportsRouter(pool: Pool): Router {
   router.post('/accounting/payables/:id/settle', async (req: Request, res: Response) => {
     try {
       const rawId = String(req.params.id || '');
-      const payAmount = req.body.amount !== undefined ? Number(req.body.amount) : null;
-      await ensureAccountingSchema(pool, 1);
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      const payAmount = req.body.amount !== undefined ? Math.round(Number(req.body.amount)) : null;
+      const paymentMethod = String(req.body.payment_method || 'CASH').trim().toUpperCase();
+      await ensureAccountingSchema(pool, propertyId);
       if (rawId.startsWith('MANUAL-AP-')) {
         const id = parsePositiveInt(rawId.replace('MANUAL-AP-', ''));
         if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID hutang tidak valid' });
@@ -2134,12 +2242,38 @@ export function createReportsRouter(pool: Pool): Router {
       } else if (rawId.startsWith('HIMS-PUR-')) {
         const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
         if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi pembelian tidak valid' });
-        const cur = await pool.query(`SELECT id, net_amount FROM transactions WHERE id = $1`, [txId]);
-        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Transaksi pembelian tidak ditemukan' });
-        await pool.query(
-          `UPDATE transactions SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
+        const cur = await pool.query(
+          `SELECT t.id, t.property_id, t.net_amount,
+                  COALESCE((
+                    SELECT SUM(pt.amount)
+                    FROM payment_transactions pt
+                    WHERE pt.transaction_id = t.id
+                      AND pt.status = 'SUCCESS'
+                      AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+                  ), 0) AS current_paid
+           FROM transactions t
+           WHERE t.id = $1`,
           [txId]
         );
+        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Transaksi pembelian tidak ditemukan' });
+        const row = cur.rows[0];
+        const propId = Number(row.property_id || propertyId);
+        const remaining = Math.max(0, Math.round(Number(row.net_amount || 0) - Number(row.current_paid || 0)));
+        const settleAmt = payAmount !== null && payAmount > 0 ? Math.min(remaining, payAmount) : remaining;
+        if (settleAmt > 0) {
+          await settleTransactionPayment(pool, txId, {
+            property_id: propId,
+            amount: settleAmt,
+            payment_method: paymentMethod,
+            notes: `PELUNASAN-HUTANG-${txId}`,
+            actor_name: 'Akuntansi',
+          });
+        } else {
+          await pool.query(
+            `UPDATE transactions SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
+            [txId]
+          );
+        }
         return res.json({ status: 'SUCCESS' });
       }
       return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
@@ -2199,8 +2333,10 @@ export function createReportsRouter(pool: Pool): Router {
   router.post('/accounting/receivables/:id/settle', async (req: Request, res: Response) => {
     try {
       const rawId = String(req.params.id || '');
-      const payAmount = req.body.amount !== undefined ? Number(req.body.amount) : null;
-      await ensureAccountingSchema(pool, 1);
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      const payAmount = req.body.amount !== undefined ? Math.round(Number(req.body.amount)) : null;
+      const paymentMethod = String(req.body.payment_method || 'CASH').trim().toUpperCase();
+      await ensureAccountingSchema(pool, propertyId);
       if (rawId.startsWith('MANUAL-AR-')) {
         const id = parsePositiveInt(rawId.replace('MANUAL-AR-', ''));
         if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID piutang tidak valid' });
@@ -2216,10 +2352,77 @@ export function createReportsRouter(pool: Pool): Router {
           [id, newPaid, newStatus]
         );
         return res.json({ status: 'SUCCESS' });
+      } else if (rawId.startsWith('HIMS-AR-')) {
+        const bid = rawId.replace('HIMS-AR-', '').trim();
+        if (!bid) return res.status(400).json({ status: 'ERROR', message: 'Kode BID piutang tidak valid' });
+
+        // Find all active SALE transactions for this BID / reservation
+        const txRes = await pool.query(
+          `SELECT t.id, t.property_id, t.reservation_id, t.net_amount
+           FROM transactions t
+           LEFT JOIN reservations r ON r.id = t.reservation_id
+           LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+           WHERE t.property_id = $1
+             AND t.transaction_type = 'SALE'
+             AND t.deleted_at IS NULL
+             AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+             AND (b.bid = $2 OR r.booking_number = $2 OR t.transaction_no = $2)
+           ORDER BY t.id ASC`,
+          [propertyId, bid]
+        );
+
+        if (!txRes.rowCount) {
+          return res.status(404).json({ status: 'ERROR', message: `Transaksi untuk BID ${bid} tidak ditemukan` });
+        }
+
+        let budgetLeft = payAmount !== null && payAmount > 0 ? payAmount : Number.MAX_SAFE_INTEGER;
+        let settledAny = false;
+
+        for (const tx of txRes.rows) {
+          if (budgetLeft <= 0) break;
+          try {
+            // Determine remaining collectible balance on this transaction
+            const pmtRes = await pool.query(
+              `SELECT COALESCE(SUM(pt.amount), 0) AS paid
+               FROM payment_transactions pt
+               WHERE (pt.transaction_id = $1 OR ($2::int IS NOT NULL AND pt.reservation_id = $2::int))
+                 AND pt.status = 'SUCCESS'
+                 AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')`,
+              [tx.id, tx.reservation_id || null]
+            );
+            const currentPaid = Math.round(Number(pmtRes.rows[0]?.paid || 0));
+            const netAmt = Math.round(Number(tx.net_amount || 0));
+            const rem = Math.max(0, netAmt - currentPaid);
+            if (rem <= 0) continue;
+
+            const alloc = Math.min(budgetLeft, rem);
+            if (alloc <= 0) continue;
+
+            await settleTransactionPayment(pool, tx.id, {
+              property_id: Number(tx.property_id || propertyId),
+              amount: alloc,
+              payment_method: paymentMethod,
+              notes: `PELUNASAN-PIUTANG-${bid}`,
+              actor_name: 'Akuntansi',
+            });
+            budgetLeft -= alloc;
+            settledAny = true;
+          } catch (innerErr: any) {
+            console.warn('Warning settling child tx in HIMS-AR:', innerErr?.message);
+          }
+        }
+
+        if (!settledAny) {
+          return res.status(400).json({
+            status: 'ERROR',
+            message: `Tagihan reservasi ${bid} sudah lunas atau tidak memiliki sisa tagihan yang dapat dibayar.`,
+          });
+        }
+        return res.json({ status: 'SUCCESS' });
       }
       return res.status(400).json({
         status: 'ERROR',
-        message: 'Untuk piutang reservasi kamar, silakan klik tombol Buka Folio / Lunasi di Transaksi & Folio agar tercatat ke Folio Kamar.',
+        message: 'Format ID piutang tidak dikenali.',
       });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memproses penerimaan piutang' });
