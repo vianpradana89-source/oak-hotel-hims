@@ -4,6 +4,7 @@ import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate'
 import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
+import { getTransactions } from '../transactions/transactionService';
 
 function parsePositiveInt(value: any): number | null {
   const n = Number(value);
@@ -1627,8 +1628,88 @@ export function createReportsRouter(pool: Pool): Router {
       const bankAccount = Math.max(0, Number(bsRow.bank_account || 0));
       const transferBank = Math.max(0, Number(bsRow.transfer_bank || 0));
       const qrisBalance = Math.max(0, Number(bsRow.qris_balance || 0));
+      // Compute Piutang Tamu (AR) directly from Penjualan Sheet Piutang (CHECKED_OUT + remaining > 0 + != OTA_COLLECT)
+      const [periodPiutangRes, allTimePiutangRes] = await Promise.all([
+        getTransactions(pool, {
+          property_id: propertyId,
+          transaction_type: 'SALE',
+          operational_sheet: 'PIUTANG' as any,
+          start_date: startDate,
+          end_date: endDate,
+          limit: 500,
+          offset: 0,
+          includePiutangCount: true,
+        }),
+        getTransactions(pool, {
+          property_id: propertyId,
+          transaction_type: 'SALE',
+          operational_sheet: 'PIUTANG' as any,
+          limit: 1000,
+          offset: 0,
+          includePiutangCount: true,
+        }),
+      ]);
+
+      const mapPiutangItem = (row: any) => {
+        if (row.booking_bid_group) {
+          const g = row.booking_bid_group;
+          const children = Array.isArray(g.children) ? g.children : [];
+          const roomSummary =
+            children
+              .map((c: any) => `${c.room_number || ''} ${c.room_type_name || ''}`.trim())
+              .filter(Boolean)
+              .join(', ') || `${g.room_count || 1} kamar`;
+          return {
+            bid: String(g.bid || row.booking_bid || row.transaction_no || '-'),
+            guest_name: String(g.guest_name || row.party_name || row.guest_name_snapshot || '-'),
+            room_count: Number(g.room_count || children.length || 1),
+            room_summary: roomSummary,
+            check_in: children[0]?.check_in ? String(children[0].check_in).slice(0, 10) : null,
+            check_out:
+              children.length > 0 && children[children.length - 1]?.check_out
+                ? String(children[children.length - 1].check_out).slice(0, 10)
+                : null,
+            tx_date: String(row.transaction_date || '').slice(0, 10),
+            net: Math.round(Number(g.net || 0)),
+            paid: Math.round(Number(g.paid || 0)),
+            remaining: Math.round(Number(g.remaining || 0)),
+          };
+        }
+        const net = Math.round(Number(row.effective_net_amount ?? row.net_amount ?? 0));
+        const paid = Math.round(Number(row.canonical_effective_paid ?? row.paid_amount ?? 0));
+        const remaining = Math.round(
+          Number(row.canonical_remaining_balance ?? Math.max(0, net - paid))
+        );
+        return {
+          bid: String(row.booking_bid || row.transaction_no || '-'),
+          guest_name: String(row.party_name || row.guest_name_snapshot || '-'),
+          room_count: 1,
+          room_summary: `${row.room_number_snapshot || ''} ${row.room_type_name || ''}`.trim() || '-',
+          check_in: row.check_in ? String(row.check_in).slice(0, 10) : null,
+          check_out: row.check_out ? String(row.check_out).slice(0, 10) : null,
+          tx_date: String(row.transaction_date || '').slice(0, 10),
+          net,
+          paid,
+          remaining,
+        };
+      };
+
+      const periodPiutangItems = (periodPiutangRes.transactions || []).map(mapPiutangItem);
+      const allTimePiutangItems = (allTimePiutangRes.transactions || []).map(mapPiutangItem);
+      const periodPiutangTotal = periodPiutangItems.reduce((s, it) => s + it.remaining, 0);
+      const allTimePiutangTotal = allTimePiutangItems.reduce((s, it) => s + it.remaining, 0);
+
+      const piutangSheetSummary = {
+        period_total: periodPiutangTotal,
+        period_count: periodPiutangItems.length,
+        all_time_total: allTimePiutangTotal,
+        all_time_count: allTimePiutangItems.length,
+        items: periodPiutangItems,
+        all_time_items: allTimePiutangItems,
+      };
+
       const cardEdc = Math.max(0, Number(bsRow.card_edc || 0));
-      const accountsReceivable = Math.max(0, Number(bsRow.accounts_receivable || 0));
+      const accountsReceivable = Math.max(0, periodPiutangTotal);
       const inventoryValue = Math.max(0, Number(bsRow.inventory_value || 0));
       const subtotalCurrentAssets =
         cashOnHand +
@@ -1697,6 +1778,7 @@ export function createReportsRouter(pool: Pool): Router {
           cancelled_bookings: cancelledBookingsRes.rows,
           pricing_settings: pricingSettings,
           discount_summary: discountSummary,
+          piutang_sheet_summary: piutangSheetSummary,
           accounting_statements: {
             profit_loss: profitLoss,
             cash_flow: cashFlow,

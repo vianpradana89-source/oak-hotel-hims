@@ -256,6 +256,7 @@ export interface TransactionRecord {
     payment_responsibility?: string;
     unapplied_advance_deposit?: number;
     operational_sheet: OperationalSheet;
+    canonical_operational_sheet?: OperationalSheet;
     children: Array<{
       reservation_id: number | null;
       primary_transaction_id: number | string;

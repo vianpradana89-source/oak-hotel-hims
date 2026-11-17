@@ -107,9 +107,21 @@ export const LaporanTabMetodeBayar: React.FC<LaporanTabMetodeBayarProps> = ({
                 className="bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col justify-between hover:border-emerald-300 transition-colors"
               >
                 <div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-sm font-bold text-slate-900">{m.method}</span>
-                    <span className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-slate-500">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <span className="text-sm font-bold text-slate-900">{m.method}</span>
+                      {m.method === 'OTA COLLECT' && (
+                        <div className="text-[11px] font-medium text-indigo-700 mt-0.5">
+                          Pembayaran ditanggung penuh oleh OTA
+                        </div>
+                      )}
+                      {m.method === 'BELUM BAYAR / PIUTANG' && (
+                        <div className="text-[11px] font-medium text-amber-700 mt-0.5">
+                          Transaksi belum lunas / metode bayar belum tercatat
+                        </div>
+                      )}
+                    </div>
+                    <span className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-slate-500 shrink-0">
                       <IconCreditCard className="w-4 h-4" />
                     </span>
                   </div>

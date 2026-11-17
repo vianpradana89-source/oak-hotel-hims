@@ -1211,13 +1211,11 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
   const roomModalReservations = selectedRoomModal
     ? getReservationsForRoom(selectedRoomModal)
     : [];
-  const arPeriodReservations = allRoomSales.filter(
-    (r) => !r.is_complimentary && Number(r.remaining_balance) > 0
-  );
-  const arPeriodTotal = arPeriodReservations.reduce(
-    (s, r) => s + (Number(r.remaining_balance) || 0),
-    0
-  );
+  const piutangSheet = analytics?.piutang_sheet_summary;
+  const arPeriodItems = piutangSheet?.items ?? [];
+  const arPeriodTotal = piutangSheet?.period_total ?? 0;
+  const arAllTimeTotal = piutangSheet?.all_time_total ?? arPeriodTotal;
+  const arAllTimeCount = piutangSheet?.all_time_count ?? arPeriodItems.length;
 
   return (
     <div className="space-y-5 min-w-0">
@@ -1722,7 +1720,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
               type="button"
               onClick={() => setShowArModal(true)}
               className="bg-amber-50/70 hover:bg-amber-100/70 border border-amber-200 hover:border-amber-300 rounded-lg p-2.5 text-left transition-colors cursor-pointer group"
-              title="Klik untuk melihat sumber data & rincian Piutang Tamu (AR)"
+              title="Klik untuk melihat sumber data & rincian Piutang Tamu (AR) dari Sheet Piutang"
             >
               <div className="flex items-center justify-between gap-1">
                 <div className="text-[10px] uppercase font-bold text-amber-800">Piutang Tamu (AR)</div>
@@ -1731,7 +1729,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                 </span>
               </div>
               <div className="text-sm font-extrabold text-amber-900 mt-1 tabular-nums">
-                {formatIdr(live.outstanding_guest_balance_current)}
+                {formatIdr(arPeriodTotal)}
               </div>
             </button>
             <div className="bg-rose-50/70 border border-rose-200 rounded-lg p-2.5">
@@ -1943,7 +1941,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
       )}
 
       {/* =====================================================================
-          MODAL 3: CLICK ON PIUTANG TAMU (AR) (Gambar 5 Explanation & Drilldown)
+          MODAL 3: CLICK ON PIUTANG TAMU (AR) (Sheet Piutang Penjualan)
          ===================================================================== */}
       {showArModal && (
         <div
@@ -1960,12 +1958,10 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                   Rincian Piutang Tamu (Accounts Receivable / AR)
                 </h4>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Total AR Aktif Properti:{' '}
-                  <span className="font-bold text-amber-800">
-                    {formatIdr(live?.outstanding_guest_balance_current ?? 0)}
-                  </span>{' '}
-                  • Periode Dipilih ({arPeriodReservations.length} reservasi):{' '}
-                  <span className="font-bold text-slate-800">{formatIdr(arPeriodTotal)}</span>
+                  Sheet Piutang Periode Dipilih ({arPeriodItems.length} transaksi):{' '}
+                  <span className="font-bold text-amber-800">{formatIdr(arPeriodTotal)}</span>
+                  {' '}• Semua Waktu ({arAllTimeCount} transaksi):{' '}
+                  <span className="font-bold text-slate-800">{formatIdr(arAllTimeTotal)}</span>
                 </p>
               </div>
               <button
@@ -1981,61 +1977,58 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
             <div className="px-5 py-3 bg-amber-50/70 border-b border-amber-200/80 text-xs text-amber-950 space-y-1">
               <div className="font-bold">Sumber Data Piutang Tamu (AR):</div>
               <p className="text-[11px] text-amber-900 leading-relaxed">
-                Angka <strong>Piutang Tamu (AR)</strong> dihitung dari akumulasi{' '}
-                <code className="px-1 py-0.5 rounded bg-amber-100/80 font-mono">
-                  remaining_balance = total_price - amount_paid
-                </code>{' '}
-                pada tabel <strong>reservations</strong> untuk seluruh reservasi aktif (status{' '}
-                <strong>BOOKED, CHECKED_IN, CHECKED_OUT</strong>, di luar reservasi{' '}
-                <strong>BATAL / CANCELLED</strong> dan <strong>Complimentary</strong>) yang pembayaran
-                folionya masih <strong>Belum Lunas / Belum Bayar</strong>.
+                Angka <strong>Piutang Tamu (AR)</strong> dihitung langsung dari{' '}
+                <strong>Transaksi &amp; Folio → Penjualan → Sheet Piutang</strong>, yaitu reservasi
+                yang sudah <strong>Check-out (CHECKED_OUT)</strong> dan masih memiliki sisa tagihan (
+                <code className="px-1 py-0.5 rounded bg-amber-100/80 font-mono">remaining &gt; 0</code>
+                ), di luar reservasi yang ditanggung OTA (<strong>OTA Collect</strong>). Begitu tagihan
+                dilunasi, transaksi otomatis berpindah ke <strong>Sheet Selesai</strong>.
               </p>
             </div>
 
             <div className="p-4 space-y-2.5 overflow-y-auto flex-1">
-              {arPeriodReservations.length === 0 ? (
+              {arPeriodItems.length === 0 ? (
                 <div className="py-10 text-center text-xs text-slate-400">
-                  Tidak ada reservasi dengan sisa tagihan (piutang) pada periode yang dipilih.
+                  Tidak ada transaksi pada Sheet Piutang (reservasi Check-out dengan sisa tagihan) di periode ini.
                 </div>
               ) : (
-                arPeriodReservations.map((r) => {
-                  const badge = formatReservationStatusBadge(r.reservation_status);
-                  return (
-                    <div
-                      key={r.reservation_id}
-                      className="bg-slate-50/80 border border-slate-200/70 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3"
-                    >
-                      <div className="min-w-0 space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs font-extrabold text-blue-600">
-                            {r.booking_code}
-                          </span>
-                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${badge.className}`}>
-                            {badge.label}
-                          </span>
-                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
-                            {r.payment_status}
-                          </span>
-                        </div>
-                        <div className="text-xs font-bold text-slate-900 truncate">
-                          {r.guest_name} • Kamar {r.room_number} ({r.room_type_name})
-                        </div>
-                        <div className="text-[11px] text-slate-500">
-                          Check-in: {formatMediumDateId(r.check_in)} s/d {formatMediumDateId(r.check_out)} ({r.nights} malam)
-                        </div>
+                arPeriodItems.map((it, idx) => (
+                  <div
+                    key={`${it.bid}-${idx}`}
+                    className="bg-slate-50/80 border border-slate-200/70 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0 space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-extrabold text-blue-600">
+                          {it.bid}
+                        </span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-orange-100 text-orange-800 border border-orange-300">
+                          Piutang
+                        </span>
+                        <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-slate-100 text-slate-700">
+                          {it.room_count} Kamar
+                        </span>
                       </div>
-                      <div className="text-right shrink-0 space-y-0.5">
-                        <div className="text-[11px] text-slate-500">
-                          Tagihan: <span className="font-semibold text-slate-700">{formatIdr(r.total_price)}</span> • Dibayar:{' '}
-                          <span className="font-semibold text-emerald-700">{formatIdr(r.amount_paid)}</span>
-                        </div>
-                        <div className="text-sm font-extrabold text-amber-800 tabular-nums">
-                          Sisa Piutang: {formatIdr(r.remaining_balance)}
-                        </div>
+                      <div className="text-xs font-bold text-slate-900 truncate">
+                        {it.guest_name} • {it.room_summary}
+                      </div>
+                      <div className="text-[11px] text-slate-500">
+                        {it.check_in && it.check_out
+                          ? `Stay: ${formatMediumDateId(it.check_in)} s/d ${formatMediumDateId(it.check_out)}`
+                          : `Tanggal Transaksi: ${formatMediumDateId(it.tx_date)}`}
                       </div>
                     </div>
-                  );
-                })
+                    <div className="text-right shrink-0 space-y-0.5">
+                      <div className="text-[11px] text-slate-500">
+                        Net: <span className="font-semibold text-slate-700">{formatIdr(it.net)}</span> • Dibayar:{' '}
+                        <span className="font-semibold text-emerald-700">{formatIdr(it.paid)}</span>
+                      </div>
+                      <div className="text-sm font-extrabold text-amber-800 tabular-nums">
+                        Sisa Piutang: {formatIdr(it.remaining)}
+                      </div>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           </div>

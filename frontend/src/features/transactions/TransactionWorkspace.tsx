@@ -1471,7 +1471,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <td className="py-2.5 px-3 text-right font-mono text-slate-700 whitespace-nowrap">{formatIdr(remaining)}</td>
             <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentBadge(t.payment_status)}</td>
             <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(t.payment_responsibility)}</td>
-            <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderOperationalBadge(t)}</td>
+            <td className="py-2.5 px-2 text-center whitespace-nowrap">
+              {Number(t.reservation_id) > 0 &&
+              (t.operational_sheet === 'SELESAI' || String(t.reservation_status || '').toUpperCase() === 'CHECKED_OUT') &&
+              remaining > 0 &&
+              String(t.payment_responsibility || '').toUpperCase() !== 'OTA_COLLECT' ? (
+                <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border bg-orange-50 text-orange-800 border-orange-200">
+                  Piutang
+                </span>
+              ) : (
+                renderOperationalBadge(t)
+              )}
+            </td>
             <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
               {(() => {
                 const standaloneBookingId = t.booking_id ?? t.booking_bid ?? null;
@@ -1700,12 +1711,20 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           </td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(group.payment_responsibility)}</td>
           <td className="py-2.5 px-2 text-center whitespace-nowrap">
-            {renderOperationalBadge({
-              transaction_status: t.transaction_status,
-              transaction_type: 'SALE',
-              is_lifecycle_primary: true,
-              operational_sheet: group.operational_sheet
-            })}
+            {(group.canonical_operational_sheet === 'SELESAI' || group.operational_sheet === 'SELESAI') &&
+            group.remaining > 0 &&
+            String(group.payment_responsibility || '').toUpperCase() !== 'OTA_COLLECT' ? (
+              <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border bg-orange-50 text-orange-800 border-orange-200">
+                Piutang
+              </span>
+            ) : (
+              renderOperationalBadge({
+                transaction_status: t.transaction_status,
+                transaction_type: 'SALE',
+                is_lifecycle_primary: true,
+                operational_sheet: group.operational_sheet
+              })
+            )}
           </td>
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
             {(() => {
@@ -3654,12 +3673,20 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           {renderVerificationBadge(t.verification_status)}
                         </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap">
-                          {renderOperationalBadge({
-                            transaction_status: t.transaction_status,
-                            transaction_type: 'SALE',
-                            is_lifecycle_primary: true,
-                            operational_sheet: group.operational_sheet
-                          })}
+                          {(group.canonical_operational_sheet === 'SELESAI' || group.operational_sheet === 'SELESAI') &&
+                          group.remaining > 0 &&
+                          String(group.payment_responsibility || '').toUpperCase() !== 'OTA_COLLECT' ? (
+                            <span className="inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border bg-orange-50 text-orange-800 border-orange-200">
+                              Piutang
+                            </span>
+                          ) : (
+                            renderOperationalBadge({
+                              transaction_status: t.transaction_status,
+                              transaction_type: 'SALE',
+                              is_lifecycle_primary: true,
+                              operational_sheet: group.operational_sheet
+                            })
+                          )}
                         </td>
                         <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           <button

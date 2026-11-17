@@ -4659,7 +4659,10 @@ export async function getTransactions(
   const hapusCount = Number(hapusCountRes.rows[0]?.count_hapus || 0);
   const unboundedAllTime = !params.start_date && !params.end_date && targetSheet !== 'HAPUS';
   const hasSearch = Boolean(params.search && params.search.trim());
-  const usePresentedSqlPaging = targetSheet !== 'HAPUS' && targetSheet !== 'PIUTANG';
+  const usePresentedSqlPaging =
+    targetSheet !== 'HAPUS' &&
+    targetSheet !== 'PIUTANG' &&
+    !(params.includePiutangCount && targetSheet === 'SELESAI');
 
   const buildDomainPresentedList = async (): Promise<{ listSource: any[]; groups: any[]; scopedRowCount: number }> => {
     const candidateRes = await pool.query(
@@ -4842,6 +4845,9 @@ export async function getTransactions(
       } else {
         const domainPresented = await buildDomainPresentedList();
         pagePlan.sheet_counts.piutang = domainPresented.listSource.filter(isPiutangPresentedRow).length;
+        pagePlan.sheet_counts.selesai = domainPresented.listSource.filter(
+          (row: any) => (row.operational_sheet || row.sheet) === 'SELESAI' && !isPiutangPresentedRow(row)
+        ).length;
       }
     }
 
@@ -4868,7 +4874,7 @@ export async function getTransactions(
   const piutangCount = listSource.filter(isPiutangPresentedRow).length;
   const sheet_counts: TransactionSheetCounts = {
     proses: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'PROSES').length,
-    selesai: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'SELESAI').length,
+    selesai: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'SELESAI' && !isPiutangPresentedRow(row)).length,
     batal: sheetSource.filter((row: any) => (row.operational_sheet || row.sheet) === 'BATAL').length,
     hapus: hapusCount,
     ...(params.includePiutangCount || targetSheet === 'PIUTANG' ? { piutang: piutangCount } : {}),
@@ -5015,9 +5021,11 @@ export async function getTransactions(
 
   const presented = [...(targetSheet === 'PIUTANG'
     ? listSource.filter(isPiutangPresentedRow)
-    : targetSheet === 'PROSES' || targetSheet === 'SELESAI' || targetSheet === 'BATAL'
-      ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
-      : listSource)].sort(comparePresentedListRows);
+    : targetSheet === 'SELESAI'
+      ? listSource.filter((row: any) => row.operational_sheet === 'SELESAI' && !isPiutangPresentedRow(row))
+      : targetSheet === 'PROSES' || targetSheet === 'BATAL'
+        ? listSource.filter((row: any) => row.operational_sheet === targetSheet)
+        : listSource)].sort(comparePresentedListRows);
   const transactions = presented.slice(offset, offset + limit);
 
   const saleNetOf = (row: any) => {

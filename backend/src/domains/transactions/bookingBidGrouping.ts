@@ -136,32 +136,59 @@ export interface BookingReservationLifecycleRow {
 }
 
 /**
- * KB-1..KB-4: Determines whether a presented row (BID group or standalone transaction)
- * belongs in the financial receivable lens Sheet `PIUTANG`.
- * - KB-3: Must have operational_sheet IN ('PROSES', 'SELESAI') (excludes BATAL/HAPUS)
- * - KB-4: Must be SALE or INCOME (excludes PURCHASE/EXPENSE payables)
- * - KB-1/KB-2: For BID groups, remaining > 0 OR unapplied_advance_deposit > 0.
- *   For standalone rows, canonical/reservation/transaction remaining > 0.
+ * Determines whether a presented row (BID group or standalone reservation transaction)
+ * belongs in Sheet `PIUTANG`:
+ * - Must be a SALE transaction whose reservation has already CHECKED_OUT (canonical sheet === 'SELESAI')
+ * - Must NOT be OTA_COLLECT (ditanggung OTA tidak masuk piutang)
+ * - Must still have unpaid remaining balance (remaining > 0)
+ * Once paid off (remaining <= 0), it automatically returns false and belongs to Sheet `SELESAI`.
  */
 export function isPiutangPresentedRow(row: any): boolean {
   if (!row) return false;
-  const sheet = String(row.operational_sheet || row.sheet || '').toUpperCase();
-  if (sheet !== 'PROSES' && sheet !== 'SELESAI') return false;
-
   const txType = String(row.transaction_type || '').toUpperCase();
-  if (txType !== 'SALE' && txType !== 'INCOME') return false;
+  if (txType !== 'SALE') return false;
+
+  const payResp = String(
+    row.booking_bid_group?.payment_responsibility ||
+    row.payment_responsibility ||
+    ''
+  ).toUpperCase();
+  if (payResp === 'OTA_COLLECT') return false;
 
   if (row.booking_bid_group) {
     const group = row.booking_bid_group;
+    const canonicalSheet = String(
+      group.canonical_operational_sheet || group.operational_sheet || row.operational_sheet || ''
+    ).toUpperCase();
+    if (canonicalSheet !== 'SELESAI') return false;
+
+    const children: PenjualanBidChild[] = Array.isArray(group.children) ? group.children : [];
+    if (children.length > 0) {
+      const hasCheckedOutUnpaid = children.some((c) => {
+        const cResp = String(c.payment_responsibility || group.payment_responsibility || '').toUpperCase();
+        if (cResp === 'OTA_COLLECT') return false;
+        const cSheet = String(c.canonical_operational_sheet || c.operational_sheet || '').toUpperCase();
+        const cStat = String(c.reservation_status || '').toUpperCase();
+        const isCheckedOut = cSheet === 'SELESAI' || cStat === 'CHECKED_OUT';
+        return isCheckedOut && roundIdr(c.remaining) > 0;
+      });
+      return hasCheckedOutUnpaid && roundIdr(group.remaining) > 0;
+    }
+
     const rem = roundIdr(group.remaining);
-    const unappliedDp = roundIdr(group.unapplied_advance_deposit);
     return rem > 0;
   }
+
+  // Standalone row: must be a reservation-linked sale that has CHECKED_OUT and still has remaining > 0
+  const resId = Number(row.reservation_id);
+  if (!Number.isInteger(resId) || resId <= 0) return false;
+  const sheet = String(row.canonical_operational_sheet || row.operational_sheet || row.sheet || '').toUpperCase();
+  const rStat = String(row.reservation_status || row.reservation_stay_status || '').toUpperCase();
+  if (sheet !== 'SELESAI' && rStat !== 'CHECKED_OUT') return false;
 
   const net = saleNet(row);
   const paid = reservationPaid(row);
   const rem = reservationRemaining(row, net, paid);
-  const unappliedDp = roundIdr(row.unapplied_advance_deposit);
   return rem > 0;
 }
 

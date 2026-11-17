@@ -261,6 +261,28 @@ export interface PurchaseLineRow {
   attachment_count: number;
 }
 
+export interface PiutangSheetItem {
+  bid: string;
+  guest_name: string;
+  room_count: number;
+  room_summary: string;
+  check_in: string | null;
+  check_out: string | null;
+  tx_date: string;
+  net: number;
+  paid: number;
+  remaining: number;
+}
+
+export interface PiutangSheetSummaryData {
+  period_total: number;
+  period_count: number;
+  all_time_total: number;
+  all_time_count: number;
+  items: PiutangSheetItem[];
+  all_time_items?: PiutangSheetItem[];
+}
+
 export interface AnalyticsHubData {
   property_id: number;
   start_date: string;
@@ -274,6 +296,7 @@ export interface AnalyticsHubData {
   pos_item_sales: PosItemSaleRow[];
   purchase_lines: PurchaseLineRow[];
   discount_summary?: DiscountSummaryData;
+  piutang_sheet_summary?: PiutangSheetSummaryData;
   accounting_statements?: AccountingStatementsData;
 }
 

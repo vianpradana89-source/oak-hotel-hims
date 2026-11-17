@@ -538,7 +538,7 @@ export async function calculateFinancials(
   `;
   const purchaseByDeptRes = await pool.query(purchaseByDeptQuery, [propertyId, startDate, endDate]);
 
-  // 4. Payment Method Summary (aggregate across all transaction types + folio payment_transactions, including Belum Diisi)
+  // 4. Payment Method Summary (aggregate across all transaction types + folio payment_transactions, including OTA COLLECT & BELUM BAYAR / PIUTANG)
   const paymentMethodQuery = `
     WITH tx_with_resolved_method AS (
       SELECT
@@ -546,31 +546,42 @@ export async function calculateFinancials(
         t.transaction_type,
         t.source_type,
         t.net_amount,
-        COALESCE(
-          NULLIF(BTRIM(t.payment_method), ''),
-          (
-            SELECT NULLIF(BTRIM(pt.payment_method), '')
-            FROM payment_transactions pt
-            WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
-              AND pt.status = 'SUCCESS'
-              AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
-            ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
-            LIMIT 1
-          ),
-          (
-            SELECT NULLIF(BTRIM(pt.payment_method), '')
-            FROM payment_allocations pa
-            JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
-            WHERE t.booking_id IS NOT NULL
-              AND pa.booking_id = t.booking_id
-              AND pa.status = 'ACTIVE'
-              AND pt.status = 'SUCCESS'
-            ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
-            LIMIT 1
-          ),
-          'Belum Diisi'
-        ) AS resolved_method
+        CASE
+          WHEN t.transaction_type = 'SALE'
+            AND UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER')
+            AND (
+              UPPER(COALESCE(b_pm.payment_responsibility, '')) = 'OTA_COLLECT'
+              OR UPPER(COALESCE(t.payment_method, '')) IN ('OTA_COLLECT', 'OTA COLLECT', 'OTA')
+            )
+          THEN 'OTA COLLECT'
+          ELSE COALESCE(
+            NULLIF(BTRIM(t.payment_method), ''),
+            (
+              SELECT NULLIF(BTRIM(pt.payment_method), '')
+              FROM payment_transactions pt
+              WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
+                AND pt.status = 'SUCCESS'
+                AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+              ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
+              LIMIT 1
+            ),
+            (
+              SELECT NULLIF(BTRIM(pt.payment_method), '')
+              FROM payment_allocations pa
+              JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
+              WHERE (t.booking_id IS NOT NULL OR r_pm.booking_id IS NOT NULL)
+                AND pa.booking_id = COALESCE(t.booking_id, r_pm.booking_id)
+                AND pa.status = 'ACTIVE'
+                AND pt.status = 'SUCCESS'
+              ORDER BY pt.created_at DESC NULLS LAST, pt.id DESC
+              LIMIT 1
+            ),
+            'BELUM BAYAR / PIUTANG'
+          )
+        END AS resolved_method
       FROM transactions t
+      LEFT JOIN reservations r_pm ON r_pm.id = t.reservation_id
+      LEFT JOIN bookings b_pm ON b_pm.id = COALESCE(t.booking_id, r_pm.booking_id)
       WHERE t.property_id = $1
         ${nonCancelledTxFilter}
         AND t.transaction_date >= $2::date
@@ -611,6 +622,24 @@ export async function calculateFinancials(
     grand_total: Number(row.grand_total || 0),
     grand_count: Number(row.grand_count || 0),
   }));
+
+  if (!paymentMethodSummary.some((m) => String(m.method || '').toUpperCase() === 'OTA COLLECT')) {
+    paymentMethodSummary.push({
+      method: 'OTA COLLECT',
+      booking_total: 0,
+      booking_count: 0,
+      pos_total: 0,
+      pos_count: 0,
+      income_total: 0,
+      income_count: 0,
+      purchase_total: 0,
+      purchase_count: 0,
+      expense_total: 0,
+      expense_count: 0,
+      grand_total: 0,
+      grand_count: 0,
+    });
+  }
 
   const mapTxItems = (rows: any[]) =>
     rows.map((r: any) => ({
