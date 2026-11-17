@@ -9,6 +9,17 @@ body{font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystem
 table{border-collapse:collapse; width:100%; table-layout:fixed}
 th, td{border:1px solid #e6e6e6}
 
+/* Laporan workspace tables must size to content and scroll horizontally without overlapping cells */
+.laporan-workspace table {
+  table-layout: auto;
+  width: max-content;
+  min-width: 100%;
+}
+.laporan-workspace th,
+.laporan-workspace td {
+  border: none;
+}
+
 /* Reservation card styles */
 .reservation-card{position:relative;overflow:hidden;padding:8px;border-radius:8px;box-shadow:0 1px 0 rgba(0,0,0,0.02);}
 .res-booked{background:#fdf2f8;border:1px solid #f9a8d4;color:#7f1d1d}
@@ -1678,6 +1689,17 @@ body {
 /* Simple table visuals for tape chart */
 table{border-collapse:collapse; width:100%; table-layout:fixed}
 th, td{border:1px solid #e6e6e6}
+
+/* Laporan workspace tables must size to content and scroll horizontally without overlapping cells */
+.laporan-workspace table {
+  table-layout: auto;
+  width: max-content;
+  min-width: 100%;
+}
+.laporan-workspace th,
+.laporan-workspace td {
+  border: none;
+}
 
 /* Reservation card styles */
 .reservation-card{position:relative;overflow:hidden;padding:8px;border-radius:8px;box-shadow:0 1px 0 rgba(0,0,0,0.02);}

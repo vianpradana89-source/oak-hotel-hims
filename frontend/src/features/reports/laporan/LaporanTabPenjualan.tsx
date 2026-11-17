@@ -31,6 +31,7 @@ import {
   type SortDirection,
   SubViewDibatalkan,
   SubViewLaporanPpn,
+  SubViewOvernightVsDayUse,
   SubViewPenjualanLabaRugi,
   SubViewRekapItem,
   SubViewSumberPenjualan,
@@ -48,6 +49,7 @@ import type { LaporanError } from './useLaporanWorkspace';
 export type SalesReportMode =
   | 'rincian_penjualan'
   | 'penjualan_kamar'
+  | 'overnight_vs_dayuse'
   | 'penjualan_item'
   | 'sumber_penjualan'
   | 'sumber_transaksi'
@@ -72,6 +74,11 @@ export const SALES_MODE_OPTIONS: {
   {
     value: 'penjualan_kamar',
     label: 'Laporan Penjualan Kamar',
+    icon: <IconBedDouble className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'overnight_vs_dayuse',
+    label: 'Laporan Overnight vs Day Use',
     icon: <IconBedDouble className="w-3.5 h-3.5" />,
   },
   {
@@ -170,6 +177,18 @@ function formatShortStatusBadge(source: 'POS' | 'KAMAR', rawStatus: string, isCo
   }
   if (u === 'PAID' || u === 'COMPLETED' || u === 'CLOSED' || u === 'SELESAI') return 'Selesai';
   return rawStatus || 'Selesai';
+}
+
+function formatCompactOrderNo(raw: string): string {
+  const s = String(raw || '').trim();
+  const m = /^POS-(\d{4})(\d{4})-([0-9a-fA-F]{4,8})/i.exec(s);
+  if (m) {
+    return `POS-${m[1].slice(2)}${m[2]}-${m[3].slice(0, 4).toUpperCase()}`;
+  }
+  if (s.length > 22) {
+    return `${s.slice(0, 14)}…${s.slice(-4)}`;
+  }
+  return s || '-';
 }
 
 export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
@@ -299,7 +318,10 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const totalDiscountAmount =
     discSummary?.total_discount_amount ?? roomDiscountTotal + posDiscountTotal;
 
-  // Delegate specialized sub-views (4 through 10)
+  // Delegate specialized sub-views (4 through 11)
+  if (reportMode === 'overnight_vs_dayuse') {
+    return <SubViewOvernightVsDayUse roomSales={roomSales} />;
+  }
   if (reportMode === 'sumber_penjualan') {
     return <SubViewSumberPenjualan roomSales={roomSales} />;
   }
@@ -458,7 +480,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const colVals = (colKey: string) => modeRows.map((r) => getColumnDisplayValue(r, colKey));
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-4 min-w-0">
       {/* Top Search & Optional Mode Switcher (if not rendered in parent leftSlot) */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         {!subView && (
@@ -470,7 +492,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
           />
         )}
 
-        <div className="flex-1 max-w-md relative">
+        <div className="flex-1 min-w-[220px] max-w-md relative">
           <IconSearch className="w-3.5 h-3.5 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
           <input
             type="text"
@@ -498,58 +520,58 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       </div>
 
       {/* 7 KPI Cards (Total Transaksi, Total Biaya, Total Diskon, Jumlah Bayar, Total HPP, Total Laba, Complimentary) */}
-      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
-          <div className="text-[11px] text-slate-500 font-medium">Total Transaksi</div>
-          <div className="text-lg font-extrabold text-slate-900 mt-1 tabular-nums">
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-7 gap-3">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
+          <div className="text-[11px] text-slate-500 font-medium truncate">Total Transaksi</div>
+          <div className="text-lg font-extrabold text-slate-900 mt-1 tabular-nums truncate">
             {formatNumber(totalTxCount)}
           </div>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
-          <div className="text-[11px] text-slate-500 font-medium">Total Biaya</div>
-          <div className="text-lg font-extrabold text-emerald-700 mt-1 tabular-nums">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
+          <div className="text-[11px] text-slate-500 font-medium truncate">Total Biaya</div>
+          <div className="text-lg font-extrabold text-emerald-700 mt-1 tabular-nums truncate">
             {formatIdr(totalGrossAmount)}
           </div>
         </div>
-        <div className="bg-purple-50/60 border border-purple-200 rounded-xl p-3.5 shadow-xs">
+        <div className="bg-purple-50/60 border border-purple-200 rounded-xl p-3.5 shadow-xs min-w-0">
           <div className="flex items-center gap-1 text-[11px] text-purple-800 font-semibold">
-            <IconBadgePercent className="w-3.5 h-3.5" />
-            <span>Total Diskon</span>
+            <IconBadgePercent className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Total Diskon</span>
           </div>
-          <div className="text-base font-extrabold text-purple-900 mt-1 tabular-nums">
+          <div className="text-base font-extrabold text-purple-900 mt-1 tabular-nums truncate">
             {formatIdr(totalDiscountAmount)}
           </div>
-          <div className="text-[10px] text-purple-700 mt-0.5">
+          <div className="text-[10px] text-purple-700 mt-0.5 truncate">
             Kmr: {formatIdr(roomDiscountTotal)} • POS: {formatIdr(posDiscountTotal)}
           </div>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
-          <div className="text-[11px] text-slate-500 font-medium">Jumlah Bayar</div>
-          <div className="text-lg font-extrabold text-emerald-700 mt-1 tabular-nums">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
+          <div className="text-[11px] text-slate-500 font-medium truncate">Jumlah Bayar</div>
+          <div className="text-lg font-extrabold text-emerald-700 mt-1 tabular-nums truncate">
             {formatIdr(totalPaidAmount)}
           </div>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
-          <div className="text-[11px] text-slate-500 font-medium">Total HPP</div>
-          <div className="text-lg font-extrabold text-orange-600 mt-1 tabular-nums">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
+          <div className="text-[11px] text-slate-500 font-medium truncate">Total HPP</div>
+          <div className="text-lg font-extrabold text-orange-600 mt-1 tabular-nums truncate">
             {formatIdr(totalHppAmount)}
           </div>
         </div>
-        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs">
-          <div className="text-[11px] text-slate-500 font-medium">Total Laba</div>
-          <div className="text-lg font-extrabold text-blue-700 mt-1 tabular-nums">
+        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
+          <div className="text-[11px] text-slate-500 font-medium truncate">Total Laba</div>
+          <div className="text-lg font-extrabold text-blue-700 mt-1 tabular-nums truncate">
             {formatIdr(totalProfitAmount)}
           </div>
         </div>
-        <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-3.5 shadow-xs">
+        <div className="bg-amber-50/60 border border-amber-200 rounded-xl p-3.5 shadow-xs min-w-0">
           <div className="flex items-center gap-1 text-[11px] text-amber-800 font-semibold">
-            <IconGift className="w-3.5 h-3.5" />
-            <span>Complimentary</span>
+            <IconGift className="w-3.5 h-3.5 shrink-0" />
+            <span className="truncate">Complimentary</span>
           </div>
-          <div className="text-base font-extrabold text-amber-900 mt-1 tabular-nums">
+          <div className="text-base font-extrabold text-amber-900 mt-1 tabular-nums truncate">
             {allCompTotalCount} transaksi
           </div>
-          <div className="text-[10px] text-amber-700 mt-0.5">
+          <div className="text-[10px] text-amber-700 mt-0.5 truncate">
             Kmr: {allCompRoomCount} • POS: {allCompPosCount} (Est. {formatIdr(allCompEstValue)})
           </div>
         </div>
@@ -677,7 +699,9 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                               <IconCopy className="w-3.5 h-3.5" />
                             )}
                           </button>
-                          <span>{row.bookingOrOrderNo}</span>
+                          <span title={row.bookingOrOrderNo}>
+                            {formatCompactOrderNo(row.bookingOrOrderNo)}
+                          </span>
                         </div>
                       </td>
                       <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
@@ -891,7 +915,9 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                               <IconCopy className="w-3.5 h-3.5" />
                             )}
                           </button>
-                          <span>{row.bookingOrOrderNo}</span>
+                          <span title={row.bookingOrOrderNo}>
+                            {formatCompactOrderNo(row.bookingOrOrderNo)}
+                          </span>
                         </div>
                       </td>
 
@@ -907,7 +933,9 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
 
                       {/* 4. Item (hidden in Room-only view per Gambar 15) */}
                       {!isRoomOnlyView && (
-                        <td className="py-2.5 px-3 text-slate-800">{row.itemName}</td>
+                        <td className="py-2.5 px-3 text-slate-800 whitespace-nowrap">
+                          {row.itemName}
+                        </td>
                       )}
 
                       {/* 5. Room */}

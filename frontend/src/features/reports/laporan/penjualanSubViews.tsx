@@ -1,10 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { EmptyState, formatIdr, formatNumber, LaporanDropdown } from './laporanUi';
+import { downloadExportXml } from './exportLaporan';
 import {
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
   IconEye,
+  IconFileSpreadsheet,
+  IconFileText,
   IconFilter,
   IconSearch,
   IconX,
@@ -1493,6 +1496,525 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// 11. SUB-VIEW: LAPORAN OVERNIGHT VS DAY USE (Gambar 4 Request)
+// ============================================================================
+export const SubViewOvernightVsDayUse: React.FC<{
+  roomSales: RoomSaleRow[];
+}> = ({ roomSales }) => {
+  const [stayFilter, setStayFilter] = useState<'ALL' | 'OVERNIGHT' | 'DAY_USE'>('ALL');
+  const [searchQuery, setSearchQuery] = useState('');
+
+  const isDayUseStay = (r: RoomSaleRow): boolean => {
+    const st = String(r.stay_type || '').toUpperCase();
+    if (st.includes('DAY') || st.includes('SHORT') || st.includes('TRANSIT')) return true;
+    const ci = String(r.check_in || '').slice(0, 10);
+    const co = String(r.check_out || '').slice(0, 10);
+    return Boolean(ci && co && ci === co);
+  };
+
+  const overnightRows = roomSales.filter((r) => !isDayUseStay(r));
+  const dayUseRows = roomSales.filter((r) => isDayUseStay(r));
+
+  const calcMetrics = (rows: RoomSaleRow[]) => {
+    const paidRows = rows.filter((r) => !r.is_complimentary);
+    const compRows = rows.filter((r) => Boolean(r.is_complimentary));
+    const count = rows.length;
+    const nightsOrSessions = rows.reduce((s, r) => s + Math.max(1, Number(r.nights) || 1), 0);
+    const netRev = paidRows.reduce((s, r) => s + (Number(r.total_price) || 0), 0);
+    const disc = paidRows.reduce((s, r) => s + (Number(r.discount_amount) || 0), 0);
+    const grossRev = netRev + disc;
+    const paidAmount = paidRows.reduce(
+      (s, r) => s + (Number(r.amount_paid) > 0 ? Number(r.amount_paid) : Number(r.total_price) || 0),
+      0
+    );
+    const adr = nightsOrSessions > 0 ? Math.round(netRev / nightsOrSessions) : 0;
+    return {
+      count,
+      paidCount: paidRows.length,
+      compCount: compRows.length,
+      nightsOrSessions,
+      grossRev,
+      disc,
+      netRev,
+      paidAmount,
+      adr,
+    };
+  };
+
+  const ov = calcMetrics(overnightRows);
+  const du = calcMetrics(dayUseRows);
+  const totalNetRev = ov.netRev + du.netRev;
+  const totalCount = ov.count + du.count;
+  const ovRevPct = totalNetRev > 0 ? Math.round((ov.netRev / totalNetRev) * 1000) / 10 : 0;
+  const duRevPct = totalNetRev > 0 ? Math.round((du.netRev / totalNetRev) * 1000) / 10 : 0;
+  const ovCountPct = totalCount > 0 ? Math.round((ov.count / totalCount) * 1000) / 10 : 0;
+  const duCountPct = totalCount > 0 ? Math.round((du.count / totalCount) * 1000) / 10 : 0;
+
+  // Per room-type comparison
+  const roomTypeMap = new Map<
+    string,
+    {
+      roomTypeName: string;
+      ovCount: number;
+      ovNights: number;
+      ovRev: number;
+      duCount: number;
+      duSessions: number;
+      duRev: number;
+    }
+  >();
+  for (const r of roomSales) {
+    const rtName = r.room_type_name || 'Lainnya';
+    const cur = roomTypeMap.get(rtName) || {
+      roomTypeName: rtName,
+      ovCount: 0,
+      ovNights: 0,
+      ovRev: 0,
+      duCount: 0,
+      duSessions: 0,
+      duRev: 0,
+    };
+    const rev = r.is_complimentary ? 0 : Number(r.total_price) || 0;
+    const dur = Math.max(1, Number(r.nights) || 1);
+    if (isDayUseStay(r)) {
+      cur.duCount += 1;
+      cur.duSessions += dur;
+      cur.duRev += rev;
+    } else {
+      cur.ovCount += 1;
+      cur.ovNights += dur;
+      cur.ovRev += rev;
+    }
+    roomTypeMap.set(rtName, cur);
+  }
+  const roomTypeBreakdown = Array.from(roomTypeMap.values()).sort(
+    (a, b) => b.ovRev + b.duRev - (a.ovRev + a.duRev)
+  );
+
+  const q = searchQuery.trim().toLowerCase();
+  const filteredDetailRows = roomSales.filter((r) => {
+    const dayUse = isDayUseStay(r);
+    if (stayFilter === 'OVERNIGHT' && dayUse) return false;
+    if (stayFilter === 'DAY_USE' && !dayUse) return false;
+    if (q) {
+      const hit =
+        String(r.booking_code || '').toLowerCase().includes(q) ||
+        String(r.guest_name || '').toLowerCase().includes(q) ||
+        String(r.room_number || '').toLowerCase().includes(q) ||
+        String(r.room_type_name || '').toLowerCase().includes(q);
+      if (!hit) return false;
+    }
+    return true;
+  });
+
+  const handleExportExcel = () => {
+    downloadExportXml('Laporan_Overnight_vs_DayUse.xls', [
+      {
+        name: 'Ringkasan Overnight vs DayUse',
+        rows: [
+          [
+            'Kategori Menginap',
+            'Jumlah Reservasi',
+            'Malam / Sesi',
+            'Gross Revenue (Rp)',
+            'Diskon (Rp)',
+            'Net Revenue (Rp)',
+            'Rata-rata Tarif / ADR (Rp)',
+            'Porsi Pendapatan (%)',
+          ],
+          [
+            'Overnight (Menginap)',
+            ov.count,
+            ov.nightsOrSessions,
+            ov.grossRev,
+            ov.disc,
+            ov.netRev,
+            ov.adr,
+            ovRevPct,
+          ],
+          [
+            'Day Use / Short Time',
+            du.count,
+            du.nightsOrSessions,
+            du.grossRev,
+            du.disc,
+            du.netRev,
+            du.adr,
+            duRevPct,
+          ],
+          [
+            'TOTAL',
+            totalCount,
+            ov.nightsOrSessions + du.nightsOrSessions,
+            ov.grossRev + du.grossRev,
+            ov.disc + du.disc,
+            totalNetRev,
+            '',
+            100,
+          ],
+        ],
+      },
+      {
+        name: 'Rincian Reservasi',
+        rows: [
+          [
+            'No. Booking',
+            'Tipe Menginap',
+            'Tamu',
+            'Kamar',
+            'Tipe Kamar',
+            'Check-In',
+            'Check-Out',
+            'Durasi',
+            'Diskon (Rp)',
+            'Total Tagihan (Rp)',
+            'Dibayar (Rp)',
+            'Metode Bayar',
+            'Status',
+          ],
+          ...filteredDetailRows.map((r) => {
+            const dayUse = isDayUseStay(r);
+            return [
+              r.booking_code,
+              dayUse ? 'Day Use' : 'Overnight',
+              r.guest_name,
+              r.room_number,
+              r.room_type_name,
+              r.check_in,
+              r.check_out,
+              dayUse ? '1 sesi (Day Use)' : `${r.nights} malam`,
+              Number(r.discount_amount) || 0,
+              r.is_complimentary ? 0 : Number(r.total_price) || 0,
+              r.is_complimentary ? 0 : Number(r.amount_paid) || 0,
+              r.payment_method || '-',
+              r.reservation_status,
+            ];
+          }),
+        ],
+      },
+    ]);
+  };
+
+  return (
+    <div className="space-y-4 min-w-0">
+      {/* Header Card & Export Buttons */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h4 className="text-sm font-bold text-slate-900">
+              Laporan Penjualan Kamar: Overnight vs Day Use
+            </h4>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Perbandingan reservasi menginap (Overnight) dan penggunaan harian (Day Use / Short Time) — tidak termasuk reservasi batal
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50/60 hover:bg-rose-100/70 text-rose-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <IconFileText className="w-3.5 h-3.5" />
+              <span>PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              className="px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50/60 hover:bg-emerald-100/70 text-emerald-800 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+            >
+              <IconFileSpreadsheet className="w-3.5 h-3.5" />
+              <span>EXCEL</span>
+            </button>
+          </div>
+        </div>
+
+        {/* 3 Comparison Summary Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+          {/* Card 1: Overnight */}
+          <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-extrabold uppercase tracking-wider text-emerald-900">
+                Overnight (Menginap)
+              </span>
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800">
+                {ovRevPct}% Revenue
+              </span>
+            </div>
+            <div className="text-xl font-extrabold text-emerald-800 tabular-nums">
+              {formatIdr(ov.netRev)}
+            </div>
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-emerald-200/70 text-[11px]">
+              <div>
+                <div className="text-slate-500">Reservasi</div>
+                <div className="font-bold text-slate-900 tabular-nums">
+                  {formatNumber(ov.count)} ({ovCountPct}%)
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Total Malam</div>
+                <div className="font-bold text-slate-900 tabular-nums">
+                  {formatNumber(ov.nightsOrSessions)} mlm
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">ADR / Malam</div>
+                <div className="font-bold text-emerald-800 tabular-nums">{formatIdr(ov.adr)}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Card 2: Day Use */}
+          <div className="bg-sky-50/70 border border-sky-200 rounded-xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-extrabold uppercase tracking-wider text-sky-900">
+                Day Use / Short Time
+              </span>
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-sky-100 text-sky-800">
+                {duRevPct}% Revenue
+              </span>
+            </div>
+            <div className="text-xl font-extrabold text-sky-800 tabular-nums">
+              {formatIdr(du.netRev)}
+            </div>
+            <div className="grid grid-cols-3 gap-2 pt-2 border-t border-sky-200/70 text-[11px]">
+              <div>
+                <div className="text-slate-500">Reservasi</div>
+                <div className="font-bold text-slate-900 tabular-nums">
+                  {formatNumber(du.count)} ({duCountPct}%)
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Total Sesi</div>
+                <div className="font-bold text-slate-900 tabular-nums">
+                  {formatNumber(du.nightsOrSessions)} sesi
+                </div>
+              </div>
+              <div>
+                <div className="text-slate-500">Rata-rata / Sesi</div>
+                <div className="font-bold text-sky-800 tabular-nums">{formatIdr(du.adr)}</div>
+              </div>
+            </div>
+          </div>
+
+          {/* Card 3: Total Combined */}
+          <div className="bg-slate-50 border border-slate-200 rounded-xl p-4 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-extrabold uppercase tracking-wider text-slate-700">
+                Total Penjualan Kamar
+              </span>
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-slate-200 text-slate-700">
+                {formatNumber(totalCount)} Reservasi
+              </span>
+            </div>
+            <div className="text-xl font-extrabold text-slate-900 tabular-nums">
+              {formatIdr(totalNetRev)}
+            </div>
+            <div className="space-y-1.5 pt-2 border-t border-slate-200 text-[11px]">
+              <div className="w-full h-2.5 rounded-full bg-slate-200 overflow-hidden flex">
+                <div
+                  className="bg-emerald-600 h-full transition-all"
+                  style={{ width: `${ovRevPct}%` }}
+                  title={`Overnight: ${ovRevPct}%`}
+                />
+                <div
+                  className="bg-sky-500 h-full transition-all"
+                  style={{ width: `${duRevPct}%` }}
+                  title={`Day Use: ${duRevPct}%`}
+                />
+              </div>
+              <div className="flex items-center justify-between text-[10px] text-slate-600 font-semibold">
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-emerald-600 inline-block" />
+                  Overnight {ovRevPct}%
+                </span>
+                <span className="flex items-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-sky-500 inline-block" />
+                  Day Use {duRevPct}%
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Rekap Per Tipe Kamar Table */}
+        {roomTypeBreakdown.length > 0 && (
+          <div className="pt-2">
+            <div className="text-xs font-bold text-slate-800 mb-2">
+              Rekapitulasi Overnight vs Day Use per Tipe Kamar
+            </div>
+            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+              <table className="min-w-full text-xs divide-y divide-slate-200">
+                <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+                  <tr>
+                    <th className="py-2.5 px-3.5 text-left">Tipe Kamar</th>
+                    <th className="py-2.5 px-3.5 text-right">Resv Overnight</th>
+                    <th className="py-2.5 px-3.5 text-right">Malam Overnight</th>
+                    <th className="py-2.5 px-3.5 text-right">Pendapatan Overnight</th>
+                    <th className="py-2.5 px-3.5 text-right">Resv Day Use</th>
+                    <th className="py-2.5 px-3.5 text-right">Sesi Day Use</th>
+                    <th className="py-2.5 px-3.5 text-right">Pendapatan Day Use</th>
+                    <th className="py-2.5 px-3.5 text-right">Total Pendapatan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {roomTypeBreakdown.map((rt) => (
+                    <tr key={rt.roomTypeName} className="hover:bg-slate-50/80">
+                      <td className="py-2 px-3.5 font-bold text-slate-900 whitespace-nowrap">
+                        {rt.roomTypeName}
+                      </td>
+                      <td className="py-2 px-3.5 text-right tabular-nums text-slate-700">
+                        {formatNumber(rt.ovCount)}
+                      </td>
+                      <td className="py-2 px-3.5 text-right tabular-nums text-slate-700">
+                        {formatNumber(rt.ovNights)} mlm
+                      </td>
+                      <td className="py-2 px-3.5 text-right font-semibold tabular-nums text-emerald-700 whitespace-nowrap">
+                        {formatIdr(rt.ovRev)}
+                      </td>
+                      <td className="py-2 px-3.5 text-right tabular-nums text-slate-700">
+                        {formatNumber(rt.duCount)}
+                      </td>
+                      <td className="py-2 px-3.5 text-right tabular-nums text-slate-700">
+                        {formatNumber(rt.duSessions)} sesi
+                      </td>
+                      <td className="py-2 px-3.5 text-right font-semibold tabular-nums text-sky-700 whitespace-nowrap">
+                        {formatIdr(rt.duRev)}
+                      </td>
+                      <td className="py-2 px-3.5 text-right font-extrabold tabular-nums text-slate-900 whitespace-nowrap">
+                        {formatIdr(rt.ovRev + rt.duRev)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Detail Table Card */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            {(
+              [
+                { key: 'ALL', label: `Semua (${roomSales.length})` },
+                { key: 'OVERNIGHT', label: `Overnight (${overnightRows.length})` },
+                { key: 'DAY_USE', label: `Day Use (${dayUseRows.length})` },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                onClick={() => setStayFilter(tab.key)}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors cursor-pointer ${
+                  stayFilter === tab.key
+                    ? 'bg-emerald-900 text-white'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200/70'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="relative w-full sm:w-72">
+            <IconSearch className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Cari booking, tamu, kamar..."
+              className="w-full border border-slate-300 bg-white rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-1 focus:ring-emerald-600"
+            />
+          </div>
+        </div>
+
+        <div className="overflow-x-auto max-h-[480px] overflow-y-auto border border-slate-200 rounded-xl">
+          <table className="min-w-full text-xs divide-y divide-slate-200">
+            <thead className="sticky top-0 z-10 bg-slate-50 text-slate-600 font-semibold text-[11px]">
+              <tr>
+                <th className="py-2.5 px-3 text-left">No. Booking</th>
+                <th className="py-2.5 px-3 text-center">Kategori</th>
+                <th className="py-2.5 px-3 text-left">Tamu</th>
+                <th className="py-2.5 px-3 text-left">Kamar</th>
+                <th className="py-2.5 px-3 text-left">Check-In</th>
+                <th className="py-2.5 px-3 text-left">Check-Out</th>
+                <th className="py-2.5 px-3 text-center">Durasi</th>
+                <th className="py-2.5 px-3 text-right">Diskon</th>
+                <th className="py-2.5 px-3 text-right">Total Tagihan</th>
+                <th className="py-2.5 px-3 text-left">Metode Bayar</th>
+                <th className="py-2.5 px-3 text-center">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {filteredDetailRows.length === 0 ? (
+                <tr>
+                  <td colSpan={11} className="py-10 text-center text-slate-400">
+                    Tidak ada data reservasi untuk filter ini.
+                  </td>
+                </tr>
+              ) : (
+                filteredDetailRows.map((r) => {
+                  const dayUse = isDayUseStay(r);
+                  return (
+                    <tr key={r.reservation_id} className="hover:bg-slate-50/80">
+                      <td className="py-2.5 px-3 font-mono text-[11px] font-semibold text-blue-700 whitespace-nowrap">
+                        {r.booking_code}
+                      </td>
+                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                        <span
+                          className={`inline-block text-[10px] px-2 py-0.5 rounded-full font-bold ${
+                            dayUse
+                              ? 'bg-sky-100 text-sky-800'
+                              : 'bg-emerald-100 text-emerald-800'
+                          }`}
+                        >
+                          {dayUse ? 'Day Use' : 'Overnight'}
+                        </span>
+                      </td>
+                      <td className="py-2.5 px-3 font-semibold text-slate-900 whitespace-nowrap">
+                        {r.guest_name}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
+                        {r.room_number} {r.room_type_name}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                        {String(r.check_in || '').slice(0, 10)}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-600 whitespace-nowrap">
+                        {String(r.check_out || '').slice(0, 10)}
+                      </td>
+                      <td className="py-2.5 px-3 text-center text-slate-700 whitespace-nowrap">
+                        {dayUse ? '1 sesi' : `${r.nights} malam`}
+                      </td>
+                      <td className="py-2.5 px-3 text-right tabular-nums text-purple-700 whitespace-nowrap">
+                        {Number(r.discount_amount) > 0 ? formatIdr(r.discount_amount) : '-'}
+                      </td>
+                      <td className="py-2.5 px-3 text-right font-bold tabular-nums text-emerald-700 whitespace-nowrap">
+                        {r.is_complimentary ? 'Complimentary' : formatIdr(r.total_price)}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
+                        {r.payment_method || '-'}
+                      </td>
+                      <td className="py-2.5 px-3 text-center whitespace-nowrap">
+                        <span className="text-[10px] px-2 py-0.5 rounded bg-slate-100 text-slate-700 font-bold">
+                          {r.reservation_status}
+                        </span>
+                      </td>
+                    </tr>
+                  );
+                })
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   );

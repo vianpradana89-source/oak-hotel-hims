@@ -126,7 +126,17 @@ export function createReportsRouter(pool: Pool): Router {
         FROM reservations r
         JOIN bookings b ON b.id = r.booking_id
         WHERE b.property_id = $1
-          AND r.status NOT IN ('CANCELLED')
+          AND UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+          AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+          AND UPPER(COALESCE(b.booking_status, '')) != 'CANCELLED'
+          AND UPPER(COALESCE(r.payment_status, '')) NOT IN ('PAID', 'LUNAS', 'COMPLIMENTARY', 'FREE', 'VOUCHER')
+          AND COALESCE(r.discount_percent, 0) < 100
+          AND NOT EXISTS (
+            SELECT 1 FROM reservation_complimentary_requests rcr
+            WHERE rcr.reservation_id = r.id
+              AND rcr.property_id = b.property_id
+              AND rcr.status = 'APPROVED'
+          )
       `, [propertyId]);
 
       const arrivalsToday = Number(lifecycle.arrivals_today || 0);
@@ -541,9 +551,10 @@ export function createReportsRouter(pool: Pool): Router {
           JOIN bookings b ON b.id = r.booking_id
           WHERE b.property_id = $1
             AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+            AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
             AND COALESCE(b.booking_status, '') != 'CANCELLED'
             AND r.check_in::date <= $3::date
-            AND r.check_out::date > $2::date
+            AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
         )
         SELECT
           ar.room_id,
@@ -605,9 +616,10 @@ export function createReportsRouter(pool: Pool): Router {
          AND rcr.status = 'APPROVED'
         WHERE b.property_id = $1
           AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+          AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
           AND COALESCE(b.booking_status, '') != 'CANCELLED'
           AND r.check_in::date <= $3::date
-          AND r.check_out::date > $2::date
+          AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
           AND ${isCompReservationSql}
         ORDER BY r.check_in DESC, r.id DESC
         `,
@@ -687,6 +699,13 @@ export function createReportsRouter(pool: Pool): Router {
            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
           WHERE po.property_id = $1
             AND COALESCE(po.status, 'OPEN') NOT IN ('CANCELLED', 'VOIDED')
+            AND (
+              po.reservation_id IS NULL
+              OR (
+                UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+              )
+            )
             AND COALESCE(t.transaction_date, ((po.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date) >= $2::date
             AND COALESCE(t.transaction_date, ((po.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date) <= $3::date
 
@@ -1047,9 +1066,10 @@ export function createReportsRouter(pool: Pool): Router {
         LEFT JOIN guests g ON g.id = rg.guest_id
         WHERE b.property_id = $1
           AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+          AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
           AND COALESCE(b.booking_status, '') != 'CANCELLED'
           AND r.check_in::date <= $3::date
-          AND r.check_out::date > $2::date
+          AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
         ORDER BY r.check_in DESC, r.id DESC
         `,
         [propertyId, startDate, endDate]
@@ -1114,6 +1134,44 @@ export function createReportsRouter(pool: Pool): Router {
       };
 
       // 7. Discount Summary (Room Discounts + POS Discounts)
+      const nonCancelledTxFilter = `
+        AND NOT EXISTS (
+          SELECT 1 FROM reservations r_chk
+          WHERE r_chk.id = t.reservation_id
+            AND (UPPER(COALESCE(r_chk.status, '')) IN ('CANCELLED', 'NO_SHOW') OR UPPER(COALESCE(r_chk.stay_status, '')) IN ('CANCELLED', 'NO_SHOW'))
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM bookings b_chk
+          WHERE b_chk.id = t.booking_id
+            AND (
+              UPPER(COALESCE(b_chk.booking_status, '')) = 'CANCELLED'
+              OR (
+                t.reservation_id IS NULL
+                AND EXISTS (SELECT 1 FROM reservations r_b WHERE r_b.booking_id = b_chk.id)
+                AND NOT EXISTS (
+                  SELECT 1 FROM reservations r_b2
+                  WHERE r_b2.booking_id = b_chk.id
+                    AND UPPER(COALESCE(r_b2.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                    AND UPPER(COALESCE(r_b2.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                )
+              )
+            )
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM pos_orders po_chk
+          LEFT JOIN reservations r_po ON r_po.id = po_chk.reservation_id
+          WHERE UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+            AND t.source_reference IS NOT NULL
+            AND po_chk.property_id = t.property_id
+            AND po_chk.order_number = t.source_reference
+            AND (
+              UPPER(COALESCE(po_chk.status, '')) IN ('CANCELLED', 'VOIDED')
+              OR UPPER(COALESCE(r_po.status, '')) = 'CANCELLED'
+              OR UPPER(COALESCE(r_po.stay_status, '')) = 'CANCELLED'
+            )
+        )
+      `;
+
       const roomDiscountFromRes = roomSalesRes.rows
         .filter((r: any) => !r.is_complimentary && Number(r.discount_amount || 0) > 0);
       const resDiscountTotal = roomDiscountFromRes.reduce(
@@ -1133,8 +1191,9 @@ export function createReportsRouter(pool: Pool): Router {
             SELECT 1 FROM reservations r
             WHERE r.booking_id = b.id
               AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+              AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
               AND r.check_in::date <= $3::date
-              AND r.check_out::date > $2::date
+              AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
               AND COALESCE(r.discount_amount, 0) = 0
           )
         `,
@@ -1176,6 +1235,7 @@ export function createReportsRouter(pool: Pool): Router {
           AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
           AND t.transaction_date >= $2::date
           AND t.transaction_date <= $3::date
+          ${nonCancelledTxFilter}
         `,
         [propertyId, startDate, endDate]
       );
@@ -1223,6 +1283,7 @@ export function createReportsRouter(pool: Pool): Router {
           AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
           AND t.transaction_date >= $2::date
           AND t.transaction_date <= $3::date
+          ${nonCancelledTxFilter}
         `,
         [propertyId, startDate, endDate]
       );
@@ -1274,6 +1335,8 @@ export function createReportsRouter(pool: Pool): Router {
           LEFT JOIN bookings b ON b.id = COALESCE(pt.booking_id, r.booking_id)
           WHERE (pt.property_id = $1 OR b.property_id = $1)
             AND pt.status = 'SUCCESS'
+            AND (r.id IS NULL OR (UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW') AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')))
+            AND (b.id IS NULL OR UPPER(COALESCE(b.booking_status, '')) != 'CANCELLED')
         ),
         tx_cash AS (
           SELECT
@@ -1289,6 +1352,7 @@ export function createReportsRouter(pool: Pool): Router {
           WHERE t.property_id = $1
             AND t.deleted_at IS NULL
             AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            ${nonCancelledTxFilter}
         )
         SELECT
           -- Opening cash before $2::date
@@ -1391,6 +1455,7 @@ export function createReportsRouter(pool: Pool): Router {
               AND t.deleted_at IS NULL
               AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
               AND t.transaction_date <= $2::date
+              ${nonCancelledTxFilter}
             GROUP BY 1
           ) m
         )
@@ -1405,8 +1470,15 @@ export function createReportsRouter(pool: Pool): Router {
             FROM reservations r
             JOIN bookings b ON b.id = r.booking_id
             WHERE b.property_id = $1
-              AND r.status NOT IN ('CANCELLED')
+              AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+              AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
               AND COALESCE(b.booking_status, '') != 'CANCELLED'
+              AND UPPER(COALESCE(r.payment_status, '')) NOT IN ('PAID', 'LUNAS', 'COMPLIMENTARY')
+              AND COALESCE(r.discount_percent, 0) < 100
+              AND NOT EXISTS (
+                SELECT 1 FROM reservation_complimentary_requests rcr
+                WHERE rcr.reservation_id = r.id AND rcr.status = 'APPROVED'
+              )
               AND r.check_in::date <= $2::date
           ), 0)::numeric(14,2) AS accounts_receivable,
           COALESCE((
@@ -1427,14 +1499,24 @@ export function createReportsRouter(pool: Pool): Router {
       );
       const bsRow = balanceSheetRes.rows[0] || {};
 
-      // Compute Profit & Loss numbers
+      // Compute Profit & Loss numbers from active (non-cancelled, non-complimentary) room sales and POS sales
       const sb = financialsData.sales_breakdown;
+      const activeRoomSalesTotal = roomSalesRes.rows
+        .filter((r: any) => !r.is_complimentary)
+        .reduce((s: number, r: any) => s + (Number(r.total_price) || 0), 0);
+      const activePosSalesTotal = posItemsRes.rows
+        .filter((p: any) => !p.is_complimentary)
+        .reduce((s: number, p: any) => s + (Number(p.line_total) || 0), 0);
       const roomRevTotal =
-        sb && sb.room_total > 0
+        activeRoomSalesTotal > 0
+          ? activeRoomSalesTotal
+          : sb && sb.room_total > 0
           ? Number(sb.room_total)
           : roomsRankingRes.rows.reduce((s: number, r: any) => s + (Number(r.room_revenue) || 0), 0);
       const posRevTotal =
-        sb && sb.pos_total > 0
+        activePosSalesTotal > 0
+          ? activePosSalesTotal
+          : sb && sb.pos_total > 0
           ? Number(sb.pos_total)
           : posItemsRes.rows.reduce((s: number, p: any) => s + (Number(p.line_total) || 0), 0);
       const otherIncTotal = Number(financialsData.other_income?.total || 0);

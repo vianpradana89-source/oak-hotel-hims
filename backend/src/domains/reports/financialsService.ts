@@ -148,7 +148,48 @@ export async function calculateFinancials(
     throw httpError(400, 'VALIDATION_ERROR', 'end_date must be >= start_date');
   }
 
-  // 0. Sales Breakdown (Room vs POS vs Total SALE)
+  const nonCancelledTxFilter = `
+      AND t.deleted_at IS NULL
+      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      AND NOT EXISTS (
+        SELECT 1 FROM reservations r_chk
+        WHERE r_chk.id = t.reservation_id
+          AND (
+            UPPER(COALESCE(r_chk.status, '')) IN ('CANCELLED', 'NO_SHOW')
+            OR UPPER(COALESCE(r_chk.stay_status, '')) IN ('CANCELLED', 'NO_SHOW')
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM bookings b_chk
+        WHERE b_chk.id = t.booking_id
+          AND (
+            UPPER(COALESCE(b_chk.booking_status, '')) = 'CANCELLED'
+            OR (
+              EXISTS (SELECT 1 FROM reservations r_b WHERE r_b.booking_id = b_chk.id)
+              AND NOT EXISTS (
+                SELECT 1 FROM reservations r_b2
+                WHERE r_b2.booking_id = b_chk.id
+                  AND UPPER(COALESCE(r_b2.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                  AND UPPER(COALESCE(r_b2.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+              )
+            )
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM pos_orders po_chk
+        LEFT JOIN reservations r_po ON r_po.id = po_chk.reservation_id
+        WHERE po_chk.property_id = t.property_id
+          AND UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+          AND po_chk.id::text = COALESCE(t.source_id, '')
+          AND (
+            UPPER(COALESCE(po_chk.status, '')) IN ('CANCELLED', 'VOIDED')
+            OR UPPER(COALESCE(r_po.status, '')) IN ('CANCELLED', 'NO_SHOW')
+            OR UPPER(COALESCE(r_po.stay_status, '')) IN ('CANCELLED', 'NO_SHOW')
+          )
+      )
+  `;
+
+  // 0. Sales Breakdown (Room vs POS vs Total SALE — strictly excluding cancelled reservations/bookings/POS orders)
   const salesBreakdownQuery = `
     SELECT
       COALESCE(SUM(t.net_amount), 0)::numeric(14,2) AS total,
@@ -162,8 +203,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type = 'SALE'
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
   `;
@@ -179,8 +219,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type = 'INCOME'
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     `,
@@ -199,8 +238,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type = 'INCOME'
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY t.category_code, COALESCE(t.category_name, t.category_code)
@@ -218,8 +256,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type = 'INCOME'
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Belum Diisi')
@@ -266,8 +303,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type = 'INCOME'
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     ORDER BY t.transaction_date DESC, t.id DESC
@@ -284,8 +320,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type IN ('SALE', 'INCOME')
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
   `;
@@ -302,8 +337,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type IN ('SALE', 'INCOME')
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY t.category_code, COALESCE(t.category_name, t.category_code)
@@ -319,8 +353,7 @@ export async function calculateFinancials(
     FROM transactions t
     WHERE t.property_id = $1
       AND t.transaction_type IN ('SALE', 'INCOME')
-      AND t.deleted_at IS NULL
-      AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      ${nonCancelledTxFilter}
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Belum Diisi')
@@ -539,8 +572,7 @@ export async function calculateFinancials(
         ) AS resolved_method
       FROM transactions t
       WHERE t.property_id = $1
-        AND t.deleted_at IS NULL
-        AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+        ${nonCancelledTxFilter}
         AND t.transaction_date >= $2::date
         AND t.transaction_date <= $3::date
     )

@@ -284,7 +284,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
   };
 
   return (
-    <div className="space-y-4">
+    <div className="laporan-workspace space-y-4 min-w-0">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>

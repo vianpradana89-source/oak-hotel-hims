@@ -115,6 +115,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
   const [hoveredBarDate, setHoveredBarDate] = useState<string | null>(null);
   const [selectedDayModal, setSelectedDayModal] = useState<DailyOccupancyBarRow | null>(null);
   const [selectedRoomModal, setSelectedRoomModal] = useState<RoomRankingRow | null>(null);
+  const [showArModal, setShowArModal] = useState(false);
 
   // Laba Rugi accordion state
   const [openPlSections, setOpenPlSections] = useState<Record<string, boolean>>({
@@ -147,24 +148,37 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
     return <EmptyState title="Belum ada data" message="Pilih periode untuk memuat laporan." />;
   }
 
-  // 1. Financial metrics
+  // 1. Financial metrics (non-cancelled active reservations & POS orders)
   const sb = financials?.sales_breakdown;
-  const roomSalesFromAnalytics = (analytics?.room_ranking || []).reduce(
-    (s, r) => s + (Number(r.room_revenue) || 0),
-    0
-  );
-  const posSalesFromAnalytics = (analytics?.pos_item_sales || []).reduce(
+  const activeRoomSalesRows = (analytics?.room_sales || []).filter((r) => !r.is_complimentary);
+  const activePosSalesRows = (analytics?.pos_item_sales || []).filter((p) => !p.is_complimentary);
+  const roomSalesFromAnalytics =
+    activeRoomSalesRows.length > 0
+      ? activeRoomSalesRows.reduce((s, r) => s + (Number(r.total_price) || 0), 0)
+      : (analytics?.room_ranking || []).reduce((s, r) => s + (Number(r.room_revenue) || 0), 0);
+  const posSalesFromAnalytics = activePosSalesRows.reduce(
     (s, p) => s + (Number(p.line_total) || 0),
     0
   );
 
-  const roomSalesTotal = sb && sb.room_total > 0 ? sb.room_total : roomSalesFromAnalytics;
-  const posSalesTotal = sb && sb.pos_total > 0 ? sb.pos_total : posSalesFromAnalytics;
-  const totalSales = sb && sb.total > 0 ? sb.total : roomSalesTotal + posSalesTotal;
-  const salesTxCount =
-    (sb?.count ?? 0) ||
-    (analytics?.room_ranking || []).reduce((s, r) => s + (Number(r.booking_count) || 0), 0) +
-      new Set((analytics?.pos_item_sales || []).map((i) => i.order_id)).size;
+  const hasAnalyticsSales = Boolean(analytics?.room_sales || analytics?.pos_item_sales);
+  const roomSalesTotal = hasAnalyticsSales
+    ? roomSalesFromAnalytics
+    : sb && sb.room_total > 0
+    ? sb.room_total
+    : roomSalesFromAnalytics;
+  const posSalesTotal = hasAnalyticsSales
+    ? posSalesFromAnalytics
+    : sb && sb.pos_total > 0
+    ? sb.pos_total
+    : posSalesFromAnalytics;
+  const totalSales = roomSalesTotal + posSalesTotal;
+  const activePosOrderCount = new Set(activePosSalesRows.map((i) => i.order_id)).size;
+  const salesTxCount = hasAnalyticsSales
+    ? activeRoomSalesRows.length + activePosOrderCount
+    : (sb?.count ?? 0) ||
+      (analytics?.room_ranking || []).reduce((s, r) => s + (Number(r.booking_count) || 0), 0) +
+        activePosOrderCount;
 
   const otherIncomeTotal = financials?.other_income?.total ?? 0;
   const otherIncomeCount = financials?.other_income?.count ?? 0;
@@ -1197,13 +1211,20 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
   const roomModalReservations = selectedRoomModal
     ? getReservationsForRoom(selectedRoomModal)
     : [];
+  const arPeriodReservations = allRoomSales.filter(
+    (r) => !r.is_complimentary && Number(r.remaining_balance) > 0
+  );
+  const arPeriodTotal = arPeriodReservations.reduce(
+    (s, r) => s + (Number(r.remaining_balance) || 0),
+    0
+  );
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 min-w-0">
       {/* ROW 1: 6 Kartu Ringkasan Keuangan, Complimentary & Diskon */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3.5">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-6 gap-3.5">
         {/* Card 1: Penjualan */}
-        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs flex flex-col justify-between min-w-0">
           <div>
             <div className="flex items-center gap-1.5 text-xs font-bold text-blue-700">
               <IconShoppingCart className="w-4 h-4 shrink-0" />
@@ -1389,48 +1410,48 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
       </div>
 
       {/* ROW 2: Grafik Okupansi Kamar (Kiri) + Okupansi Per Kamar (Kanan) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 min-w-0">
         {/* Left Panel: Grafik Okupansi Kamar */}
-        <div className="lg:col-span-6 bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-sm font-bold text-slate-900">Grafik Okupansi Kamar</h4>
-                <p className="text-xs text-slate-500 mt-0.5">
+        <div className="lg:col-span-6 min-w-0 overflow-hidden bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs flex flex-col justify-between">
+          <div className="min-w-0">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <h4 className="text-sm font-bold text-slate-900 truncate">Grafik Okupansi Kamar</h4>
+                <p className="text-xs text-slate-500 mt-0.5 truncate">
                   {activeRoomsCount} kamar aktif • Rata-rata {avgOccPct}%
                 </p>
               </div>
-              <span className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-slate-500">
+              <span className="p-2 rounded-lg bg-slate-50 border border-slate-200/80 text-slate-500 shrink-0">
                 <IconBuilding2 className="w-4 h-4" />
               </span>
             </div>
 
             {/* 3 KPI boxes: Rata-rata, Tertinggi, Terendah */}
-            <div className="grid grid-cols-3 gap-3 mt-4">
-              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 text-center">
-                <div className="text-lg font-extrabold text-blue-600 tabular-nums">{avgOccPct}%</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Rata-rata</div>
+            <div className="grid grid-cols-3 gap-2.5 sm:gap-3 mt-4">
+              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
+                <div className="text-base sm:text-lg font-extrabold text-blue-600 tabular-nums">{avgOccPct}%</div>
+                <div className="text-[11px] text-slate-500 mt-0.5 truncate">Rata-rata</div>
               </div>
-              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 text-center">
-                <div className="text-lg font-extrabold text-emerald-600 tabular-nums">{maxOccPct}%</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Tertinggi</div>
+              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
+                <div className="text-base sm:text-lg font-extrabold text-emerald-600 tabular-nums">{maxOccPct}%</div>
+                <div className="text-[11px] text-slate-500 mt-0.5 truncate">Tertinggi</div>
               </div>
-              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-3 text-center">
-                <div className="text-lg font-extrabold text-orange-600 tabular-nums">{minOccPct}%</div>
-                <div className="text-[11px] text-slate-500 mt-0.5">Terendah</div>
+              <div className="bg-slate-50 border border-slate-200/70 rounded-xl p-2.5 sm:p-3 text-center min-w-0">
+                <div className="text-base sm:text-lg font-extrabold text-orange-600 tabular-nums">{minOccPct}%</div>
+                <div className="text-[11px] text-slate-500 mt-0.5 truncate">Terendah</div>
               </div>
             </div>
 
             {/* Vertical Bar Chart with Interactive Hover Tooltip & Click Drilldown */}
-            <div className="mt-5 relative pt-4 pb-2">
+            <div className="mt-5 relative pt-4 pb-2 min-w-0">
               {dailyOcc.length === 0 ? (
                 <div className="h-44 flex items-center justify-center text-xs text-slate-400">
                   Belum ada data grafik okupansi
                 </div>
               ) : (
-                <div className="flex gap-2">
+                <div className="flex gap-1.5 min-w-0">
                   {/* Y-axis labels */}
-                  <div className="flex flex-col justify-between h-44 text-[10px] text-slate-400 pr-1 select-none">
+                  <div className="flex flex-col justify-between h-44 text-[10px] text-slate-400 pr-1 select-none shrink-0">
                     <span>100%</span>
                     <span>75%</span>
                     <span>50%</span>
@@ -1439,7 +1460,11 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                   </div>
 
                   {/* Chart Plot Area */}
-                  <div className="flex-1 relative h-44 border-b border-slate-200 flex items-end gap-1.5 pb-0.5">
+                  <div
+                    className={`flex-1 min-w-0 relative h-44 border-b border-slate-200 flex items-end pb-0.5 ${
+                      dailyOcc.length > 20 ? 'gap-0.5 sm:gap-1' : 'gap-1 sm:gap-1.5'
+                    }`}
+                  >
                     {/* Horizontal grid lines */}
                     <div className="absolute inset-x-0 top-0 border-t border-dashed border-slate-100 pointer-events-none" />
                     <div className="absolute inset-x-0 top-1/4 border-t border-dashed border-slate-100 pointer-events-none" />
@@ -1472,11 +1497,14 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                       const isHovered = hoveredBarDate === d.date;
                       // Position tooltip so it doesn't clip off left or right edge
                       const tooltipPosClass =
-                        idx < 3
+                        idx < 4
                           ? 'left-0'
-                          : idx > dailyOcc.length - 4
+                          : idx > dailyOcc.length - 5
                           ? 'right-0'
                           : 'left-1/2 -translate-x-1/2';
+
+                      const showPctLabel =
+                        dailyOcc.length <= 16 || isHovered || (pct > 0 && idx % 2 === 0);
 
                       return (
                         <div
@@ -1484,9 +1512,9 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                           onMouseEnter={() => setHoveredBarDate(d.date)}
                           onMouseLeave={() => setHoveredBarDate(null)}
                           onClick={() => setSelectedDayModal(d)}
-                          className="flex-1 min-w-[16px] h-full flex flex-col justify-end items-center relative cursor-pointer select-none"
+                          className="flex-1 min-w-0 h-full flex flex-col justify-end items-center relative cursor-pointer select-none"
                         >
-                          {/* Floating Hover Tooltip (Gambar 2) */}
+                          {/* Floating Hover Tooltip */}
                           {isHovered && (
                             <div
                               className={`absolute bottom-14 ${tooltipPosClass} z-30 w-48 bg-white border border-slate-200 rounded-xl shadow-lg p-3 pointer-events-none text-left`}
@@ -1514,11 +1542,15 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                             </div>
                           )}
 
-                          <div className="text-[9px] font-bold text-slate-600 mb-0.5 tabular-nums">
+                          <div
+                            className={`text-[8px] sm:text-[9px] font-bold text-slate-600 mb-0.5 tabular-nums leading-none ${
+                              showPctLabel ? 'opacity-100' : 'opacity-0'
+                            }`}
+                          >
                             {pct}%
                           </div>
                           <div
-                            className={`w-full max-w-[34px] rounded-t-md transition-all ${barColor} ${
+                            className={`w-full max-w-[34px] rounded-t-sm sm:rounded-t-md transition-all ${barColor} ${
                               isHovered ? 'ring-2 ring-slate-900/15 scale-y-[1.02]' : ''
                             }`}
                             style={{ height: `${Math.max(pct > 0 ? 6 : 2, pct)}%` }}
@@ -1532,17 +1564,21 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
 
               {/* X-axis dates */}
               {dailyOcc.length > 0 && (
-                <div className="flex gap-1.5 pl-8 mt-1.5">
+                <div
+                  className={`flex pl-8 mt-1.5 min-w-0 ${
+                    dailyOcc.length > 20 ? 'gap-0.5 sm:gap-1' : 'gap-1 sm:gap-1.5'
+                  }`}
+                >
                   {dailyOcc.map((d, idx) => {
                     const showLabel =
                       dailyOcc.length <= 10 ||
                       idx === 0 ||
                       idx === dailyOcc.length - 1 ||
-                      idx % Math.ceil(dailyOcc.length / 8) === 0;
+                      idx % Math.ceil(dailyOcc.length / 7) === 0;
                     return (
                       <div
                         key={d.date}
-                        className="flex-1 min-w-[16px] text-center text-[9px] text-slate-400 truncate"
+                        className="flex-1 min-w-0 text-center text-[9px] text-slate-400 whitespace-nowrap overflow-visible"
                       >
                         {showLabel ? formatShortHotelDate(d.date) : ''}
                       </div>
@@ -1554,7 +1590,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
           </div>
 
           {/* Legend */}
-          <div className="flex flex-wrap items-center justify-center gap-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
+          <div className="flex flex-wrap items-center justify-center gap-3 sm:gap-4 pt-3 border-t border-slate-100 text-[11px] text-slate-500">
             <span className="flex items-center gap-1.5">
               <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block" /> ≥80%
             </span>
@@ -1574,7 +1610,7 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
         </div>
 
         {/* Right Panel: Okupansi Per Kamar */}
-        <div className="lg:col-span-6 bg-white border border-slate-200 rounded-xl p-5 shadow-xs flex flex-col">
+        <div className="lg:col-span-6 min-w-0 overflow-hidden bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs flex flex-col">
           <div className="flex items-center justify-between">
             <div>
               <h4 className="text-sm font-bold text-slate-900">Okupansi Per Kamar</h4>
@@ -1682,12 +1718,22 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                 <span className="text-amber-700">{live.vacant_dirty}</span>
               </div>
             </div>
-            <div className="bg-amber-50/70 border border-amber-200 rounded-lg p-2.5">
-              <div className="text-[10px] uppercase font-bold text-amber-800">Piutang Tamu (AR)</div>
+            <button
+              type="button"
+              onClick={() => setShowArModal(true)}
+              className="bg-amber-50/70 hover:bg-amber-100/70 border border-amber-200 hover:border-amber-300 rounded-lg p-2.5 text-left transition-colors cursor-pointer group"
+              title="Klik untuk melihat sumber data & rincian Piutang Tamu (AR)"
+            >
+              <div className="flex items-center justify-between gap-1">
+                <div className="text-[10px] uppercase font-bold text-amber-800">Piutang Tamu (AR)</div>
+                <span className="text-[10px] font-semibold text-amber-700 group-hover:underline">
+                  Rincian →
+                </span>
+              </div>
               <div className="text-sm font-extrabold text-amber-900 mt-1 tabular-nums">
                 {formatIdr(live.outstanding_guest_balance_current)}
               </div>
-            </div>
+            </button>
             <div className="bg-rose-50/70 border border-rose-200 rounded-lg p-2.5">
               <div className="text-[10px] uppercase font-bold text-rose-800">Hutang Pembelian (AP)</div>
               <div className="text-sm font-extrabold text-rose-900 mt-1 tabular-nums">
@@ -1885,6 +1931,106 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                               Diskon {formatIdr(r.discount_amount)}
                             </span>
                           )}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          MODAL 3: CLICK ON PIUTANG TAMU (AR) (Gambar 5 Explanation & Drilldown)
+         ===================================================================== */}
+      {showArModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-[1px] flex items-center justify-center p-4"
+          onClick={() => setShowArModal(false)}
+        >
+          <div
+            className="bg-white border border-slate-200 rounded-2xl shadow-2xl w-full max-w-2xl max-h-[85vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
+              <div>
+                <h4 className="text-base font-extrabold text-slate-900">
+                  Rincian Piutang Tamu (Accounts Receivable / AR)
+                </h4>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Total AR Aktif Properti:{' '}
+                  <span className="font-bold text-amber-800">
+                    {formatIdr(live?.outstanding_guest_balance_current ?? 0)}
+                  </span>{' '}
+                  • Periode Dipilih ({arPeriodReservations.length} reservasi):{' '}
+                  <span className="font-bold text-slate-800">{formatIdr(arPeriodTotal)}</span>
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowArModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+                title="Tutup"
+              >
+                <IconX className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="px-5 py-3 bg-amber-50/70 border-b border-amber-200/80 text-xs text-amber-950 space-y-1">
+              <div className="font-bold">Sumber Data Piutang Tamu (AR):</div>
+              <p className="text-[11px] text-amber-900 leading-relaxed">
+                Angka <strong>Piutang Tamu (AR)</strong> dihitung dari akumulasi{' '}
+                <code className="px-1 py-0.5 rounded bg-amber-100/80 font-mono">
+                  remaining_balance = total_price - amount_paid
+                </code>{' '}
+                pada tabel <strong>reservations</strong> untuk seluruh reservasi aktif (status{' '}
+                <strong>BOOKED, CHECKED_IN, CHECKED_OUT</strong>, di luar reservasi{' '}
+                <strong>BATAL / CANCELLED</strong> dan <strong>Complimentary</strong>) yang pembayaran
+                folionya masih <strong>Belum Lunas / Belum Bayar</strong>.
+              </p>
+            </div>
+
+            <div className="p-4 space-y-2.5 overflow-y-auto flex-1">
+              {arPeriodReservations.length === 0 ? (
+                <div className="py-10 text-center text-xs text-slate-400">
+                  Tidak ada reservasi dengan sisa tagihan (piutang) pada periode yang dipilih.
+                </div>
+              ) : (
+                arPeriodReservations.map((r) => {
+                  const badge = formatReservationStatusBadge(r.reservation_status);
+                  return (
+                    <div
+                      key={r.reservation_id}
+                      className="bg-slate-50/80 border border-slate-200/70 rounded-xl p-3.5 flex flex-wrap items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0 space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs font-extrabold text-blue-600">
+                            {r.booking_code}
+                          </span>
+                          <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-md ${badge.className}`}>
+                            {badge.label}
+                          </span>
+                          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-amber-100 text-amber-800">
+                            {r.payment_status}
+                          </span>
+                        </div>
+                        <div className="text-xs font-bold text-slate-900 truncate">
+                          {r.guest_name} • Kamar {r.room_number} ({r.room_type_name})
+                        </div>
+                        <div className="text-[11px] text-slate-500">
+                          Check-in: {formatMediumDateId(r.check_in)} s/d {formatMediumDateId(r.check_out)} ({r.nights} malam)
+                        </div>
+                      </div>
+                      <div className="text-right shrink-0 space-y-0.5">
+                        <div className="text-[11px] text-slate-500">
+                          Tagihan: <span className="font-semibold text-slate-700">{formatIdr(r.total_price)}</span> • Dibayar:{' '}
+                          <span className="font-semibold text-emerald-700">{formatIdr(r.amount_paid)}</span>
+                        </div>
+                        <div className="text-sm font-extrabold text-amber-800 tabular-nums">
+                          Sisa Piutang: {formatIdr(r.remaining_balance)}
                         </div>
                       </div>
                     </div>
