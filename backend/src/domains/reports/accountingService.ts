@@ -356,7 +356,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
        JOIN reservations r ON r.id = t.reservation_id
        LEFT JOIN bookings b ON b.id = r.booking_id
        LEFT JOIN rooms rm ON rm.id = r.room_id
-       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+       LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot)
        WHERE t.property_id = $1
          AND t.transaction_type = 'SALE'
          AND t.deleted_at IS NULL
