@@ -1083,7 +1083,30 @@ export default function ReservationDetailDrawer({
   );
   const isGroupTerminal = isCurrentTerminal && areGroupSiblingsTerminal;
 
-  const precheckinEligibility = data.precheckin_eligibility;
+  const rawPrecheckinEligibility = data.precheckin_eligibility;
+  const precheckinEligibility = useMemo(() => {
+    if (!rawPrecheckinEligibility) return rawPrecheckinEligibility;
+    const rawMissing = Array.isArray(rawPrecheckinEligibility.missing)
+      ? rawPrecheckinEligibility.missing
+      : [];
+    const filteredMissing = rawMissing.filter(
+      (m: any) => m?.code !== 'PAYMENT_MISSING' && m?.code !== 'PAYMENT_EVIDENCE_MISSING'
+    );
+    const nonPaymentOk =
+      Boolean(rawPrecheckinEligibility.guest_name_ok) &&
+      Boolean(rawPrecheckinEligibility.guest_phone_ok) &&
+      Boolean(rawPrecheckinEligibility.identity_ok) &&
+      Boolean(rawPrecheckinEligibility.guarantee_ok) &&
+      Boolean(rawPrecheckinEligibility.room_ready_ok) &&
+      filteredMissing.length === 0;
+    return {
+      ...rawPrecheckinEligibility,
+      payment_ok: true,
+      payment_evidence_ok: true,
+      missing: filteredMissing,
+      eligible: Boolean(rawPrecheckinEligibility.eligible) || nonPaymentOk,
+    };
+  }, [rawPrecheckinEligibility]);
   const isCheckinReady = precheckinEligibility?.eligible === true;
   const missingRequirements = precheckinEligibility?.missing ?? [];
   const sourceLabel = formatReservationSourceLabel(data);
@@ -2891,6 +2914,14 @@ export default function ReservationDetailDrawer({
             {/* CHECKED_IN State Actions */}
             {isCheckedIn && (
               <>
+                <button
+                  type="button"
+                  onClick={() => setIsEditModalOpen(true)}
+                  className="px-3 py-2 bg-white hover:bg-stone-50 text-stone-700 font-semibold text-xs rounded-xl border border-stone-300 transition-colors cursor-pointer"
+                >
+                  Edit Reservasi
+                </button>
+
                 {onOpenStayChange && canShowCheckoutDateChange(data.status) && (
                   <button
                     type="button"

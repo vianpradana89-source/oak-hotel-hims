@@ -7,6 +7,8 @@ import { validateDayUseInterval } from '../../utils/dayUseInterval';
 import { DEFAULT_PROPERTY_TIMEZONE, resolvePropertyTimezone } from '../../utils/propertyTimezone';
 import { assertNoApprovedComplimentaryForMutation } from './complimentaryMutationGuard';
 import { requirePrimaryGuestIdentity } from './reservationEditIdentityGuard';
+import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
+import { projectFolioEntryToTransaction } from '../transactions/transactionService';
 
 export interface ReservationEditPayload {
   property_id?: number;
@@ -31,6 +33,16 @@ export interface ReservationEditPayload {
   guest_id?: number;
   booker_guest_id?: number;
   actor?: string;
+  allow_checked_in?: boolean;
+  is_manual_override?: boolean;
+  manual_override_price?: number;
+  manual_override_reason?: string;
+  discount_type?: string;
+  discount_value?: number;
+  discount_amount?: number;
+  discount_reason?: string;
+  booking_source?: string;
+  payment_responsibility?: string;
   /**
    * UI helper flag (RE-F01): set when the payload was produced by the edit
    * modal WITHOUT the operator explicitly choosing a rate plan in this
@@ -115,7 +127,8 @@ export async function getReservationEditAvailability(
   propertyId: number,
   checkIn: string,
   checkOut: string,
-  stayType: 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT' = 'OVERNIGHT'
+  stayType: 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT' = 'OVERNIGHT',
+  allowCheckedIn: boolean = false
 ): Promise<ReservationEditAvailability> {
   if (!Number.isInteger(reservationId) || reservationId <= 0) {
     const err: any = new Error('ID reservasi tidak valid.');
@@ -164,7 +177,9 @@ export async function getReservationEditAvailability(
     err.code = 'PROPERTY_MISMATCH';
     throw err;
   }
-  if (String(reservation.rows[0].status || '').toUpperCase() !== 'BOOKED') {
+  const resStatusUpper = String(reservation.rows[0].status || '').toUpperCase();
+  const allowedStatuses = allowCheckedIn ? ['BOOKED', 'CHECKED_IN'] : ['BOOKED'];
+  if (!allowedStatuses.includes(resStatusUpper)) {
     const err: any = new Error('Pemilihan kamar untuk edit hanya tersedia untuk reservasi BOOKED.');
     err.statusCode = 409;
     err.code = 'BOOKED_RESERVATION_REQUIRED';
@@ -837,10 +852,18 @@ export async function applyReservationEdit(
   const stayTypeChanged = payload.stay_type !== undefined && String(payload.stay_type) !== String(current.stay_type || 'OVERNIGHT');
   const checkInTimeChanged = payload.check_in_time !== undefined && String(targetCheckInTime) !== String(currentCheckInTimeVal);
   const checkOutTimeChanged = payload.check_out_time !== undefined && String(targetCheckOutTime) !== String(currentCheckOutTimeVal);
+  const otaChanged = payload.ota_source_id !== undefined && Number(targetOtaSourceId || 0) !== Number(current.ota_source_id || 0);
+  const manualOverrideChanged =
+    (payload.is_manual_override !== undefined && Boolean(payload.is_manual_override) !== Boolean(current.is_manual_override)) ||
+    (payload.manual_override_price !== undefined && Number.isFinite(Number(payload.manual_override_price)));
+  const discountChanged = payload.discount_amount !== undefined && Math.round(Number(payload.discount_amount || 0)) !== Math.round(Number(current.discount_amount || 0));
+  const effectiveIsOta = targetOtaSourceId != null;
+
   // Metadata-only: no price-affecting dimension changed. A new catalog quote
   // must not overwrite the saved selling price for these edits.
   const metadataOnlyEdit = !datesChanged && !roomTypeChanged && !ratePlanChanged
-    && !roomChanged && !stayTypeChanged && !checkInTimeChanged && !checkOutTimeChanged;
+    && !roomChanged && !stayTypeChanged && !checkInTimeChanged && !checkOutTimeChanged
+    && !otaChanged && !manualOverrideChanged && !discountChanged;
 
   const availabilityCheckOut = targetStayType === 'DAY_USE' && targetCheckIn === targetCheckOut
     ? addDays(targetCheckIn, 1)
@@ -966,9 +989,36 @@ export async function applyReservationEdit(
   let finalGrandTotal = oldTotalPrice;
   let quoteResult: any = null;
 
-  const needsQuote = !isOta && !metadataOnlyEdit && (datesChanged || roomTypeChanged || ratePlanChanged || stayTypeChanged);
+  const hasExplicitManualOverridePrice =
+    payload.manual_override_price !== undefined &&
+    Number.isFinite(Number(payload.manual_override_price)) &&
+    Number(payload.manual_override_price) >= 0 &&
+    (effectiveIsOta || payload.is_manual_override === true);
 
-  if (needsQuote) {
+  const needsQuote =
+    !effectiveIsOta &&
+    !hasExplicitManualOverridePrice &&
+    !metadataOnlyEdit &&
+    (datesChanged || roomTypeChanged || ratePlanChanged || stayTypeChanged || (payload.is_manual_override === false && Boolean(current.is_manual_override)));
+
+  if (hasExplicitManualOverridePrice) {
+    const rawOverridePrice = Math.round(Number(payload.manual_override_price));
+    if (effectiveIsOta) {
+      finalSubtotal = rawOverridePrice;
+      finalService = 0;
+      finalTax = 0;
+      finalGrandTotal = rawOverridePrice;
+    } else {
+      const stayNights = targetStayType === 'DAY_USE'
+        ? 1
+        : Math.max(1, Math.round((new Date(targetCheckOut).getTime() - new Date(targetCheckIn).getTime()) / 86400000));
+      const overrideGross = rawOverridePrice * stayNights;
+      finalSubtotal = overrideGross;
+      finalService = 0;
+      finalTax = 0;
+      finalGrandTotal = overrideGross;
+    }
+  } else if (needsQuote) {
     quoteResult = await calculatePriceQuote(client, {
       property_id: propertyId,
       room_type_id: Number(targetRoomTypeId),
@@ -986,12 +1036,20 @@ export async function applyReservationEdit(
       finalTax = quoteResult.tax_amount;
       finalGrandTotal = quoteResult.grand_total;
     }
+  } else if (discountChanged && !quoteResult && !keepCurrentPrice) {
+    // Only discount changed: use room gross subtotal + tax + service as finalGrandTotal
+    finalGrandTotal = Math.max(0, finalSubtotal + finalService + finalTax);
   }
 
-  const discountAmount = Number(current.discount_amount || 0);
+  const discountAmount = payload.discount_amount !== undefined
+    ? Math.max(0, Math.round(Number(payload.discount_amount || 0)))
+    : Number(current.discount_amount || 0);
+  const targetDiscountReason = payload.discount_reason !== undefined
+    ? (String(payload.discount_reason || '').trim() || null)
+    : (current.discount_reason ?? null);
   const amountPaid = Number(current.amount_paid || 0);
   const appliedDeposit = Number(current.applied_deposit || 0);
-  const finalTotalAfterDiscount = quoteResult && !keepCurrentPrice
+  const finalTotalAfterDiscount = (quoteResult || hasExplicitManualOverridePrice || discountChanged) && !keepCurrentPrice
     ? Math.max(0, finalGrandTotal - discountAmount)
     : oldTotalPrice;
   const effectiveSettlement = amountPaid + appliedDeposit;
@@ -1001,7 +1059,7 @@ export async function applyReservationEdit(
   const priceDifference = finalTotalAfterDiscount - oldTotalPrice;
   const quotedTotalAfterDiscount = quoteResult
     ? Math.max(0, Number(quoteResult.grand_total) - discountAmount)
-    : oldTotalPrice;
+    : (hasExplicitManualOverridePrice || discountChanged ? finalTotalAfterDiscount : oldTotalPrice);
   const quotedPriceDifference = quotedTotalAfterDiscount - oldTotalPrice;
 
   if (keepCurrentPrice && !isOta && !metadataOnlyEdit && quotedPriceDifference >= 0) {
@@ -1024,6 +1082,13 @@ export async function applyReservationEdit(
     endAt = targetCheckOutTime ? `${targetCheckOut}T${targetCheckOutTime}:00` : null;
   }
 
+  const targetIsManualOverride = payload.is_manual_override !== undefined
+    ? Boolean(payload.is_manual_override)
+    : Boolean(current.is_manual_override);
+  const targetManualOverrideReason = payload.manual_override_reason !== undefined
+    ? (String(payload.manual_override_reason || '').trim() || null)
+    : (current.manual_override_reason ?? null);
+
   // 7. Update reservation record
   const updatedRes = await client.query(
     `UPDATE reservations
@@ -1035,8 +1100,9 @@ export async function applyReservationEdit(
          subtotal_amount = $16, service_amount = $17, tax_amount = $18,
          total_price = $19, remaining_balance = $20, payment_status = $21,
          special_requests = $22, identity_number = $23, has_valid_identity = $24,
-         ktp_path = $25
-     WHERE id = $26
+         ktp_path = $25, discount_amount = $26, discount_reason = $27,
+         is_manual_override = $28, manual_override_reason = $29
+     WHERE id = $30
      RETURNING *`,
     [
       targetGuestName, targetGuestPhone, targetGuestSegment,
@@ -1047,10 +1113,27 @@ export async function applyReservationEdit(
       finalSubtotal, finalService, finalTax,
       finalTotalAfterDiscount, remainingBalance, paymentStatus,
       targetSpecialRequests, targetIdentityNumber, targetHasValidIdentity,
-      targetKtpPath,
+      targetKtpPath, discountAmount, targetDiscountReason,
+      targetIsManualOverride, targetManualOverrideReason,
       reservationId
     ]
   );
+
+  // If reservation is CHECKED_IN and physical room changed, update physical room statuses
+  if (String(current.status || '').toUpperCase() === 'CHECKED_IN' && roomChanged) {
+    if (current.room_id) {
+      const otherActiveRes = await client.query(
+        `SELECT 1 FROM reservations WHERE room_id = $1 AND id <> $2 AND status = 'CHECKED_IN' LIMIT 1`,
+        [current.room_id, reservationId]
+      );
+      if (otherActiveRes.rows.length === 0) {
+        await client.query(`UPDATE rooms SET status = 'VACANT_DIRTY' WHERE id = $1`, [current.room_id]);
+      }
+    }
+    if (targetRoomId) {
+      await client.query(`UPDATE rooms SET status = 'OCCUPIED_CLEAN' WHERE id = $1`, [targetRoomId]);
+    }
+  }
 
   // Synchronize primary staying guest phone to canonical guests table if guest phone or name was edited
   // Skip if guest_id was swapped (identity now comes from new guest)
@@ -1072,7 +1155,7 @@ export async function applyReservationEdit(
   // because it sets is_manual_override = TRUE, turning a purely metadata save
   // into a manual-override state. Deliberate price preservation (keepCurrentPrice)
   // and OTA manual-rate edits still use the refresh helper as before.
-  if ((keepCurrentPrice || (isOta && hasProtectedMutation)) && !metadataOnlyEdit) {
+  if ((keepCurrentPrice || (isOta && hasProtectedMutation && !hasExplicitManualOverridePrice)) && !metadataOnlyEdit) {
     await refreshPreservedPriceSnapshotContext(
       client,
       reservationId,
@@ -1103,30 +1186,136 @@ export async function applyReservationEdit(
       `UPDATE reservations
        SET total_price = $1,
            remaining_balance = $2,
-           payment_status = $3
-       WHERE id = $4`,
-      [finalTotalAfterDiscount, remainingBalance, paymentStatus, reservationId]
+           payment_status = $3,
+           discount_amount = $4,
+           discount_reason = $5
+       WHERE id = $6`,
+      [finalTotalAfterDiscount, remainingBalance, paymentStatus, discountAmount, targetDiscountReason, reservationId]
     );
 
+    const rcAmountToPost = payload.allow_checked_in ? finalGrandTotal : finalTotalAfterDiscount;
     await client.query(
       `UPDATE folio_entries
        SET amount = $1, base_amount = $2, tax_amount = $3, service_amount = $4
        WHERE reservation_id = $5 AND entry_type = 'ROOM_CHARGE' AND is_voided = FALSE`,
-      [finalTotalAfterDiscount, finalSubtotal, finalTax, finalService, reservationId]
+      [rcAmountToPost, finalSubtotal, finalTax, finalService, reservationId]
     );
 
     // Re-read the final row after all helper writes so the response and audit
     // reflect the authoritative end-state, not a stale pre-helper object.
     const finalRow = await client.query('SELECT * FROM reservations WHERE id = $1', [reservationId]);
     updatedRes.rows[0] = finalRow.rows[0];
+  } else if (hasExplicitManualOverridePrice || discountChanged) {
+    const rcAmountToPost = payload.allow_checked_in ? finalGrandTotal : finalTotalAfterDiscount;
+    await client.query(
+      `UPDATE folio_entries
+       SET amount = $1, base_amount = $2, unit_price = $2, tax_amount = $3, service_amount = $4
+       WHERE reservation_id = $5 AND entry_type = 'ROOM_CHARGE' AND is_voided = FALSE`,
+      [rcAmountToPost, finalSubtotal, finalTax, finalService, reservationId]
+    );
   }
 
-  // 9. Update parent booking booker info
-  if (targetBookerName || targetBookerPhone) {
+  // 8.5. When Quick Booking Edit mode (allow_checked_in) updates discount or room price,
+  // synchronize DISCOUNT folio entry, recalculate reservation financials (including non-room folio charges),
+  // and update ROOM_CHARGE transaction projection.
+  if (payload.allow_checked_in) {
+    if (payload.discount_amount !== undefined) {
+      await client.query(
+        `DELETE FROM folio_entries
+         WHERE reservation_id = $1 AND entry_type = 'DISCOUNT' AND direction = 'CREDIT' AND COALESCE(is_voided, FALSE) = FALSE`,
+        [reservationId]
+      );
+      if (discountAmount > 0) {
+        const discountDesc = targetDiscountReason
+          ? `Diskon Keseluruhan: ${targetDiscountReason}`
+          : 'Diskon Keseluruhan';
+        await client.query(
+          `INSERT INTO folio_entries (
+             reservation_id, property_id, entry_type, source_type, source_id, description, amount, direction
+           ) VALUES ($1, $2, 'DISCOUNT', 'GLOBAL_DISCOUNT', $3, $4, $5, 'CREDIT')`,
+          [reservationId, propertyId, String(bookingId), discountDesc, discountAmount]
+        );
+      }
+    }
+
+    if (!metadataOnlyEdit) {
+      await client.query(
+        `UPDATE folio_entries
+         SET amount = $1, base_amount = $2, tax_amount = $3, service_amount = $4
+         WHERE reservation_id = $5 AND entry_type = 'ROOM_CHARGE' AND COALESCE(is_voided, FALSE) = FALSE`,
+        [finalGrandTotal, finalSubtotal, finalTax, finalService, reservationId]
+      );
+      await client.query(
+        `UPDATE reservations SET subtotal_amount = $1, discount_amount = $2, discount_reason = $3 WHERE id = $4`,
+        [finalGrandTotal, discountAmount, targetDiscountReason, reservationId]
+      );
+    }
+
+    try {
+      const rcEntryRes = await client.query(
+        `SELECT id FROM folio_entries WHERE reservation_id = $1 AND entry_type = 'ROOM_CHARGE' AND COALESCE(is_voided, FALSE) = FALSE ORDER BY id ASC LIMIT 1`,
+        [reservationId]
+      );
+      if ((rcEntryRes.rowCount ?? 0) > 0) {
+        await projectFolioEntryToTransaction(client, Number(rcEntryRes.rows[0].id), {
+          propertyId,
+          discountAmount
+        });
+      }
+    } catch (_projErr) {
+      // Non-blocking projection sync
+    }
+
+    try {
+      const recalc = await recalculateReservationFinancials(client, reservationId, propertyId);
+      if (recalc?.reservation) {
+        updatedRes.rows[0] = recalc.reservation;
+      }
+    } catch (_recalcErr) {
+      // Fallback to already-updated row
+    }
+  }
+
+  // 9. Update parent booking info
+  if (
+    targetBookerName ||
+    targetBookerPhone ||
+    payload.ota_source_id !== undefined ||
+    payload.booking_source !== undefined ||
+    payload.payment_responsibility !== undefined ||
+    payload.referral !== undefined
+  ) {
+    const nextBookingSource = payload.booking_source !== undefined
+      ? payload.booking_source
+      : (payload.ota_source_id !== undefined ? (targetOtaSourceId ? 'ota' : 'walkin') : null);
+    const nextPaymentResp = payload.payment_responsibility !== undefined
+      ? payload.payment_responsibility
+      : (payload.ota_source_id !== undefined ? (targetOtaSourceId ? 'OTA_COLLECT' : 'HOTEL_COLLECT') : null);
     await client.query(
-      `UPDATE bookings SET booker_name = COALESCE($1, booker_name), booker_phone = COALESCE($2, booker_phone), updated_at = NOW()
+      `UPDATE bookings
+       SET booker_name = COALESCE($1, booker_name),
+           booker_phone = COALESCE($2, booker_phone),
+           ota_source_id = CASE WHEN $4::boolean THEN $5::int ELSE ota_source_id END,
+           booking_source = COALESCE($6, booking_source),
+           payment_responsibility = COALESCE($7, payment_responsibility),
+           referral = CASE WHEN $8::boolean THEN $9 ELSE referral END,
+           guest_name_snapshot = COALESCE($10, guest_name_snapshot),
+           guest_phone_snapshot = COALESCE($11, guest_phone_snapshot),
+           updated_at = NOW()
        WHERE id = $3`,
-      [targetBookerName, targetBookerPhone, bookingId]
+      [
+        targetBookerName || null,
+        targetBookerPhone || null,
+        bookingId,
+        payload.ota_source_id !== undefined,
+        targetOtaSourceId ?? null,
+        nextBookingSource,
+        nextPaymentResp,
+        payload.referral !== undefined,
+        targetReferral ?? null,
+        targetGuestName || null,
+        targetGuestPhone || null
+      ]
     );
   }
 
@@ -1559,15 +1748,18 @@ export async function executeReservationEditWithPayment(
     // Apply canonical edit (reuses shared logic)
     const editResult = await applyReservationEdit(client, reservationId, payload, {
       keepCurrentPrice: payload.keep_current_price === true,
-      bookedOnly: true,
+      bookedOnly: !payload.allow_checked_in,
       requireAssignedRoom: true,
       actor
     });
 
     const { old_total_price, new_total_price, price_difference } = editResult;
     const propertyId = editResult.property_id;
-    if (payload.expected_new_total !== undefined
-      && Math.round(Number(payload.expected_new_total)) !== Math.round(editResult.quoted_total_price)) {
+    if (
+      !payload.allow_checked_in &&
+      payload.expected_new_total !== undefined &&
+      Math.round(Number(payload.expected_new_total)) !== Math.round(editResult.quoted_total_price)
+    ) {
       const err: any = new Error('Quote harga telah berubah. Muat ulang quote sebelum menyimpan.');
       err.statusCode = 409;
       err.code = 'STALE_PRICE_QUOTE';

@@ -1381,7 +1381,7 @@ export async function deleteFolioEntry(
      WHERE property_id = $1
        AND entity = 'RESERVATION_FOLIO'
        AND record_id = $2
-       AND (new_value::text LIKE $3 OR old_value::text LIKE $3)`,
+       AND new_value::text LIKE $3`,
     [propertyId, String(targetReservationId), `%"id":${folioEntryId}%`]
   );
 

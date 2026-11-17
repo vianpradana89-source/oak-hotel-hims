@@ -1836,8 +1836,11 @@ function AppContent() {
     const handleReservationAction = async (reservationId: number, action: 'checkin' | 'checkout', expectedPrimaryGuestId?: number | null, suppressSuccessAlert?: boolean) => {
      try {
        const body: Record<string, any> = { property_id: propertyId };
-       if (action === 'checkin' && expectedPrimaryGuestId !== null && expectedPrimaryGuestId !== undefined) {
-         body.expected_primary_guest_id = expectedPrimaryGuestId;
+       if (action === 'checkin') {
+         body.allow_unpaid_checkin = true;
+         if (expectedPrimaryGuestId !== null && expectedPrimaryGuestId !== undefined) {
+           body.expected_primary_guest_id = expectedPrimaryGuestId;
+         }
        }
        const response = await authFetch(`/api/reservations/${reservationId}/${action === 'checkin' ? 'checkin' : 'checkout'}`, {
          method: 'POST',

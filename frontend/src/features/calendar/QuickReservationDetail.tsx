@@ -266,7 +266,32 @@ export default function QuickReservationDetail({
     };
   }, [onClose, isMoreActionsOpen]);
 
-  const data = fullData || reservation;
+  const rawData = fullData || reservation;
+  const data = useMemo(() => {
+    const rawPe = rawData?.precheckin_eligibility;
+    if (!rawPe) return rawData;
+    const rawMissing = Array.isArray(rawPe.missing) ? rawPe.missing : [];
+    const filteredMissing = rawMissing.filter(
+      (m: any) => m?.code !== 'PAYMENT_MISSING' && m?.code !== 'PAYMENT_EVIDENCE_MISSING'
+    );
+    const nonPaymentOk =
+      Boolean(rawPe.guest_name_ok) &&
+      Boolean(rawPe.guest_phone_ok) &&
+      Boolean(rawPe.identity_ok) &&
+      Boolean(rawPe.guarantee_ok) &&
+      Boolean(rawPe.room_ready_ok) &&
+      filteredMissing.length === 0;
+    return {
+      ...rawData,
+      precheckin_eligibility: {
+        ...rawPe,
+        payment_ok: true,
+        payment_evidence_ok: true,
+        missing: filteredMissing,
+        eligible: Boolean(rawPe.eligible) || nonPaymentOk,
+      },
+    };
+  }, [rawData]);
 
   const status = String(data.status || 'BOOKED').toUpperCase();
   const isBooked = status === 'BOOKED';
@@ -323,8 +348,6 @@ export default function QuickReservationDetail({
   const paymentStatus = getPaymentStatus();
 
   // PRECHECKIN-GATE-1C: Canonical pre-checkin eligibility is the single authoritative source of truth.
-  // Fail-closed: if precheckin_eligibility is missing/unavailable, do NOT treat reservation as ready.
-  // Local phone/identity heuristics CANNOT override canonical eligibility.
   const { isCheckinEligible, missingRequirements, precheckinEligibility } = evaluatePrecheckinReadiness(data);
 
   const handleCopyBid = async () => {
@@ -952,6 +975,22 @@ export default function QuickReservationDetail({
 
             {isCheckedIn && (
               <>
+                <button
+                  type="button"
+                  disabled={isPropertyMissing}
+                  onClick={() => {
+                    if (isPropertyMissing) return;
+                    setIsEditModalOpen(true);
+                  }}
+                  className={`px-3 py-2 font-semibold text-xs rounded-xl border transition-colors ${
+                    isPropertyMissing
+                      ? 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed'
+                      : 'bg-white hover:bg-stone-100 text-stone-700 border-stone-300 cursor-pointer'
+                  }`}
+                >
+                  Edit
+                </button>
+
                 {data.require_checkout_inspection && (!data.checkout_inspection || data.checkout_inspection.clearance_state === 'REQUESTED' || data.checkout_inspection.clearance_state === 'INSPECTING') ? (
                   !data.checkout_inspection ? (
                     <button

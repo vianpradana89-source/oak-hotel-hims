@@ -5011,7 +5011,8 @@ app.get('/api/reservations/:id/edit-availability', requireAuth, async (req: any,
     const checkIn = String(req.query.check_in || '');
     const checkOut = String(req.query.check_out || '');
     const stayType = String(req.query.stay_type || 'OVERNIGHT').toUpperCase() as 'OVERNIGHT' | 'DAY_USE' | 'TRANSIT';
-    const availability = await getReservationEditAvailability(pool, reservationId, propertyId, checkIn, checkOut, stayType);
+    const allowCheckedIn = req.query.allow_checked_in === '1' || req.query.allow_checked_in === 'true';
+    const availability = await getReservationEditAvailability(pool, reservationId, propertyId, checkIn, checkOut, stayType, allowCheckedIn);
     return res.json({ status: 'OK', data: availability });
   } catch (err: any) {
     return res.status(err?.statusCode || 400).json({
@@ -5168,6 +5169,17 @@ app.post('/api/reservations/:id/edit-with-payment', requireAuth, handlePaymentUp
       // RE-F01: explicitly pass the preserve-rate-plan flag so the service
       // knows the operator did not explicitly pick a different rate plan.
       preserve_rate_plan: body.preserve_rate_plan === true || body.preserve_rate_plan === 'true',
+      allow_checked_in: body.allow_checked_in === true || body.allow_checked_in === 'true',
+      ota_source_id: body.ota_source_id === undefined ? undefined : nullableId(body.ota_source_id),
+      is_manual_override: body.is_manual_override === undefined ? undefined : (body.is_manual_override === true || body.is_manual_override === 'true'),
+      manual_override_price: body.manual_override_price === undefined || String(body.manual_override_price).trim() === '' ? undefined : Number(body.manual_override_price),
+      manual_override_reason: body.manual_override_reason === undefined ? undefined : String(body.manual_override_reason),
+      discount_type: body.discount_type === undefined ? undefined : String(body.discount_type),
+      discount_value: body.discount_value === undefined || String(body.discount_value).trim() === '' ? undefined : Number(body.discount_value),
+      discount_amount: body.discount_amount === undefined || String(body.discount_amount).trim() === '' ? undefined : Number(body.discount_amount),
+      discount_reason: body.discount_reason === undefined ? undefined : String(body.discount_reason),
+      booking_source: body.booking_source === undefined ? undefined : String(body.booking_source),
+      payment_responsibility: body.payment_responsibility === undefined ? undefined : String(body.payment_responsibility),
       expected_new_total: body.expected_new_total === undefined ? undefined : Number(body.expected_new_total),
       guest_id: nullableId(body.guest_id),
       booker_guest_id: nullableId(body.booker_guest_id),
@@ -8255,12 +8267,29 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
     // PRECHECKIN-GATE-1B: Canonical financial eligibility check (backend-authoritative)
     // This runs INSIDE the transaction after reservation lock to prevent TOCTOU races.
     const precheckinResult = await evaluatePreCheckinEligibility(client, propertyId, reservationId);
-    if (!precheckinResult.eligible) {
+    const allowUnpaidCheckin = req.body?.allow_unpaid_checkin === true || req.body?.allow_unpaid_checkin === 'true';
+    const effectiveMissing = allowUnpaidCheckin
+      ? precheckinResult.missing.filter(
+          (m: any) => m.code !== 'PAYMENT_MISSING' && m.code !== 'PAYMENT_EVIDENCE_MISSING'
+        )
+      : precheckinResult.missing;
+    const effectiveEligible = allowUnpaidCheckin
+      ? Boolean(
+          precheckinResult.guest_name_ok &&
+            precheckinResult.guest_phone_ok &&
+            precheckinResult.identity_ok &&
+            precheckinResult.guarantee_ok &&
+            precheckinResult.room_ready_ok &&
+            effectiveMissing.length === 0
+        )
+      : precheckinResult.eligible;
+
+    if (!effectiveEligible) {
       await client.query('ROLLBACK');
       // Determine primary failure reason for response
-      const paymentMissing = precheckinResult.missing.some((m: any) => m.code === 'PAYMENT_MISSING');
-      const evidenceMissing = precheckinResult.missing.some((m: any) => m.code === 'PAYMENT_EVIDENCE_MISSING');
-      const guaranteeMissing = precheckinResult.missing.some((m: any) => m.code === 'GUARANTEE_MISSING');
+      const paymentMissing = effectiveMissing.some((m: any) => m.code === 'PAYMENT_MISSING');
+      const evidenceMissing = effectiveMissing.some((m: any) => m.code === 'PAYMENT_EVIDENCE_MISSING');
+      const guaranteeMissing = effectiveMissing.some((m: any) => m.code === 'GUARANTEE_MISSING');
 
       if (paymentMissing) {
         return res.status(409).json({
@@ -8284,7 +8313,7 @@ app.post('/api/reservations/:id/checkin', async (req, res) => {
         });
       }
       // Fallback for other missing requirements
-      const missingMessages = precheckinResult.missing.map((m: any) => m.label).join(', ');
+      const missingMessages = effectiveMissing.map((m: any) => m.label).join(', ');
       return res.status(409).json({
         status: 'ERROR',
         code: 'PRECHECKIN_NOT_ELIGIBLE',
