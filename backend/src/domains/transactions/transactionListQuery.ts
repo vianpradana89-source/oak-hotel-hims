@@ -344,10 +344,12 @@ export async function queryPresentedPage(
             UPPER(COALESCE(d.transaction_status, ''))
               IN ('VOIDED', 'CANCELLED', 'REVERSED')
           ) THEN 'BATAL'
-          -- Rule B: booking_sheet BATAL (cancelled reservation/lifecycle) wins
+          -- Rule B: booking_sheet BATAL (cancelled reservation/lifecycle) or all period members BATAL wins
           -- over the audit overlay — prevents REJECTED from overriding a
-          -- cancelled stay.
-          WHEN BOOL_OR(bs.booking_sheet = 'BATAL') THEN 'BATAL'
+          -- cancelled stay and matches periodIsFullyBatal in bookingBidGrouping.ts.
+          WHEN BOOL_OR(bs.booking_sheet = 'BATAL')
+            OR BOOL_AND(d.standalone_sheet = 'BATAL')
+          THEN 'BATAL'
           -- Rule C: audit overlay — reservation-linked non-POS SALE with
           -- effective REJECTED becomes PROSES.
           WHEN BOOL_OR(UPPER(d.transaction_type) = 'SALE')

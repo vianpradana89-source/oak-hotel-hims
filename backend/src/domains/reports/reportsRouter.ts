@@ -507,6 +507,28 @@ export function createReportsRouter(pool: Pool): Router {
         )
       `;
 
+      const isReservationTxVoidedSql = `
+        (
+          EXISTS (
+            SELECT 1
+            FROM transactions t_void
+            WHERE t_void.property_id = b.property_id
+              AND (t_void.reservation_id = r.id OR (t_void.reservation_id IS NULL AND t_void.booking_id = b.id))
+              AND t_void.transaction_type = 'SALE'
+              AND t_void.deleted_at IS NULL
+          )
+          AND NOT EXISTS (
+            SELECT 1
+            FROM transactions t_live
+            WHERE t_live.property_id = b.property_id
+              AND (t_live.reservation_id = r.id OR (t_live.reservation_id IS NULL AND t_live.booking_id = b.id))
+              AND t_live.transaction_type = 'SALE'
+              AND t_live.deleted_at IS NULL
+              AND UPPER(COALESCE(t_live.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+          )
+        )
+      `;
+
       // 1. Per-Room Occupancy & Revenue Ranking in [startDate, endDate] inclusive
       const roomsRankingRes = await pool.query(
         `
@@ -556,6 +578,7 @@ export function createReportsRouter(pool: Pool): Router {
             AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
             AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
             AND COALESCE(b.booking_status, '') != 'CANCELLED'
+            AND NOT ${isReservationTxVoidedSql}
             AND r.check_in::date <= $3::date
             AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
         )
@@ -682,8 +705,24 @@ export function createReportsRouter(pool: Pool): Router {
             ) AS payment_method,
             COALESCE(t.payment_status, po.status, 'PAID') AS payment_status,
             t.id AS transaction_id,
-            COALESCE(t.tax_amount, po.tax_amount, 0)::numeric(14,2) AS tax_amount,
-            COALESCE(t.service_amount, po.service_amount, 0)::numeric(14,2) AS service_amount,
+            CASE
+              WHEN (COALESCE(poi.quantity, 1) * COALESCE(poi.unit_price, 0)) = 0
+                OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(po.status, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(poi.notes, '')) LIKE '%COMP%'
+              THEN 0
+              ELSE COALESCE(t.tax_amount, po.tax_amount, 0)
+            END::numeric(14,2) AS tax_amount,
+            CASE
+              WHEN (COALESCE(poi.quantity, 1) * COALESCE(poi.unit_price, 0)) = 0
+                OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(po.status, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(poi.notes, '')) LIKE '%COMP%'
+              THEN 0
+              ELSE COALESCE(t.service_amount, po.service_amount, 0)
+            END::numeric(14,2) AS service_amount,
             CASE
               WHEN po.reservation_id IS NOT NULL THEN 'Tamu Menginap'
               ELSE 'Walk-In POS'
@@ -699,6 +738,8 @@ export function createReportsRouter(pool: Pool): Router {
             (
               (COALESCE(poi.quantity, 1) * COALESCE(poi.unit_price, 0)) = 0
               OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+              OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+              OR UPPER(COALESCE(po.status, '')) LIKE '%COMP%'
               OR UPPER(COALESCE(poi.notes, '')) LIKE '%COMP%'
             ) AS is_complimentary
           FROM pos_order_items poi
@@ -714,7 +755,26 @@ export function createReportsRouter(pool: Pool): Router {
            AND t.deleted_at IS NULL
            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
           WHERE po.property_id = $1
-            AND COALESCE(po.status, 'OPEN') NOT IN ('CANCELLED', 'VOIDED')
+            AND UPPER(COALESCE(po.status, 'OPEN')) NOT IN ('CANCELLED', 'VOIDED')
+            AND NOT (
+              EXISTS (
+                SELECT 1
+                FROM transactions t_pos_void
+                WHERE t_pos_void.property_id = po.property_id
+                  AND UPPER(COALESCE(t_pos_void.source_type, '')) IN ('POS_ORDER', 'POS')
+                  AND (t_pos_void.source_id = po.id::text OR t_pos_void.source_reference = po.order_number)
+                  AND t_pos_void.deleted_at IS NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM transactions t_pos_live
+                WHERE t_pos_live.property_id = po.property_id
+                  AND UPPER(COALESCE(t_pos_live.source_type, '')) IN ('POS_ORDER', 'POS')
+                  AND (t_pos_live.source_id = po.id::text OR t_pos_live.source_reference = po.order_number)
+                  AND t_pos_live.deleted_at IS NULL
+                  AND UPPER(COALESCE(t_pos_live.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+              )
+            )
             AND (
               po.reservation_id IS NULL
               OR (
@@ -758,8 +818,20 @@ export function createReportsRouter(pool: Pool): Router {
             ) AS payment_method,
             COALESCE(t.payment_status, 'PAID') AS payment_status,
             t.id AS transaction_id,
-            COALESCE(t.tax_amount, 0)::numeric(14,2) AS tax_amount,
-            COALESCE(t.service_amount, 0)::numeric(14,2) AS service_amount,
+            CASE
+              WHEN COALESCE(t.net_amount, 0) <= 0
+                OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+              THEN 0
+              ELSE COALESCE(t.tax_amount, 0)
+            END::numeric(14,2) AS tax_amount,
+            CASE
+              WHEN COALESCE(t.net_amount, 0) <= 0
+                OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+                OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+              THEN 0
+              ELSE COALESCE(t.service_amount, 0)
+            END::numeric(14,2) AS service_amount,
             CASE
               WHEN t.reservation_id IS NOT NULL THEN 'Tamu Menginap'
               ELSE 'Walk-In POS'
@@ -773,8 +845,9 @@ export function createReportsRouter(pool: Pool): Router {
               LIMIT 1
             ) AS attachment_id,
             (
-              COALESCE(t.net_amount, 0) = 0
+              COALESCE(t.net_amount, 0) <= 0
               OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+              OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
             ) AS is_complimentary
           FROM transactions t
           WHERE t.property_id = $1
@@ -788,6 +861,12 @@ export function createReportsRouter(pool: Pool): Router {
             AND t.booking_id IS NULL
             AND t.deleted_at IS NULL
             AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND NOT EXISTS (
+              SELECT 1 FROM transactions t_rev
+              WHERE t_rev.property_id = t.property_id
+                AND t_rev.reversal_of_transaction_id = t.id
+                AND t_rev.deleted_at IS NULL
+            )
             AND t.transaction_date >= $2::date
             AND t.transaction_date <= $3::date
             AND NOT EXISTS (
@@ -1042,25 +1121,25 @@ export function createReportsRouter(pool: Pool): Router {
                 ELSE 'Reguler'
               END
             ) AS guest_segment,
-            COALESCE(
-              NULLIF(r.tax_amount, 0),
-              (
-                SELECT NULLIF(SUM(rnr.tax_amount), 0)
-                FROM reservation_nightly_rates rnr
-                WHERE rnr.reservation_id = r.id
-              ),
-              (
-                SELECT NULLIF(SUM(t.tax_amount), 0)
-                FROM transactions t
-                WHERE t.property_id = b.property_id
-                  AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
-                  AND t.transaction_type = 'SALE'
-                  AND t.deleted_at IS NULL
-                  AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-              ),
-              CASE
-                WHEN ${isCompReservationSql} THEN 0
-                ELSE ROUND(
+            CASE
+              WHEN ${isCompReservationSql} THEN 0
+              ELSE COALESCE(
+                NULLIF(r.tax_amount, 0),
+                (
+                  SELECT NULLIF(SUM(rnr.tax_amount), 0)
+                  FROM reservation_nightly_rates rnr
+                  WHERE rnr.reservation_id = r.id
+                ),
+                (
+                  SELECT NULLIF(SUM(t.tax_amount), 0)
+                  FROM transactions t
+                  WHERE t.property_id = b.property_id
+                    AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
+                    AND t.transaction_type = 'SALE'
+                    AND t.deleted_at IS NULL
+                    AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                ),
+                ROUND(
                   COALESCE(
                     NULLIF(r.total_price, 0),
                     (
@@ -1076,50 +1155,52 @@ export function createReportsRouter(pool: Pool): Router {
                   ) * COALESCE((SELECT NULLIF(pps.tax_percent, 0) FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 11)
                   / (100.0 + COALESCE((SELECT NULLIF(pps.tax_percent, 0) FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 11)),
                   2
-                )
-              END,
-              0
-            )::numeric(14,2) AS full_tax_amount,
-            COALESCE(
-              NULLIF(r.service_amount, 0),
-              (
-                SELECT NULLIF(SUM(rnr.service_amount), 0)
-                FROM reservation_nightly_rates rnr
-                WHERE rnr.reservation_id = r.id
-              ),
-              (
-                SELECT NULLIF(SUM(t.service_amount), 0)
-                FROM transactions t
-                WHERE t.property_id = b.property_id
-                  AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
-                  AND t.transaction_type = 'SALE'
-                  AND t.deleted_at IS NULL
-                  AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-              ),
-              CASE
-                WHEN ${isCompReservationSql} THEN 0
-                WHEN COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0) > 0 THEN
-                  ROUND(
-                    COALESCE(
-                      NULLIF(r.total_price, 0),
-                      (
-                        SELECT COALESCE(SUM(t.net_amount), 0)
-                        FROM transactions t
-                        WHERE t.property_id = b.property_id
-                          AND t.reservation_id = r.id
-                          AND t.transaction_type = 'SALE'
-                          AND t.deleted_at IS NULL
-                          AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-                      ),
-                      0
-                    ) * COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0)
-                    / (100.0 + COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0)),
-                    2
-                  )
-                ELSE 0
-              END,
-              0
-            )::numeric(14,2) AS full_service_amount,
+                ),
+                0
+              )
+            END::numeric(14,2) AS full_tax_amount,
+            CASE
+              WHEN ${isCompReservationSql} THEN 0
+              ELSE COALESCE(
+                NULLIF(r.service_amount, 0),
+                (
+                  SELECT NULLIF(SUM(rnr.service_amount), 0)
+                  FROM reservation_nightly_rates rnr
+                  WHERE rnr.reservation_id = r.id
+                ),
+                (
+                  SELECT NULLIF(SUM(t.service_amount), 0)
+                  FROM transactions t
+                  WHERE t.property_id = b.property_id
+                    AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
+                    AND t.transaction_type = 'SALE'
+                    AND t.deleted_at IS NULL
+                    AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                ),
+                CASE
+                  WHEN COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0) > 0 THEN
+                    ROUND(
+                      COALESCE(
+                        NULLIF(r.total_price, 0),
+                        (
+                          SELECT COALESCE(SUM(t.net_amount), 0)
+                          FROM transactions t
+                          WHERE t.property_id = b.property_id
+                            AND t.reservation_id = r.id
+                            AND t.transaction_type = 'SALE'
+                            AND t.deleted_at IS NULL
+                            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                        ),
+                        0
+                      ) * COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0)
+                      / (100.0 + COALESCE((SELECT pps.service_charge_percent FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 0)),
+                      2
+                    )
+                  ELSE 0
+                END,
+                0
+              )
+            END::numeric(14,2) AS full_service_amount,
             (
               SELECT ta.id
               FROM transaction_attachments ta
@@ -1152,6 +1233,7 @@ export function createReportsRouter(pool: Pool): Router {
             AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
             AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
             AND COALESCE(b.booking_status, '') != 'CANCELLED'
+            AND NOT ${isReservationTxVoidedSql}
             AND r.check_in::date <= $3::date
             AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
         )
@@ -1250,7 +1332,7 @@ export function createReportsRouter(pool: Pool): Router {
         LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) AND rt.property_id = b.property_id
         LEFT JOIN ota_sources os ON os.id = COALESCE(r.ota_source_id, b.ota_source_id)
         WHERE b.property_id = $1
-          AND (r.status = 'CANCELLED' OR COALESCE(b.booking_status, '') = 'CANCELLED')
+          AND (r.status = 'CANCELLED' OR COALESCE(b.booking_status, '') = 'CANCELLED' OR ${isReservationTxVoidedSql})
           AND (
             (r.check_in::date >= $2::date AND r.check_in::date <= $3::date)
             OR (r.cancelled_at IS NOT NULL AND (r.cancelled_at AT TIME ZONE 'Asia/Jakarta')::date >= $2::date AND (r.cancelled_at AT TIME ZONE 'Asia/Jakarta')::date <= $3::date)

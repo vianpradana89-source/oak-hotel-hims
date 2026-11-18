@@ -958,7 +958,11 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const r of ctx.roomSales || []) {
     if (r.is_complimentary) continue;
+    if (String(r.reservation_status || '').toUpperCase() === 'CANCELLED') continue;
+    if (String(r.payment_method || '').toUpperCase().includes('COMP')) continue;
+    if (String(r.payment_status || '').toUpperCase().includes('COMP')) continue;
     const total = Math.round(Number(r.total_price) || 0);
+    if (total <= 0) continue;
     const taxAmt = Math.round(Number(r.tax_amount) || 0);
     const svcAmt = Math.round(Number(r.service_amount) || 0);
     const txDate = String(r.tx_date || r.check_in || '').slice(0, 10);
@@ -1009,8 +1013,11 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const p of ctx.posItemSales || []) {
     if (p.is_complimentary) continue;
+    if (String(p.payment_method || '').toUpperCase().includes('COMP')) continue;
+    if (String(p.payment_status || '').toUpperCase().includes('COMP')) continue;
     const key = String(p.order_id ?? p.transaction_id ?? p.order_item_id);
     const lineTotal = Math.round(Number(p.line_total) || 0);
+    if (lineTotal <= 0) continue;
     const taxAmt = Math.round(Number(p.tax_amount) || 0);
     const svcAmt = Math.round(Number(p.service_amount) || 0);
     const existing = posOrderMap.get(key);
@@ -1086,6 +1093,33 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
        AND t.transaction_type IN ('SALE', 'INCOME')
        AND t.deleted_at IS NULL
        AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+       AND NOT EXISTS (
+         SELECT 1 FROM transactions t_rev
+         WHERE t_rev.property_id = t.property_id
+           AND t_rev.reversal_of_transaction_id = t.id
+           AND t_rev.deleted_at IS NULL
+       )
+       AND (r.id IS NULL OR (
+         COALESCE(UPPER(r.status), '') NOT IN ('CANCELLED', 'NO_SHOW', 'VOID', 'VOIDED')
+         AND COALESCE(UPPER(r.stay_status), '') NOT IN ('CANCELLED', 'NO_SHOW')
+         AND COALESCE(r.discount_percent, 0) < 100
+         AND COALESCE(r.final_price, r.total_price, 0) > 0
+         AND UPPER(COALESCE(r.payment_method, '')) NOT LIKE '%COMP%'
+         AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+         AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+         AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+         AND NOT EXISTS (
+           SELECT 1 FROM reservation_complimentary_requests rcr
+           WHERE rcr.reservation_id = r.id
+             AND UPPER(COALESCE(rcr.status, '')) IN ('APPROVED', 'APPLIED', 'ACTIVE', 'COMPLETED')
+         )
+       ))
+       AND (b.id IS NULL OR COALESCE(UPPER(b.booking_status), '') NOT IN ('CANCELLED', 'NO_SHOW', 'VOID', 'VOIDED'))
+       AND COALESCE(t.net_amount, 0) > 0
+       AND UPPER(COALESCE(t.payment_method, '')) NOT LIKE '%COMP%'
+       AND UPPER(COALESCE(t.payment_status, '')) NOT LIKE '%COMP%'
+       AND UPPER(COALESCE(t.description, '')) NOT LIKE '%COMPLIMENT%'
+       AND UPPER(COALESCE(t.description, '')) NOT LIKE '%HOUSE USE%'
        AND COALESCE(t.service_amount, 0) > 0
        AND t.transaction_date >= $2::date
        AND t.transaction_date <= $3::date

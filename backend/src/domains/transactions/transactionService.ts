@@ -4838,15 +4838,20 @@ export async function getTransactions(
     if (params.includePiutangCount) {
       if (
         listType === 'PURCHASE' ||
-        listType === 'EXPENSE' ||
-        (pagePlan.sheet_counts.proses + pagePlan.sheet_counts.selesai === 0)
+        listType === 'EXPENSE'
       ) {
         pagePlan.sheet_counts.piutang = 0;
       } else {
         const domainPresented = await buildDomainPresentedList();
+        pagePlan.sheet_counts.proses = domainPresented.listSource.filter(
+          (row: any) => (row.operational_sheet || row.sheet) === 'PROSES'
+        ).length;
         pagePlan.sheet_counts.piutang = domainPresented.listSource.filter(isPiutangPresentedRow).length;
         pagePlan.sheet_counts.selesai = domainPresented.listSource.filter(
           (row: any) => (row.operational_sheet || row.sheet) === 'SELESAI' && !isPiutangPresentedRow(row)
+        ).length;
+        pagePlan.sheet_counts.batal = domainPresented.listSource.filter(
+          (row: any) => (row.operational_sheet || row.sheet) === 'BATAL'
         ).length;
       }
     }
