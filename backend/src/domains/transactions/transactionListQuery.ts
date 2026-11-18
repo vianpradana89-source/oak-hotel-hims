@@ -413,7 +413,20 @@ export async function queryPresentedPage(
              OR l.notes ILIKE $${searchIdx}
              OR b.bid ILIKE $${searchIdx}
              OR r.booking_number ILIKE $${searchIdx}
-             OR r.guest_name ILIKE $${searchIdx} OR ('POS-' || LPAD(COALESCE(l.source_id, ''), 6, '0')) ILIKE $${searchIdx})
+             OR r.guest_name ILIKE $${searchIdx}
+             OR ('POS-' || LPAD(COALESCE(l.source_id, ''), 6, '0')) ILIKE $${searchIdx}
+             OR EXISTS (
+               SELECT 1 FROM pos_orders po_s
+               WHERE po_s.property_id = l.property_id
+                 AND (
+                   (UPPER(COALESCE(l.source_type, '')) IN ('POS_ORDER', 'POS') AND po_s.id::text = l.source_id)
+                   OR (l.reservation_id IS NOT NULL AND po_s.reservation_id = l.reservation_id)
+                 )
+                 AND (
+                   po_s.order_number ILIKE $${searchIdx}
+                   OR ('POS-' || LPAD(po_s.id::text, 6, '0')) ILIKE $${searchIdx}
+                 )
+             ))
     ),
 
     -- =========================================================

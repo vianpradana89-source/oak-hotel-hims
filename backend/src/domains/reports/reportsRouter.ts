@@ -671,10 +671,10 @@ export function createReportsRouter(pool: Pool): Router {
           SELECT
             poi.id AS order_item_id,
             po.id AS order_id,
-            COALESCE(t.transaction_no, po.order_number, 'POS-' || LPAD(po.id::text, 6, '0')) AS booking_or_order_no,
+            COALESCE(NULLIF(BTRIM(b.bid), ''), NULLIF(BTRIM(t.transaction_no), ''), po.order_number, 'POS-' || LPAD(po.id::text, 6, '0')) AS booking_or_order_no,
             to_char(COALESCE(t.transaction_date, ((po.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date), 'YYYY-MM-DD') AS tx_date,
             to_char(COALESCE(t.created_at, (po.created_at AT TIME ZONE 'UTC')) AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD HH24:MI') AS tx_datetime,
-            COALESCE(NULLIF(BTRIM(po.guest_name), ''), NULLIF(BTRIM(t.guest_name_snapshot), ''), NULLIF(BTRIM(t.party_name), ''), 'Walk-In POS') AS customer_name,
+            COALESCE(NULLIF(BTRIM(po.guest_name), ''), NULLIF(BTRIM(t.guest_name_snapshot), ''), NULLIF(BTRIM(t.party_name), ''), NULLIF(BTRIM(r.guest_name), ''), 'Walk-In POS') AS customer_name,
             COALESCE(rm.room_number, t.room_number_snapshot, po.table_number, '-') AS room_or_table,
             COALESCE(NULLIF(BTRIM(pmi.name), ''), 'Item POS') AS item_name,
             COALESCE(NULLIF(BTRIM(pmi.item_code), ''), '') AS item_code,
@@ -703,7 +703,16 @@ export function createReportsRouter(pool: Pool): Router {
               ),
               'Cash'
             ) AS payment_method,
-            COALESCE(t.payment_status, po.status, 'PAID') AS payment_status,
+            CASE
+              WHEN po.reservation_id IS NOT NULL AND r.id IS NOT NULL THEN
+                CASE
+                  WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                    AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                  THEN 'PAID'
+                  ELSE COALESCE(NULLIF(BTRIM(r.payment_status), ''), 'UNPAID')
+                END
+              ELSE COALESCE(NULLIF(BTRIM(t.payment_status), ''), 'PAID')
+            END AS payment_status,
             t.id AS transaction_id,
             CASE
               WHEN (COALESCE(poi.quantity, 1) * COALESCE(poi.unit_price, 0)) = 0
@@ -747,39 +756,47 @@ export function createReportsRouter(pool: Pool): Router {
           LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id AND pmi.property_id = po.property_id
           LEFT JOIN pos_menu_categories pmc ON pmc.id = pmi.category_id AND pmc.property_id = po.property_id
           LEFT JOIN reservations r ON r.id = po.reservation_id
+          LEFT JOIN bookings b ON b.id = r.booking_id
           LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = po.property_id
-          LEFT JOIN transactions t
-            ON t.property_id = po.property_id
-           AND UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS')
-           AND t.source_id = po.id::text
-           AND t.deleted_at IS NULL
-           AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-          WHERE po.property_id = $1
-            AND UPPER(COALESCE(po.status, 'OPEN')) NOT IN ('CANCELLED', 'VOIDED')
-            AND NOT (
-              EXISTS (
-                SELECT 1
-                FROM transactions t_pos_void
-                WHERE t_pos_void.property_id = po.property_id
-                  AND UPPER(COALESCE(t_pos_void.source_type, '')) IN ('POS_ORDER', 'POS')
-                  AND (t_pos_void.source_id = po.id::text OR t_pos_void.source_reference = po.order_number)
-                  AND t_pos_void.deleted_at IS NULL
-              )
+          LEFT JOIN LATERAL (
+            SELECT t_cand.*
+            FROM transactions t_cand
+            WHERE t_cand.property_id = po.property_id
+              AND t_cand.deleted_at IS NULL
+              AND UPPER(COALESCE(t_cand.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
               AND NOT EXISTS (
-                SELECT 1
-                FROM transactions t_pos_live
-                WHERE t_pos_live.property_id = po.property_id
-                  AND UPPER(COALESCE(t_pos_live.source_type, '')) IN ('POS_ORDER', 'POS')
-                  AND (t_pos_live.source_id = po.id::text OR t_pos_live.source_reference = po.order_number)
-                  AND t_pos_live.deleted_at IS NULL
-                  AND UPPER(COALESCE(t_pos_live.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                SELECT 1 FROM transactions t_rev
+                WHERE t_rev.property_id = t_cand.property_id
+                  AND t_rev.reversal_of_transaction_id = t_cand.id
+                  AND t_rev.deleted_at IS NULL
               )
-            )
+              AND (
+                (UPPER(COALESCE(t_cand.source_type, '')) IN ('POS_ORDER', 'POS') AND (t_cand.source_id = po.id::text OR t_cand.source_reference = po.order_number))
+                OR (
+                  UPPER(COALESCE(t_cand.source_type, '')) = 'FOLIO_ENTRY'
+                  AND EXISTS (
+                    SELECT 1 FROM folio_entries fe
+                    WHERE fe.id::text = t_cand.source_id
+                      AND fe.property_id = po.property_id
+                      AND fe.source_type = 'POS_ORDER'
+                      AND fe.source_id = po.id::text
+                      AND COALESCE(fe.is_voided, FALSE) = FALSE
+                  )
+                )
+              )
+            ORDER BY t_cand.id DESC
+            LIMIT 1
+          ) t ON TRUE
+          WHERE po.property_id = $1
+            AND UPPER(COALESCE(po.status, 'OPEN')) IN ('PAID', 'COMPLETED', 'POSTED', 'CLOSED', 'BILLED_TO_ROOM')
+            AND t.id IS NOT NULL
             AND (
               po.reservation_id IS NULL
               OR (
                 UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
                 AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND COALESCE(b.booking_status, '') != 'CANCELLED'
+                AND NOT ${isReservationTxVoidedSql}
               )
             )
             AND COALESCE(t.transaction_date, ((po.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date) >= $2::date

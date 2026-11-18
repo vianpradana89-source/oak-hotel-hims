@@ -959,8 +959,12 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   for (const r of ctx.roomSales || []) {
     if (r.is_complimentary) continue;
     if (String(r.reservation_status || '').toUpperCase() === 'CANCELLED') continue;
-    if (String(r.payment_method || '').toUpperCase().includes('COMP')) continue;
-    if (String(r.payment_status || '').toUpperCase().includes('COMP')) continue;
+    const payStatus = String(r.payment_status || '').trim().toUpperCase();
+    const payMethod = String(r.payment_method || '').trim().toUpperCase();
+    const remBal = Number(r.full_remaining_balance ?? r.remaining_balance ?? 0);
+    if (payStatus !== 'PAID' || remBal > 0) continue;
+    if (payMethod.includes('COMP') || payMethod.includes('BELUM BAYAR') || payMethod.includes('PIUTANG')) continue;
+    if (payStatus.includes('COMP')) continue;
     const total = Math.round(Number(r.total_price) || 0);
     if (total <= 0) continue;
     const taxAmt = Math.round(Number(r.tax_amount) || 0);
@@ -1013,8 +1017,10 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const p of ctx.posItemSales || []) {
     if (p.is_complimentary) continue;
-    if (String(p.payment_method || '').toUpperCase().includes('COMP')) continue;
-    if (String(p.payment_status || '').toUpperCase().includes('COMP')) continue;
+    const posPayStatus = String(p.payment_status || '').trim().toUpperCase();
+    const posPayMethod = String(p.payment_method || '').trim().toUpperCase();
+    if (posPayStatus !== 'PAID') continue;
+    if (posPayMethod.includes('COMP') || posPayMethod.includes('BELUM BAYAR') || posPayMethod.includes('PIUTANG')) continue;
     const key = String(p.order_id ?? p.transaction_id ?? p.order_item_id);
     const lineTotal = Math.round(Number(p.line_total) || 0);
     if (lineTotal <= 0) continue;
@@ -1093,6 +1099,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
        AND t.transaction_type IN ('SALE', 'INCOME')
        AND t.deleted_at IS NULL
        AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+       AND UPPER(COALESCE(t.payment_status, '')) = 'PAID'
        AND NOT EXISTS (
          SELECT 1 FROM transactions t_rev
          WHERE t_rev.property_id = t.property_id
@@ -1104,6 +1111,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          AND COALESCE(UPPER(r.stay_status), '') NOT IN ('CANCELLED', 'NO_SHOW')
          AND COALESCE(r.discount_percent, 0) < 100
          AND COALESCE(r.total_price, 0) > 0
+         AND UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+         AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
          AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
          AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%FREE%'
          AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%VOUCHER%'

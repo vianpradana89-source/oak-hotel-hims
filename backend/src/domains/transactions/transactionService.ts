@@ -4537,7 +4537,19 @@ export async function getTransactions(
       b.bid ILIKE $${valIdx} OR
       r.booking_number ILIKE $${valIdx} OR
       r.guest_name ILIKE $${valIdx} OR
-      ('POS-' || LPAD(COALESCE(t.source_id, ''), 6, '0')) ILIKE $${valIdx}
+      ('POS-' || LPAD(COALESCE(t.source_id, ''), 6, '0')) ILIKE $${valIdx} OR
+      EXISTS (
+        SELECT 1 FROM pos_orders po_s
+        WHERE po_s.property_id = t.property_id
+          AND (
+            (UPPER(COALESCE(t.source_type, '')) IN ('POS_ORDER', 'POS') AND po_s.id::text = t.source_id)
+            OR (t.reservation_id IS NOT NULL AND po_s.reservation_id = t.reservation_id)
+          )
+          AND (
+            po_s.order_number ILIKE $${valIdx}
+            OR ('POS-' || LPAD(po_s.id::text, 6, '0')) ILIKE $${valIdx}
+          )
+      )
     )`);
     baseValues.push(searchTerm);
     valIdx++;

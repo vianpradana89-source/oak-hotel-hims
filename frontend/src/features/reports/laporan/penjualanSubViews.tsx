@@ -1341,6 +1341,9 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
     for (const r of data.room_sales || []) {
       if (r.is_complimentary) continue;
       if (String(r.reservation_status || '').toUpperCase() === 'CANCELLED') continue;
+      const payStatus = String(r.payment_status || '').trim().toUpperCase();
+      const remBal = Number((r as any).full_remaining_balance ?? r.remaining_balance ?? 0);
+      if (payStatus !== 'PAID' || remBal > 0) continue;
       const tax = Number(r.tax_amount) || 0;
       const total = Number(r.total_price) || 0;
       if (tax <= 0 || total <= 0) continue;
@@ -1361,6 +1364,8 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
 
     for (const p of data.pos_item_sales || []) {
       if (p.is_complimentary) continue;
+      const posPayStatus = String(p.payment_status || '').trim().toUpperCase();
+      if (posPayStatus !== 'PAID') continue;
       const tax = Number(p.tax_amount) || 0;
       const total = Number(p.line_total) || 0;
       if (tax <= 0 || total <= 0) continue;
