@@ -3,6 +3,8 @@ import type { FixedAssetItem } from './laporanTypes';
 export interface ImportedAssetRow {
   asset_code?: string;
   asset_name: string;
+  brand?: string;
+  serial_number?: string;
   category: string;
   storage_location: string;
   purchase_date: string;
@@ -155,6 +157,8 @@ export function downloadAssetsXlsx(filename: string, assets: FixedAssetItem[]): 
     'Kode Aset',
     'Kategori',
     'Nama Barang',
+    'Merek',
+    'No. Seri',
     'Lokasi Penyimpanan',
     'Tanggal Beli (YYYY-MM-DD)',
     'Harga Beli',
@@ -167,6 +171,8 @@ export function downloadAssetsXlsx(filename: string, assets: FixedAssetItem[]): 
     a.asset_code || `AST-${String(a.id).padStart(4, '0')}`,
     a.category,
     a.asset_name,
+    a.brand || '-',
+    a.serial_number || '-',
     a.storage_location || '-',
     a.purchase_date,
     Number(a.purchase_price || 0),
@@ -351,6 +357,10 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
   const codeIdx = hasCodeCol ? findCol(['kode', 'code'], 0) : -1;
   const catIdx = findCol(['kategori', 'category'], hasCodeCol ? 1 : 1);
   const nameIdx = findCol(['nama barang', 'nama aset', 'nama', 'barang', 'asset'], hasCodeCol ? 2 : 0);
+  const hasBrandCol = header.some((h) => h.includes('merek') || h.includes('merk') || h.includes('brand'));
+  const brandIdx = hasBrandCol ? findCol(['merek', 'merk', 'brand'], -1) : -1;
+  const hasSerialCol = header.some((h) => h.includes('seri') || h.includes('serial') || h.includes('sn'));
+  const serialIdx = hasSerialCol ? findCol(['seri', 'serial', 'sn'], -1) : -1;
   const hasLocationCol = header.some((h) => h.includes('lokasi') || h.includes('penyimpanan') || h.includes('location'));
   const locIdx = hasLocationCol ? findCol(['lokasi', 'penyimpanan', 'location'], hasCodeCol ? 3 : 2) : -1;
   const dateIdx = findCol(['tanggal', 'date', 'beli'], hasCodeCol ? 4 : hasLocationCol ? 3 : 2);
@@ -367,6 +377,8 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
     if (!assetName) continue;
 
     const assetCode = codeIdx >= 0 ? String(row[codeIdx] ?? '').trim() || undefined : undefined;
+    const brand = brandIdx >= 0 ? String(row[brandIdx] ?? '').trim() || '-' : '-';
+    const serialNumber = serialIdx >= 0 ? String(row[serialIdx] ?? '').trim() || '-' : '-';
     const category = String(row[catIdx] ?? '').trim() || 'Peralatan';
     const storageLocation = locIdx >= 0 ? String(row[locIdx] ?? '').trim() || '-' : '-';
     const purchaseDate = normalizeDateCell(String(row[dateIdx] ?? ''));
@@ -380,6 +392,8 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
     results.push({
       asset_code: assetCode,
       asset_name: assetName,
+      brand,
+      serial_number: serialNumber,
       category,
       storage_location: storageLocation,
       purchase_date: purchaseDate,

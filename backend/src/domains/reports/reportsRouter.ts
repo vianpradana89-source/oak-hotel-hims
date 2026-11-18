@@ -2212,10 +2212,13 @@ export function createReportsRouter(pool: Pool): Router {
     try {
       const propertyId = parsePositiveInt(req.body.property_id) || 1;
       await ensureAccountingSchema(pool, propertyId);
-      const assetCode = req.body.asset_code ? String(req.body.asset_code).trim() || null : null;
-      const assetName = String(req.body.asset_name || '').trim();
-      const category = String(req.body.category || 'Peralatan').trim();
-      const storageLocation = String(req.body.storage_location || '-').trim() || '-';
+      const assetCode = req.body.asset_code ? String(req.body.asset_code).trim().toUpperCase() || null : null;
+      const assetName = String(req.body.asset_name || '').trim().toUpperCase();
+      const brand = String(req.body.brand || '-').trim().toUpperCase() || '-';
+      const serialNumber = String(req.body.serial_number || '-').trim().toUpperCase() || '-';
+      const photoDataUrl = req.body.photo_data_url ? String(req.body.photo_data_url).trim() || null : null;
+      const category = String(req.body.category || 'PERALATAN').trim().toUpperCase() || 'PERALATAN';
+      const storageLocation = String(req.body.storage_location || '-').trim().toUpperCase() || '-';
       const purchaseDate = req.body.purchase_date
         ? String(req.body.purchase_date).slice(0, 10)
         : hotelDateFromInstant(new Date());
@@ -2226,7 +2229,7 @@ export function createReportsRouter(pool: Pool): Router {
           : purchasePrice;
       const depreciationRate = Number(req.body.depreciation_rate || 0);
       const status = String(req.body.status || 'ACTIVE').toUpperCase();
-      const notes = req.body.notes ? String(req.body.notes).trim() : null;
+      const notes = req.body.notes ? String(req.body.notes).trim().toUpperCase() : null;
       if (!assetName) {
         return res.status(400).json({ status: 'ERROR', message: 'Nama barang wajib diisi' });
       }
@@ -2238,13 +2241,16 @@ export function createReportsRouter(pool: Pool): Router {
       );
       const r = await pool.query(
         `INSERT INTO accounting_fixed_assets
-           (property_id, asset_code, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+           (property_id, asset_code, asset_name, brand, serial_number, photo_data_url, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, NOW())
          RETURNING *`,
         [
           propertyId,
           assetCode,
           assetName,
+          brand,
+          serialNumber,
+          photoDataUrl,
           category,
           storageLocation,
           purchaseDate,
@@ -2261,6 +2267,115 @@ export function createReportsRouter(pool: Pool): Router {
     }
   });
 
+  router.put('/accounting/assets/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID aset tidak valid' });
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+
+      const assetCode = req.body.asset_code ? String(req.body.asset_code).trim().toUpperCase() || null : null;
+      const assetName = String(req.body.asset_name || '').trim().toUpperCase();
+      const brand = String(req.body.brand || '-').trim().toUpperCase() || '-';
+      const serialNumber = String(req.body.serial_number || '-').trim().toUpperCase() || '-';
+      const photoDataUrl =
+        req.body.photo_data_url !== undefined
+          ? req.body.photo_data_url
+            ? String(req.body.photo_data_url).trim()
+            : null
+          : undefined;
+      const category = String(req.body.category || 'PERALATAN').trim().toUpperCase() || 'PERALATAN';
+      const storageLocation = String(req.body.storage_location || '-').trim().toUpperCase() || '-';
+      const purchaseDate = req.body.purchase_date
+        ? String(req.body.purchase_date).slice(0, 10)
+        : hotelDateFromInstant(new Date());
+      const purchasePrice = Number(req.body.purchase_price || 0);
+      const currentValue =
+        req.body.current_value !== undefined && req.body.current_value !== ''
+          ? Number(req.body.current_value)
+          : purchasePrice;
+      const depreciationRate = Number(req.body.depreciation_rate || 0);
+      const notes = req.body.notes ? String(req.body.notes).trim().toUpperCase() : null;
+
+      if (!assetName) {
+        return res.status(400).json({ status: 'ERROR', message: 'Nama barang wajib diisi' });
+      }
+
+      await pool.query(
+        `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (property_id, category_name) DO NOTHING`,
+        [propertyId, category]
+      );
+
+      const r = await pool.query(
+        `UPDATE accounting_fixed_assets
+         SET asset_code = $1,
+             asset_name = $2,
+             brand = $3,
+             serial_number = $4,
+             photo_data_url = CASE WHEN $5::boolean THEN $6 ELSE photo_data_url END,
+             category = $7,
+             storage_location = $8,
+             purchase_date = $9,
+             purchase_price = $10,
+             current_value = $11,
+             depreciation_rate = $12,
+             notes = $13,
+             updated_at = NOW()
+         WHERE id = $14
+         RETURNING *`,
+        [
+          assetCode,
+          assetName,
+          brand,
+          serialNumber,
+          photoDataUrl !== undefined,
+          photoDataUrl ?? null,
+          category,
+          storageLocation,
+          purchaseDate,
+          purchasePrice,
+          currentValue,
+          depreciationRate,
+          notes,
+          id,
+        ]
+      );
+      if (r.rows.length === 0) {
+        return res.status(404).json({ status: 'ERROR', message: 'Aset tidak ditemukan' });
+      }
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memperbarui aset tetap' });
+    }
+  });
+
+  router.patch('/accounting/assets/:id', async (req: Request, res: Response) => {
+    try {
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID aset tidak valid' });
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
+
+      const photoDataUrl = req.body.photo_data_url ? String(req.body.photo_data_url).trim() : null;
+      const r = await pool.query(
+        `UPDATE accounting_fixed_assets
+         SET photo_data_url = $1,
+             updated_at = NOW()
+         WHERE id = $2
+         RETURNING *`,
+        [photoDataUrl, id]
+      );
+      if (r.rows.length === 0) {
+        return res.status(404).json({ status: 'ERROR', message: 'Aset tidak ditemukan' });
+      }
+      return res.json({ status: 'SUCCESS', data: r.rows[0] });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memperbarui foto aset' });
+    }
+  });
+
   router.post('/accounting/assets/bulk-import', async (req: Request, res: Response) => {
     try {
       const propertyId = parsePositiveInt(req.body.property_id) || 1;
@@ -2271,11 +2386,13 @@ export function createReportsRouter(pool: Pool): Router {
       }
       let importedCount = 0;
       for (const item of items) {
-        const assetName = String(item.asset_name || '').trim();
+        const assetName = String(item.asset_name || '').trim().toUpperCase();
         if (!assetName) continue;
-        const assetCode = item.asset_code ? String(item.asset_code).trim() || null : null;
-        const category = String(item.category || 'Peralatan').trim() || 'Peralatan';
-        const storageLocation = String(item.storage_location || '-').trim() || '-';
+        const assetCode = item.asset_code ? String(item.asset_code).trim().toUpperCase() || null : null;
+        const brand = String(item.brand || '-').trim().toUpperCase() || '-';
+        const serialNumber = String(item.serial_number || '-').trim().toUpperCase() || '-';
+        const category = String(item.category || 'PERALATAN').trim().toUpperCase() || 'PERALATAN';
+        const storageLocation = String(item.storage_location || '-').trim().toUpperCase() || '-';
         const purchaseDate = item.purchase_date
           ? String(item.purchase_date).slice(0, 10)
           : hotelDateFromInstant(new Date());
@@ -2285,7 +2402,7 @@ export function createReportsRouter(pool: Pool): Router {
             ? Math.max(0, Number(item.current_value))
             : purchasePrice;
         const depreciationRate = Math.max(0, Number(item.depreciation_rate || 0));
-        const notes = item.notes ? String(item.notes).trim() : null;
+        const notes = item.notes ? String(item.notes).trim().toUpperCase() : null;
 
         await pool.query(
           `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
@@ -2295,12 +2412,14 @@ export function createReportsRouter(pool: Pool): Router {
         );
         await pool.query(
           `INSERT INTO accounting_fixed_assets
-             (property_id, asset_code, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, NOW())`,
+             (property_id, asset_code, asset_name, brand, serial_number, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'ACTIVE', $12, NOW())`,
           [
             propertyId,
             assetCode,
             assetName,
+            brand,
+            serialNumber,
             category,
             storageLocation,
             purchaseDate,

@@ -4,6 +4,7 @@
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import { Pencil, Trash2 } from 'lucide-react';
 import {
   fetchSuppliers,
   createSupplier,
@@ -295,21 +296,23 @@ export default function SupplierSection({ propertyId, onNotifySuccess }: Props) 
                       )}
                     </td>
                     <td className="py-3 px-4 text-center">
-                      <div className="inline-flex items-center gap-2">
+                      <div className="inline-flex items-center gap-1.5">
                         <button
                           type="button"
                           onClick={() => openEditModal(sup)}
-                          className="px-2.5 py-1 text-xs font-medium text-stone-700 bg-stone-100 hover:bg-stone-200 rounded transition-colors"
+                          title="Ubah Supplier"
+                          className="w-8 h-8 inline-flex items-center justify-center text-stone-700 bg-stone-100 hover:bg-stone-200 border border-stone-200 rounded-lg transition-colors cursor-pointer"
                         >
-                          Ubah
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
                           onClick={() => handleDelete(sup)}
                           disabled={deletingId === sup.id}
-                          className="px-2.5 py-1 text-xs font-medium text-red-700 bg-red-50 hover:bg-red-100 rounded transition-colors disabled:opacity-50"
+                          title="Hapus Supplier"
+                          className="w-8 h-8 inline-flex items-center justify-center text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
                         >
-                          {deletingId === sup.id ? '...' : 'Hapus'}
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </div>
                     </td>

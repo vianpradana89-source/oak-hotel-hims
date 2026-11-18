@@ -83,6 +83,26 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
         ADD COLUMN IF NOT EXISTS storage_location VARCHAR(160) NULL DEFAULT '-';
       ALTER TABLE accounting_fixed_assets
         ADD COLUMN IF NOT EXISTS asset_code VARCHAR(80) NULL;
+      ALTER TABLE accounting_fixed_assets
+        ADD COLUMN IF NOT EXISTS brand VARCHAR(160) NULL DEFAULT '-';
+      ALTER TABLE accounting_fixed_assets
+        ADD COLUMN IF NOT EXISTS serial_number VARCHAR(160) NULL DEFAULT '-';
+      ALTER TABLE accounting_fixed_assets
+        ADD COLUMN IF NOT EXISTS photo_data_url TEXT NULL;
+
+      UPDATE accounting_fixed_assets
+      SET
+        asset_code = CASE WHEN asset_code IS NOT NULL THEN UPPER(asset_code) ELSE NULL END,
+        asset_name = UPPER(asset_name),
+        category = UPPER(category),
+        brand = CASE WHEN brand IS NOT NULL THEN UPPER(brand) ELSE '-' END,
+        serial_number = CASE WHEN serial_number IS NOT NULL THEN UPPER(serial_number) ELSE '-' END,
+        storage_location = CASE WHEN storage_location IS NOT NULL THEN UPPER(storage_location) ELSE '-' END,
+        notes = CASE WHEN notes IS NOT NULL THEN UPPER(notes) ELSE NULL END
+      WHERE
+        asset_name IS DISTINCT FROM UPPER(asset_name)
+        OR category IS DISTINCT FROM UPPER(category)
+        OR (storage_location IS NOT NULL AND storage_location IS DISTINCT FROM UPPER(storage_location));
 
       CREATE TABLE IF NOT EXISTS accounting_asset_categories (
         id SERIAL PRIMARY KEY,
@@ -250,6 +270,9 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       `SELECT id, property_id,
               COALESCE(NULLIF(BTRIM(asset_code), ''), 'AST-' || LPAD(id::text, 4, '0')) AS asset_code,
               asset_name, category,
+              COALESCE(NULLIF(BTRIM(brand), ''), '-') AS brand,
+              COALESCE(NULLIF(BTRIM(serial_number), ''), '-') AS serial_number,
+              photo_data_url,
               COALESCE(NULLIF(BTRIM(storage_location), ''), '-') AS storage_location,
               to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date,
               purchase_price::numeric(16,2) AS purchase_price,
@@ -432,7 +455,10 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       property_id: Number(a.property_id || ctx.propertyId),
       asset_code: String(a.asset_code || `AST-${String(a.id).padStart(4, '0')}`),
       asset_name: String(a.asset_name || '-'),
-      category: String(a.category || 'Peralatan'),
+      category: String(a.category || 'PERALATAN'),
+      brand: String(a.brand || '-'),
+      serial_number: String(a.serial_number || '-'),
+      photo_data_url: a.photo_data_url ? String(a.photo_data_url) : null,
       storage_location: String(a.storage_location || '-'),
       purchase_date: String(a.purchase_date || ''),
       purchase_price: purchasePrice,

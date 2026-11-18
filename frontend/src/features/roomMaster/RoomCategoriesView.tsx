@@ -1,5 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import type { DragEvent, KeyboardEvent } from 'react';
+import { Eye, MoreVertical, Pencil } from 'lucide-react';
 import ConfirmDeleteModal from './ConfirmDeleteModal';
 import RoomCategoryModal from './RoomCategoryModal';
 import { roomMasterApi } from './roomMasterApi';
@@ -305,23 +306,25 @@ export default function RoomCategoriesView({
                           type="button"
                           className="rm-btn rm-btn--ghost"
                           disabled={reorderSaving}
+                          title="Detail Kategori"
                           onClick={() => {
                             setMoreMenuId(null);
                             setModal({ kind: 'view', target: category });
                           }}
                         >
-                          Detail
+                          <Eye className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
                           className="rm-btn rm-btn--ghost"
                           disabled={reorderSaving}
+                          title="Edit Kategori"
                           onClick={() => {
                             setMoreMenuId(null);
                             setModal({ kind: 'edit', target: category });
                           }}
                         >
-                          Edit
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <span
                           className="rm-more-actions"
@@ -338,9 +341,10 @@ export default function RoomCategoriesView({
                             aria-expanded={moreMenuId === category.id}
                             aria-controls={`category-more-${category.id}`}
                             disabled={rowBusyId !== null || reorderSaving}
+                            title="Opsi lainnya"
                             onClick={() => setMoreMenuId((current) => current === category.id ? null : category.id)}
                           >
-                            ⋮ More
+                            <MoreVertical className="w-3.5 h-3.5" />
                           </button>
                           {moreMenuId === category.id && (
                             <span className="rm-more-menu" id={`category-more-${category.id}`}>

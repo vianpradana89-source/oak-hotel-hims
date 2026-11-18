@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
+import { Pencil, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 import { getMasterProductCapabilities } from './productMasterPermissions';
@@ -3428,15 +3429,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         {/* Kolom Aksi: Edit + Hapus + menu ⋮ */}
                         <td className="py-3 px-4 text-right whitespace-nowrap">
                           {(capabilities.canEdit || capabilities.canToggleStatus) ? (
-                            <div className="flex items-center justify-end gap-1">
+                            <div className="flex items-center justify-end gap-1.5">
                               {capabilities.canEdit && (
                                 <button
                                   type="button"
                                   onClick={() => openEdit(item)}
                                   disabled={saving}
-                                  className="text-xs text-emerald-700 hover:text-emerald-900 font-semibold px-2.5 py-1 rounded-lg hover:bg-emerald-50 transition-colors cursor-pointer"
+                                  title="Edit Produk"
+                                  className="w-7 h-7 inline-flex items-center justify-center rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 transition-colors cursor-pointer disabled:opacity-50"
                                 >
-                                  Edit
+                                  <Pencil className="w-3.5 h-3.5" />
                                 </button>
                               )}
                               {(capabilities.canEdit || capabilities.canToggleStatus) && (
@@ -3444,9 +3446,10 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                                   type="button"
                                   onClick={() => void handleDeleteProduct(item)}
                                   disabled={saving}
-                                  className="text-xs text-rose-600 hover:text-rose-800 font-semibold px-2.5 py-1 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                                  title="Hapus Produk"
+                                  className="w-7 h-7 inline-flex items-center justify-center rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 transition-colors cursor-pointer disabled:opacity-50"
                                 >
-                                  Hapus
+                                  <Trash2 className="w-3.5 h-3.5" />
                                 </button>
                               )}
                               {/* MPUI-F01: Portal-based three-dot menu — state-driven, not clipped by table overflow */}

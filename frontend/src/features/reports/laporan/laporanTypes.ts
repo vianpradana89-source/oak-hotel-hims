@@ -328,6 +328,9 @@ export interface FixedAssetItem {
   property_id: number;
   asset_code?: string;
   asset_name: string;
+  brand?: string;
+  serial_number?: string;
+  photo_data_url?: string | null;
   category: string;
   storage_location?: string;
   purchase_date: string;

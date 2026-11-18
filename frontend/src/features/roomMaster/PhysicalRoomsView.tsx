@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Pencil, Power, Trash2 } from 'lucide-react';
 import { roomMasterApi } from './roomMasterApi';
 import {
   describeApiError,
@@ -285,9 +286,10 @@ export default function PhysicalRoomsView({
                         <button
                           type="button"
                           className="rm-btn rm-btn--ghost"
+                          title="Detail / Edit Kamar"
                           onClick={() => setModal({ kind: 'edit', target: room })}
                         >
-                          Detail
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -305,7 +307,7 @@ export default function PhysicalRoomsView({
                           }
                           onClick={() => void toggleActive(room)}
                         >
-                          {rowBusyId === room.id ? '…' : room.is_active ? 'Nonaktifkan' : 'Aktifkan'}
+                          <Power className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -314,7 +316,7 @@ export default function PhysicalRoomsView({
                           title="Hapus permanen (hanya jika belum memiliki riwayat)"
                           onClick={() => setDeleteTarget(room)}
                         >
-                          Hapus
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </span>
                     </td>

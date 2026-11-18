@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react';
+import { Pencil, Power, Trash2 } from 'lucide-react';
 import { roomMasterApi } from './roomMasterApi';
 import { describeApiError, EmptyState, ErrorState, LoadingState, MasterStatusBadge } from './roomMasterUi';
 import type { RoomCategory, RoomType } from './roomMasterTypes';
@@ -194,9 +195,10 @@ export default function RoomTypesView({
                         <button
                           type="button"
                           className="rm-btn rm-btn--ghost"
+                          title="Detail / Edit Tipe Kamar"
                           onClick={() => setModal({ kind: 'edit', target: rt })}
                         >
-                          Detail
+                          <Pencil className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -205,7 +207,7 @@ export default function RoomTypesView({
                           title={rt.is_active ? 'Nonaktifkan tipe kamar' : 'Aktifkan tipe kamar'}
                           onClick={() => void toggleActive(rt)}
                         >
-                          {rowBusyId === rt.id ? '…' : rt.is_active ? 'Nonaktifkan' : 'Aktifkan'}
+                          <Power className="w-3.5 h-3.5" />
                         </button>
                         <button
                           type="button"
@@ -214,7 +216,7 @@ export default function RoomTypesView({
                           title="Hapus permanen (hanya jika belum memiliki riwayat)"
                           onClick={() => setDeleteTarget(rt)}
                         >
-                          Hapus
+                          <Trash2 className="w-3.5 h-3.5" />
                         </button>
                       </span>
                     </td>

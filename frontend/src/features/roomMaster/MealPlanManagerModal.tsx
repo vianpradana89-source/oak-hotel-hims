@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { Pencil, Trash2 } from 'lucide-react';
 import { pricingApi } from './pricingApi';
 import type {
   MealPlanMaster,
@@ -476,24 +477,25 @@ export const MealPlanManagerModal: React.FC<MealPlanManagerModalProps> = ({
                         )}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end gap-2">
+                        <div className="flex items-center justify-end gap-1.5">
                           {!plan.is_archived && (
                             <button
                               type="button"
                               onClick={() => startEdit(plan)}
-                              className="text-stone-600 hover:text-emerald-800 text-xs font-semibold px-2 py-1 rounded hover:bg-stone-100"
+                              title="Edit Meal Plan"
+                              className="w-8 h-8 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-700 inline-flex items-center justify-center transition cursor-pointer"
                             >
-                              Edit
+                              <Pencil className="w-3.5 h-3.5" />
                             </button>
                           )}
                           {!plan.is_archived && (
                             <button
                               type="button"
                               onClick={() => setDeletePlanTarget(plan)}
-                              className="text-stone-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50"
+                              className="w-8 h-8 rounded-lg bg-red-50 hover:bg-red-100 border border-red-200 text-red-600 inline-flex items-center justify-center transition cursor-pointer"
                               title="Hapus / Arsipkan"
                             >
-                              Hapus
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>

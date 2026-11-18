@@ -1,4 +1,5 @@
 import React, { useMemo, useRef, useState } from 'react';
+import { CheckCircle2, Image as ImageIcon, Pencil, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '../../../lib/authenticatedFetch';
 import {
   EmptyState,
@@ -29,6 +30,7 @@ import {
   AddAssetModal,
   AddBankModal,
   AddPayableOrReceivableModal,
+  AssetPhotoQuickModal,
   CoaAccountModal,
   ConfirmDeleteModal,
   InvestorTransferModal,
@@ -41,6 +43,7 @@ import type {
   AnalyticsHubData,
   CoaAccountItem,
   FinancialsData,
+  FixedAssetItem,
 } from './laporanTypes';
 
 export type AkuntansiSubView =
@@ -132,8 +135,19 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const [showAddBankModal, setShowAddBankModal] = useState(false);
   const [showInvestorTransferModal, setShowInvestorTransferModal] = useState(false);
   const [showAddAssetModal, setShowAddAssetModal] = useState(false);
+  const [editingAssetItem, setEditingAssetItem] = useState<FixedAssetItem | null>(null);
+  const [quickPhotoAsset, setQuickPhotoAsset] = useState<FixedAssetItem | null>(null);
   const [showAddPayableModal, setShowAddPayableModal] = useState(false);
   const [showAddReceivableModal, setShowAddReceivableModal] = useState(false);
+
+  // Asset filter, sort, & search state
+  const [assetSearch, setAssetSearch] = useState('');
+  const [assetCategoryFilter, setAssetCategoryFilter] = useState('ALL');
+  const [assetLocationFilter, setAssetLocationFilter] = useState('ALL');
+  const [assetBrandFilter, setAssetBrandFilter] = useState('ALL');
+  const [assetSortBy, setAssetSortBy] = useState<
+    'NEWEST' | 'CATEGORY' | 'LOCATION' | 'BRAND' | 'NAME' | 'VALUE_DESC'
+  >('NEWEST');
 
   // Settle modal state (Gambar 2 reference popup)
   const [settleModalState, setSettleModalState] = useState<{
@@ -228,6 +242,89 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     if (serviceSourceFilter === 'ALL') return rows;
     return rows.filter((r) => r.source === serviceSourceFilter);
   }, [subledger, serviceSourceFilter]);
+
+  // Asset filter options & filtered/sorted assets
+  const assetCategoryOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of subledger?.fixed_assets.items || []) {
+      if (a.category && a.category.trim()) set.add(a.category.trim());
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [subledger]);
+
+  const assetLocationOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of subledger?.fixed_assets.items || []) {
+      const loc = (a.storage_location || '').trim();
+      if (loc && loc !== '-') set.add(loc);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [subledger]);
+
+  const assetBrandOptions = useMemo(() => {
+    const set = new Set<string>();
+    for (const a of subledger?.fixed_assets.items || []) {
+      const br = (a.brand || '').trim();
+      if (br && br !== '-') set.add(br);
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [subledger]);
+
+  const filteredAndSortedAssets = useMemo(() => {
+    const items = subledger?.fixed_assets.items || [];
+    const q = assetSearch.trim().toLowerCase();
+    const filtered = items.filter((a) => {
+      if (assetCategoryFilter !== 'ALL' && a.category !== assetCategoryFilter) return false;
+      if (
+        assetLocationFilter !== 'ALL' &&
+        (a.storage_location || '-') !== assetLocationFilter
+      ) {
+        return false;
+      }
+      if (assetBrandFilter !== 'ALL' && (a.brand || '-') !== assetBrandFilter) return false;
+      if (!q) return true;
+      const codeStr = (a.asset_code || `AST-${String(a.id).padStart(4, '0')}`).toLowerCase();
+      return (
+        codeStr.includes(q) ||
+        (a.asset_name || '').toLowerCase().includes(q) ||
+        (a.brand || '').toLowerCase().includes(q) ||
+        (a.serial_number || '').toLowerCase().includes(q) ||
+        (a.storage_location || '').toLowerCase().includes(q) ||
+        (a.category || '').toLowerCase().includes(q) ||
+        (a.notes || '').toLowerCase().includes(q)
+      );
+    });
+
+    const sorted = [...filtered];
+    sorted.sort((a, b) => {
+      if (assetSortBy === 'CATEGORY') {
+        return (a.category || '').localeCompare(b.category || '') || b.id - a.id;
+      }
+      if (assetSortBy === 'LOCATION') {
+        return (
+          (a.storage_location || '-').localeCompare(b.storage_location || '-') || b.id - a.id
+        );
+      }
+      if (assetSortBy === 'BRAND') {
+        return (a.brand || '-').localeCompare(b.brand || '-') || b.id - a.id;
+      }
+      if (assetSortBy === 'NAME') {
+        return (a.asset_name || '').localeCompare(b.asset_name || '') || b.id - a.id;
+      }
+      if (assetSortBy === 'VALUE_DESC') {
+        return Number(b.current_value || 0) - Number(a.current_value || 0) || b.id - a.id;
+      }
+      return b.id - a.id;
+    });
+    return sorted;
+  }, [
+    subledger,
+    assetSearch,
+    assetCategoryFilter,
+    assetLocationFilter,
+    assetBrandFilter,
+    assetSortBy,
+  ]);
 
   if (loading && !analytics && !financials) {
     return <LoadingState label="Memuat data akuntansi OAK HIMS..." />;
@@ -773,14 +870,17 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
+                                type="button"
                                 onClick={() => setSettleModalState({ mode: 'PAYABLE', item })}
-                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold cursor-pointer"
+                                title="Lunasi Hutang"
+                                className="w-8 h-8 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 inline-flex items-center justify-center transition cursor-pointer"
                               >
-                                Lunasi
+                                <CheckCircle2 className="w-4 h-4" />
                               </button>
                             )}
                             {item.source === 'MANUAL' && (
                               <button
+                                type="button"
                                 onClick={() =>
                                   setConfirmDeleteState({
                                     title: 'Hapus Data Hutang',
@@ -788,9 +888,10 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                     endpoint: `/api/reports/accounting/payables/${encodeURIComponent(item.id)}`,
                                   })
                                 }
-                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
+                                title="Hapus Hutang"
+                                className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
                               >
-                                Hapus
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             )}
                           </div>
@@ -945,14 +1046,17 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
+                                type="button"
                                 onClick={() => setSettleModalState({ mode: 'RECEIVABLE', item })}
-                                className="px-2.5 py-1 rounded-md bg-emerald-700 hover:bg-emerald-800 text-white text-[11px] font-bold cursor-pointer"
+                                title="Terima Pembayaran Piutang"
+                                className="w-8 h-8 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 inline-flex items-center justify-center transition cursor-pointer"
                               >
-                                Lunasi
+                                <CheckCircle2 className="w-4 h-4" />
                               </button>
                             )}
                             {item.source === 'MANUAL' && (
                               <button
+                                type="button"
                                 onClick={() =>
                                   setConfirmDeleteState({
                                     title: 'Hapus Data Piutang',
@@ -960,9 +1064,10 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                     endpoint: `/api/reports/accounting/receivables/${encodeURIComponent(item.id)}`,
                                   })
                                 }
-                                className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
+                                title="Hapus Piutang"
+                                className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
                               >
-                                Hapus
+                                <Trash2 className="w-4 h-4" />
                               </button>
                             )}
                           </div>
@@ -1063,6 +1168,80 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             </div>
           )}
 
+          {/* Toolbar Filter, Sort & Search Aset */}
+          <div className="bg-white rounded-xl border border-slate-200 p-3.5 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+            <div className="relative lg:col-span-1">
+              <IconSearch className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={assetSearch}
+                onChange={(e) => setAssetSearch(e.target.value)}
+                placeholder="Cari kode, nama, merek, no seri..."
+                className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-800"
+              />
+            </div>
+
+            <div>
+              <select
+                value={assetCategoryFilter}
+                onChange={(e) => setAssetCategoryFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 font-medium"
+              >
+                <option value="ALL">Semua Kategori</option>
+                {assetCategoryOptions.map((cat) => (
+                  <option key={cat} value={cat}>
+                    Kategori: {cat}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <select
+                value={assetLocationFilter}
+                onChange={(e) => setAssetLocationFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 font-medium"
+              >
+                <option value="ALL">Semua Lokasi Penyimpanan</option>
+                {assetLocationOptions.map((loc) => (
+                  <option key={loc} value={loc}>
+                    Lokasi: {loc}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <select
+                value={assetBrandFilter}
+                onChange={(e) => setAssetBrandFilter(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 font-medium"
+              >
+                <option value="ALL">Semua Merek</option>
+                {assetBrandOptions.map((br) => (
+                  <option key={br} value={br}>
+                    Merek: {br}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div>
+              <select
+                value={assetSortBy}
+                onChange={(e) => setAssetSortBy(e.target.value as any)}
+                className="w-full px-3 py-2 text-xs rounded-lg border border-slate-200 bg-white text-slate-700 font-bold"
+              >
+                <option value="NEWEST">Urutkan: Terbaru</option>
+                <option value="CATEGORY">Urutkan: Kategori (A-Z)</option>
+                <option value="LOCATION">Urutkan: Lokasi Penyimpanan (A-Z)</option>
+                <option value="BRAND">Urutkan: Merek (A-Z)</option>
+                <option value="NAME">Urutkan: Nama Barang (A-Z)</option>
+                <option value="VALUE_DESC">Urutkan: Nilai Saat Ini Tertinggi</option>
+              </select>
+            </div>
+          </div>
+
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
             {(subledger?.fixed_assets.items || []).length === 0 ? (
               <div className="py-14 text-center">
@@ -1072,63 +1251,109 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                   Klik tombol &ldquo;+ Tambah Aset&rdquo; atau &ldquo;Import XLSX&rdquo; untuk mencatat inventaris & aset tetap hotel.
                 </p>
               </div>
+            ) : filteredAndSortedAssets.length === 0 ? (
+              <div className="py-12 text-center text-xs text-slate-400">
+                Tidak ada aset yang cocok dengan filter atau pencarian saat ini.
+              </div>
             ) : (
               <div className="overflow-auto max-h-[calc(100vh-270px)]">
                 <table className="w-full text-xs">
                   <thead className="sticky top-0 z-20">
                     <tr className="bg-[#123524] text-white text-left">
-                      <th className="py-3 px-4 font-semibold bg-[#123524]">Kode Aset</th>
-                      <th className="py-3 px-4 font-semibold bg-[#123524]">Kategori</th>
-                      <th className="py-3 px-4 font-semibold bg-[#123524]">Nama Barang</th>
-                      <th className="py-3 px-4 font-semibold bg-[#123524]">Lokasi Penyimpanan</th>
-                      <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Harga Beli</th>
-                      <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Nilai Saat Ini</th>
-                      <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Depresiasi</th>
-                      <th className="py-3 px-4 font-semibold bg-[#123524]">Catatan</th>
-                      <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">Kode Aset</th>
+                      <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Foto/Gambar</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">Nama Barang</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">Merek</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">No. Seri</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">Lokasi Penyimpanan</th>
+                      <th className="py-3 px-3.5 font-semibold text-right bg-[#123524]">Harga Beli</th>
+                      <th className="py-3 px-3.5 font-semibold text-right bg-[#123524]">Nilai Saat Ini</th>
+                      <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Depresiasi</th>
+                      <th className="py-3 px-3.5 font-semibold bg-[#123524]">Catatan</th>
+                      <th className="py-3 px-3.5 font-semibold text-center bg-[#123524]">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {(subledger?.fixed_assets.items || []).map((asset) => (
+                    {filteredAndSortedAssets.map((asset) => (
                       <tr key={asset.id} className="hover:bg-emerald-50/30 transition">
-                        <td className="py-3 px-4 font-mono text-[11px] font-bold text-[#123524]">
-                          {asset.asset_code || `AST-${String(asset.id).padStart(4, '0')}`}
+                        <td className="py-3 px-3.5 font-mono text-[11px] font-bold text-[#123524]">
+                          <div>{asset.asset_code || `AST-${String(asset.id).padStart(4, '0')}`}</div>
                           <div className="font-sans text-[10px] font-normal text-slate-400">
                             {formatMediumDateId(asset.purchase_date)}
                           </div>
+                          <div className="mt-1">
+                            <span className="inline-block px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-sans font-semibold text-[10px]">
+                              {asset.category}
+                            </span>
+                          </div>
                         </td>
-                        <td className="py-3 px-4">
-                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold text-[11px]">
-                            {asset.category}
-                          </span>
+                        <td className="py-2.5 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => setQuickPhotoAsset(asset)}
+                            title={
+                              asset.photo_data_url
+                                ? 'Klik untuk lihat / ganti foto aset'
+                                : 'Klik untuk upload foto atau buka kamera'
+                            }
+                            className="w-11 h-11 rounded-xl border border-dashed border-slate-300 hover:border-emerald-700 bg-slate-50/70 inline-flex items-center justify-center overflow-hidden transition cursor-pointer group mx-auto"
+                          >
+                            {asset.photo_data_url ? (
+                              <img
+                                src={asset.photo_data_url}
+                                alt={asset.asset_name}
+                                className="w-full h-full object-cover"
+                              />
+                            ) : (
+                              <ImageIcon className="w-5 h-5 text-slate-400 group-hover:text-emerald-800 transition" />
+                            )}
+                          </button>
                         </td>
-                        <td className="py-3 px-4 font-bold text-slate-900">{asset.asset_name}</td>
-                        <td className="py-3 px-4 font-medium text-slate-700">
+                        <td className="py-3 px-3.5 font-bold text-slate-900">{asset.asset_name}</td>
+                        <td className="py-3 px-3.5 font-medium text-slate-700">
+                          {asset.brand || '-'}
+                        </td>
+                        <td className="py-3 px-3.5 font-mono text-[11px] text-slate-700">
+                          {asset.serial_number || '-'}
+                        </td>
+                        <td className="py-3 px-3.5 font-medium text-slate-700">
                           {asset.storage_location || '-'}
                         </td>
-                        <td className="py-3 px-4 text-right font-semibold text-slate-700">
+                        <td className="py-3 px-3.5 text-right font-semibold text-slate-700">
                           {formatIdr(asset.purchase_price)}
                         </td>
-                        <td className="py-3 px-4 text-right font-extrabold text-emerald-800">
+                        <td className="py-3 px-3.5 text-right font-extrabold text-emerald-800">
                           {formatIdr(asset.current_value)}
                         </td>
-                        <td className="py-3 px-4 text-center text-slate-600">
+                        <td className="py-3 px-3 text-center text-slate-600">
                           {asset.depreciation_rate}% / thn
                         </td>
-                        <td className="py-3 px-4 text-slate-500">{asset.notes || '-'}</td>
-                        <td className="py-3 px-4 text-center">
-                          <button
-                            onClick={() =>
-                              setConfirmDeleteState({
-                                title: 'Hapus Aset Tetap',
-                                description: `Apakah Anda yakin ingin menghapus aset tetap "${asset.asset_name}" (${asset.category})?`,
-                                endpoint: `/api/reports/accounting/assets/${asset.id}`,
-                              })
-                            }
-                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
-                          >
-                            Hapus
-                          </button>
+                        <td className="py-3 px-3.5 text-slate-500">{asset.notes || '-'}</td>
+                        <td className="py-3 px-3.5 text-center">
+                          <div className="flex items-center justify-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => setEditingAssetItem(asset)}
+                              title="Edit Aset"
+                              className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 inline-flex items-center justify-center transition cursor-pointer"
+                            >
+                              <Pencil className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setConfirmDeleteState({
+                                  title: 'Hapus Aset Tetap',
+                                  description: `Apakah Anda yakin ingin menghapus aset tetap "${asset.asset_name}" (${asset.category})?`,
+                                  endpoint: `/api/reports/accounting/assets/${asset.id}`,
+                                })
+                              }
+                              title="Hapus Aset"
+                              className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ))}
@@ -1205,6 +1430,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                       <td className="py-3.5 px-4 text-center">
                         {bank.source_type === 'MANUAL' && bank.manual_id ? (
                           <button
+                            type="button"
                             onClick={() =>
                               setConfirmDeleteState({
                                 title: 'Hapus Rekening Bank Manual',
@@ -1212,9 +1438,10 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                 endpoint: `/api/reports/accounting/banks/${bank.manual_id}`,
                               })
                             }
-                            className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
+                            title="Hapus Rekening Bank Manual"
+                            className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
                           >
-                            Hapus
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         ) : (
                           <span className="text-slate-300">-</span>
@@ -1336,13 +1563,16 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                       <td className="py-3.5 px-4 text-center">
                         <div className="flex items-center justify-center gap-1.5">
                           <button
+                            type="button"
                             onClick={() => setCoaModalItem(acc)}
-                            className="px-2.5 py-1 rounded-md bg-slate-100 hover:bg-slate-200 text-slate-700 text-[11px] font-semibold cursor-pointer"
+                            title="Edit Akun / Saldo Awal"
+                            className="w-8 h-8 rounded-lg bg-slate-100 hover:bg-slate-200 border border-slate-200 text-slate-700 inline-flex items-center justify-center transition cursor-pointer"
                           >
-                            Edit Saldo Awal
+                            <Pencil className="w-3.5 h-3.5" />
                           </button>
                           {!acc.is_system && (
                             <button
+                              type="button"
                               onClick={() =>
                                 setConfirmDeleteState({
                                   title: 'Hapus Akun COA',
@@ -1350,9 +1580,10 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                   endpoint: `/api/reports/accounting/coa/${acc.id}`,
                                 })
                               }
-                              className="px-2.5 py-1 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 text-[11px] font-semibold cursor-pointer"
+                              title="Hapus Akun COA"
+                              className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
                             >
-                              Hapus
+                              <Trash2 className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>
@@ -1626,12 +1857,24 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           onSaved={onRetry}
         />
       )}
-      {showAddAssetModal && (
+      {(showAddAssetModal || editingAssetItem) && (
         <AddAssetModal
           propertyId={propertyId}
           defaultDate={endDate}
+          initialAsset={editingAssetItem}
           categories={subledger?.fixed_assets.categories}
-          onClose={() => setShowAddAssetModal(false)}
+          onClose={() => {
+            setShowAddAssetModal(false);
+            setEditingAssetItem(null);
+          }}
+          onSaved={onRetry}
+        />
+      )}
+      {quickPhotoAsset && (
+        <AssetPhotoQuickModal
+          propertyId={propertyId}
+          asset={quickPhotoAsset}
+          onClose={() => setQuickPhotoAsset(null)}
           onSaved={onRetry}
         />
       )}

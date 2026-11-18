@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { Pencil, Trash2 } from 'lucide-react';
 import type {
   StayChargeRule,
   StayChargeType,
@@ -534,16 +535,18 @@ export default function LayananTambahanView({ propertyId, onChanged }: Props) {
                           <button
                             type="button"
                             onClick={() => handleEdit(rule)}
-                            className="px-2 py-1 bg-stone-100 hover:bg-stone-200 text-stone-800 rounded font-semibold text-[11px] cursor-pointer transition-colors"
+                            title="Edit Layanan / Denda"
+                            className="w-8 h-8 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-700 inline-flex items-center justify-center cursor-pointer transition-colors"
                           >
-                            Edit
+                            <Pencil className="w-3.5 h-3.5" />
                           </button>
                           <button
                             type="button"
                             onClick={() => handleArchive(rule)}
-                            className="px-2 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded font-semibold text-[11px] cursor-pointer transition-colors"
+                            title="Hapus / Arsipkan"
+                            className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center cursor-pointer transition-colors"
                           >
-                            Arsip
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </td>

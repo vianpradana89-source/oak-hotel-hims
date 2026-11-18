@@ -132,9 +132,56 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
     );
   };
 
+  const normalizeExcelDateString = (raw: string): string | null => {
+    const val = String(raw || '').trim();
+    if (!val || val === '-') return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(val)) return val;
+    const dmy = val.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (dmy) {
+      return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+    }
+    const serial = Number(val);
+    if (Number.isFinite(serial) && serial > 10000 && serial < 65000) {
+      const utcDays = Math.floor(serial - 25569);
+      const d = new Date(utcDays * 86400 * 1000);
+      if (!isNaN(d.getTime())) {
+        return d.toISOString().slice(0, 10);
+      }
+    }
+    return null;
+  };
+
   const extractRowObjectsFromMatrix = (matrix: string[][]) => {
     if (!matrix || matrix.length < 2) return [];
-    const rawHeaders = matrix[0].map((h) =>
+
+    // Find header row among first 10 rows
+    let headerRowIndex = 0;
+    const headerKeywords = [
+      'nama',
+      'pelanggan',
+      'tamu',
+      'fullname',
+      'name',
+      'telepon',
+      'whatsapp',
+      'phone',
+      'nik',
+      'ktp',
+    ];
+    for (let i = 0; i < Math.min(10, matrix.length); i++) {
+      const rowClean = (matrix[i] || []).map((c) =>
+        String(c || '')
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '')
+      );
+      if (rowClean.some((cell) => headerKeywords.some((kw) => cell.includes(kw)))) {
+        headerRowIndex = i;
+        break;
+      }
+    }
+
+    const rawHeaders = (matrix[headerRowIndex] || []).map((h) =>
       String(h || '')
         .trim()
         .toLowerCase()
@@ -143,14 +190,18 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
 
     const findColIndex = (candidates: string[]): number => {
       for (const c of candidates) {
-        const idx = rawHeaders.findIndex((h) => h === c || h.includes(c));
+        const exactIdx = rawHeaders.findIndex((h) => h === c);
+        if (exactIdx >= 0) return exactIdx;
+      }
+      for (const c of candidates) {
+        const idx = rawHeaders.findIndex((h) => h.includes(c));
         if (idx >= 0) return idx;
       }
       return -1;
     };
 
-    const idxName = findColIndex(['namalengkap', 'namatamu', 'nama', 'fullname', 'name', 'pelanggan']);
-    const idxPhone = findColIndex(['notelepon', 'nowhatsapp', 'telepon', 'whatsapp', 'nohp', 'hp', 'phone', 'telp']);
+    const idxName = findColIndex(['namalengkap', 'namatamu', 'pelanggan', 'nama', 'fullname', 'name', 'guestname']);
+    const idxPhone = findColIndex(['notelepon', 'nowhatsapp', 'telepon', 'whatsapp', 'nohp', 'hp', 'phone', 'telp', 'wa']);
     const idxEmail = findColIndex(['email', 'surel']);
     const idxIdType = findColIndex(['jenisidentitas', 'tipeidentitas', 'identitytype']);
     const idxIdNum = findColIndex(['noidentitas', 'nik', 'ktp', 'paspor', 'identitynumber']);
@@ -158,17 +209,17 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
     const idxBirthPlace = findColIndex(['tempatlahir', 'birthplace', 'kotalahir']);
     const idxBirthDate = findColIndex(['tanggallahir', 'tgllahir', 'birthdate', 'dob']);
     const idxCit = findColIndex(['kewarganegaraan', 'citizenship', 'wniwna', 'nationality']);
-    const idxCity = findColIndex(['kotakabupaten', 'kota', 'kabupaten', 'city', 'daerah', 'asal']);
+    const idxCity = findColIndex(['kotaasal', 'kotakabupaten', 'kota', 'kabupaten', 'city', 'daerah', 'asal']);
     const idxAddr = findColIndex(['alamat', 'address']);
     const idxNotes = findColIndex(['catatan', 'notes', 'keterangan']);
 
     const rows = [];
-    for (let r = 1; r < matrix.length; r++) {
+    for (let r = headerRowIndex + 1; r < matrix.length; r++) {
       const line = matrix[r];
       if (!line || line.every((cell) => !String(cell || '').trim())) continue;
       const getVal = (colIdx: number) => (colIdx >= 0 && colIdx < line.length ? String(line[colIdx] || '').trim() : '');
       const fullName = idxName >= 0 ? getVal(idxName) : String(line[0] || '').trim();
-      if (!fullName) continue;
+      if (!fullName || fullName.toLowerCase() === 'nama' || fullName.toLowerCase() === 'nama lengkap') continue;
 
       rows.push({
         row_number: r + 1,
@@ -179,7 +230,7 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
         identity_number: getVal(idxIdNum) || null,
         gender: getVal(idxGender) || null,
         birth_place: getVal(idxBirthPlace).toUpperCase() || null,
-        birth_date: getVal(idxBirthDate) || null,
+        birth_date: normalizeExcelDateString(getVal(idxBirthDate)),
         citizenship: (getVal(idxCit) || 'WNI').toUpperCase(),
         city: getVal(idxCity).toUpperCase() || null,
         address: getVal(idxAddr).toUpperCase() || null,
@@ -187,6 +238,24 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
       });
     }
     return rows;
+  };
+
+  const safeParseJsonResponse = async (res: Response, fallbackMsg: string) => {
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error(
+        res.status === 413
+          ? 'Ukuran data terlalu besar untuk dikirim sekaligus.'
+          : `${fallbackMsg} (HTTP ${res.status})`
+      );
+    }
+    if (!res.ok) {
+      throw new Error(json?.message || `${fallbackMsg} (HTTP ${res.status})`);
+    }
+    return json;
   };
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -205,20 +274,26 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
         throw new Error('Tidak ditemukan baris data pelanggan yang valid pada file tersebut.');
       }
 
-      const res = await authenticatedFetch('/api/guests/bulk-import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: propertyId,
-          mode: 'preview',
-          rows: extractedRows,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json?.message || 'Gagal memindai data import pelanggan.');
+      // Send in chunks of 400 rows if file is very large so payload is always fast and lightweight
+      const CHUNK_SIZE = 400;
+      const allPreviewItems: PreviewRowItem[] = [];
+      for (let i = 0; i < extractedRows.length; i += CHUNK_SIZE) {
+        const chunk = extractedRows.slice(i, i + CHUNK_SIZE);
+        const res = await authenticatedFetch('/api/guests/bulk-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            mode: 'preview',
+            rows: chunk,
+          }),
+        });
+        const json = await safeParseJsonResponse(res, 'Gagal memindai data import pelanggan');
+        if (Array.isArray(json?.data?.items)) {
+          allPreviewItems.push(...json.data.items);
+        }
       }
-      setPreviewItems(json?.data?.items || []);
+      setPreviewItems(allPreviewItems);
     } catch (err: any) {
       setError(err?.message || 'Gagal membaca file Excel/CSV.');
       setPreviewItems([]);
@@ -253,20 +328,36 @@ export const GuestImportModal: React.FC<GuestImportModalProps> = ({
         target_guest_id: it.matched_guest?.id ?? null,
       }));
 
-      const res = await authenticatedFetch('/api/guests/bulk-import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: propertyId,
-          mode: 'commit',
-          rows: payloadRows,
-        }),
-      });
-      const json = await res.json();
-      if (!res.ok) {
-        throw new Error(json?.message || 'Gagal menyimpan hasil import pelanggan.');
+      const CHUNK_SIZE = 300;
+      let totalCreated = 0;
+      let totalMerged = 0;
+      let totalSkipped = 0;
+      let totalErrors = 0;
+
+      for (let i = 0; i < payloadRows.length; i += CHUNK_SIZE) {
+        const chunk = payloadRows.slice(i, i + CHUNK_SIZE);
+        const res = await authenticatedFetch('/api/guests/bulk-import', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            mode: 'commit',
+            rows: chunk,
+          }),
+        });
+        const json = await safeParseJsonResponse(res, 'Gagal menyimpan hasil import pelanggan');
+        totalCreated += Number(json?.data?.created_count || 0);
+        totalMerged += Number(json?.data?.merged_count || 0);
+        totalSkipped += Number(json?.data?.skipped_count || 0);
+        totalErrors += Number(json?.data?.error_count || 0);
       }
-      setCommitSummary(json?.data || null);
+
+      setCommitSummary({
+        created_count: totalCreated,
+        merged_count: totalMerged,
+        skipped_count: totalSkipped,
+        error_count: totalErrors,
+      });
       onImported();
     } catch (err: any) {
       setError(err?.message || 'Gagal mengeksekusi import pelanggan.');

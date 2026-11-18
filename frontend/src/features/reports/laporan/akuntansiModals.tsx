@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import { Camera, Image as ImageIcon, Trash2, Upload } from 'lucide-react';
 import { authenticatedFetch } from '../../../lib/authenticatedFetch';
 import { IconX } from './LaporanIcons';
 import { formatIdr } from './laporanUi';
@@ -7,7 +8,57 @@ import type {
   AccountingReceivableItem,
   BankListItem,
   CoaAccountItem,
+  FixedAssetItem,
 } from './laporanTypes';
+
+function formatRibuanInput(val: string | number): string {
+  const digits = String(val ?? '').replace(/\D/g, '');
+  if (!digits) return '';
+  return Number(digits).toLocaleString('id-ID');
+}
+
+function parseRibuanInput(val: string): number {
+  const digits = String(val ?? '').replace(/\D/g, '');
+  return digits ? Number(digits) : 0;
+}
+
+async function compressImageBlobToDataUrl(blob: Blob, maxDim = 720, quality = 0.78): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new window.Image();
+      img.onload = () => {
+        let w = img.width;
+        let h = img.height;
+        if (w > maxDim || h > maxDim) {
+          if (w >= h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.max(1, w);
+        canvas.height = Math.max(1, h);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(String(reader.result || ''));
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => reject(new Error('Gagal memproses file gambar'));
+      img.src = String(reader.result || '');
+    };
+    reader.onerror = () => reject(new Error('Gagal membaca file gambar'));
+    reader.readAsDataURL(blob);
+  });
+}
 
 export interface CoaModalProps {
   propertyId: number;
@@ -438,58 +489,175 @@ export const InvestorTransferModal: React.FC<InvestorTransferModalProps> = ({
 };
 
 // ============================================================================
-// ADD ASSET MODAL + KELOLA KATEGORI (WITH SLIDERS ICON) + LOKASI PENYIMPANAN
+// ADD / EDIT ASSET MODAL + FOTO (UPLOAD & KAMERA) + MEREK & NO SERI
 // ============================================================================
 
 export interface AddAssetModalProps {
   propertyId: number;
   defaultDate: string;
+  initialAsset?: FixedAssetItem | null;
   categories?: Array<{ id: number; category_name: string; is_system: boolean }>;
   onClose: () => void;
   onSaved: () => void;
 }
 
 const DEFAULT_CATEGORIES = [
-  'Peralatan',
-  'Elektronik',
-  'Furniture & Interior',
-  'Kendaraan',
-  'Bangunan & Renovasi',
+  'PERALATAN',
+  'ELEKTRONIK',
+  'FURNITURE & INTERIOR',
+  'KENDARAAN',
+  'BANGUNAN & RENOVASI',
 ];
 
 const DEFAULT_STORAGE_LOCATIONS = [
-  'Lobby & Resepsionis',
-  'Kantor Front Office',
-  'Gudang Housekeeping',
-  'Dapur / Restoran',
-  'Kamar Tamu',
-  'Ruang Server / Back Office',
-  'Area Parkir / Outdoor',
+  'LOBBY & RESEPSIONIS',
+  'KANTOR FRONT OFFICE',
+  'GUDANG HOUSEKEEPING',
+  'DAPUR / RESTORAN',
+  'KAMAR TAMU',
+  'RUANG SERVER / BACK OFFICE',
+  'AREA PARKIR / OUTDOOR',
 ];
 
 export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   propertyId,
   defaultDate,
+  initialAsset,
   categories,
   onClose,
   onSaved,
 }) => {
+  const isEdit = Boolean(initialAsset && initialAsset.id);
   const categoryList =
     categories && categories.length > 0
       ? categories
       : DEFAULT_CATEGORIES.map((c, idx) => ({ id: -(idx + 1), category_name: c, is_system: true }));
 
-  const [assetCode, setAssetCode] = useState('');
-  const [assetName, setAssetName] = useState('');
-  const [category, setCategory] = useState(categoryList[0]?.category_name || 'Peralatan');
-  const [storageLocation, setStorageLocation] = useState('');
-  const [purchaseDate, setPurchaseDate] = useState(defaultDate);
-  const [purchasePrice, setPurchasePrice] = useState('');
-  const [currentValue, setCurrentValue] = useState('');
-  const [depreciationRate, setDepreciationRate] = useState('0');
-  const [notes, setNotes] = useState('');
+  const [assetCode, setAssetCode] = useState(initialAsset?.asset_code || '');
+  const [assetName, setAssetName] = useState(initialAsset?.asset_name || '');
+  const [brand, setBrand] = useState(
+    initialAsset?.brand && initialAsset.brand !== '-' ? initialAsset.brand : ''
+  );
+  const [serialNumber, setSerialNumber] = useState(
+    initialAsset?.serial_number && initialAsset.serial_number !== '-'
+      ? initialAsset.serial_number
+      : ''
+  );
+  const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(
+    initialAsset?.photo_data_url || null
+  );
+  const [category, setCategory] = useState(
+    initialAsset?.category || categoryList[0]?.category_name || 'PERALATAN'
+  );
+  const [storageLocation, setStorageLocation] = useState(
+    initialAsset?.storage_location && initialAsset.storage_location !== '-'
+      ? initialAsset.storage_location
+      : ''
+  );
+  const [purchaseDate, setPurchaseDate] = useState(
+    initialAsset?.purchase_date ? String(initialAsset.purchase_date).slice(0, 10) : defaultDate
+  );
+  const [purchasePriceText, setPurchasePriceText] = useState(
+    initialAsset?.purchase_price ? formatRibuanInput(initialAsset.purchase_price) : ''
+  );
+  const [currentValueText, setCurrentValueText] = useState(
+    initialAsset?.current_value !== undefined && initialAsset?.current_value !== null
+      ? formatRibuanInput(initialAsset.current_value)
+      : ''
+  );
+  const [depreciationRate, setDepreciationRate] = useState(
+    String(initialAsset?.depreciation_rate ?? 0)
+  );
+  const [notes, setNotes] = useState(initialAsset?.notes || '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // Photo upload & live camera refs/states
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraFallbackInputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCameraOpen(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, []);
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      setError(null);
+      const dataUrl = await compressImageBlobToDataUrl(file);
+      setPhotoDataUrl(dataUrl);
+    } catch (err: any) {
+      setError(err.message || 'Gagal memuat foto aset');
+    }
+  };
+
+  const handleOpenCamera = async () => {
+    setError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      cameraFallbackInputRef.current?.click();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      }, 60);
+    } catch {
+      cameraFallbackInputRef.current?.click();
+    }
+  };
+
+  const handleCaptureCameraFrame = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const maxDim = 720;
+    let w = vw;
+    let h = vh;
+    if (w > maxDim || h > maxDim) {
+      if (w >= h) {
+        h = Math.round((h * maxDim) / w);
+        w = maxDim;
+      } else {
+        w = Math.round((w * maxDim) / h);
+        h = maxDim;
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, w);
+    canvas.height = Math.max(1, h);
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+      setPhotoDataUrl(dataUrl);
+    }
+    stopCameraStream();
+  };
 
   // Kelola Kategori state
   const [showManageCategory, setShowManageCategory] = useState(false);
@@ -497,7 +665,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   const [catBusy, setCatBusy] = useState(false);
 
   const handleAddCategory = async () => {
-    const trimmed = newCategoryName.trim();
+    const trimmed = newCategoryName.trim().toUpperCase();
     if (!trimmed) return;
     setCatBusy(true);
     setError(null);
@@ -538,7 +706,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
       }
       if (category === name) {
         const remaining = categoryList.filter((c) => c.category_name !== name);
-        setCategory(remaining[0]?.category_name || 'Peralatan');
+        setCategory(remaining[0]?.category_name || 'PERALATAN');
       }
       onSaved();
     } catch (err: any) {
@@ -557,33 +725,42 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
     setSaving(true);
     setError(null);
     try {
-      const priceNum = Number(purchasePrice || 0);
-      const curValNum = currentValue !== '' ? Number(currentValue) : priceNum;
-      const res = await authenticatedFetch('/api/reports/accounting/assets', {
-        method: 'POST',
+      const priceNum = parseRibuanInput(purchasePriceText);
+      const curValNum = currentValueText.trim() !== '' ? parseRibuanInput(currentValueText) : priceNum;
+      const endpoint = isEdit
+        ? `/api/reports/accounting/assets/${initialAsset!.id}`
+        : '/api/reports/accounting/assets';
+      const method = isEdit ? 'PUT' : 'POST';
+
+      const res = await authenticatedFetch(endpoint, {
+        method,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: propertyId,
-          asset_code: assetCode.trim() || null,
-          asset_name: assetName.trim(),
-          category,
-          storage_location: storageLocation.trim() || '-',
+          asset_code: assetCode.trim().toUpperCase() || null,
+          asset_name: assetName.trim().toUpperCase(),
+          brand: brand.trim().toUpperCase() || '-',
+          serial_number: serialNumber.trim().toUpperCase() || '-',
+          photo_data_url: photoDataUrl,
+          category: category.trim().toUpperCase(),
+          storage_location: storageLocation.trim().toUpperCase() || '-',
           purchase_date: purchaseDate,
           purchase_price: priceNum,
           current_value: curValNum,
           depreciation_rate: Number(depreciationRate || 0),
           status: 'ACTIVE',
-          notes: notes.trim() || null,
+          notes: notes.trim().toUpperCase() || null,
         }),
       });
       const json = await res.json();
       if (!res.ok || json.status === 'ERROR') {
-        throw new Error(json.message || 'Gagal menambah aset');
+        throw new Error(json.message || 'Gagal menyimpan aset');
       }
+      stopCameraStream();
       onSaved();
       onClose();
     } catch (err: any) {
-      setError(err.message || 'Gagal menambah aset');
+      setError(err.message || 'Gagal menyimpan aset');
     } finally {
       setSaving(false);
     }
@@ -593,8 +770,15 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
       <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden max-h-[92vh] flex flex-col">
         <div className="flex items-center justify-between px-6 py-4 bg-[#123524] text-white shrink-0">
-          <h3 className="text-base font-bold">Tambah Aset</h3>
-          <button onClick={onClose} className="text-white/75 hover:text-white">
+          <h3 className="text-base font-bold">{isEdit ? 'Edit Aset Tetap' : 'Tambah Aset'}</h3>
+          <button
+            type="button"
+            onClick={() => {
+              stopCameraStream();
+              onClose();
+            }}
+            className="text-white/75 hover:text-white cursor-pointer"
+          >
             <IconX className="w-5 h-5" />
           </button>
         </div>
@@ -605,6 +789,109 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             </div>
           )}
 
+          {/* 0. Foto / Gambar Aset (Ikon Kotak seperti Gambar 2 + Upload & Kamera) */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+              Foto / Gambar Aset
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+            <input
+              ref={cameraFallbackInputRef}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              onChange={handleFileChange}
+              className="hidden"
+            />
+
+            {cameraOpen ? (
+              <div className="p-3 rounded-xl border border-emerald-300 bg-slate-900 text-white space-y-2.5">
+                <video
+                  ref={videoRef}
+                  autoPlay
+                  playsInline
+                  muted
+                  className="w-full max-h-56 object-contain rounded-lg bg-black"
+                />
+                <div className="flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={stopCameraStream}
+                    className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-semibold cursor-pointer"
+                  >
+                    Batal Kamera
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCaptureCameraFrame}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer"
+                  >
+                    <Camera className="w-3.5 h-3.5" />
+                    Ambil Foto
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex items-center gap-3.5 p-3 rounded-xl border border-slate-200 bg-white">
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  title="Klik untuk pilih foto aset"
+                  className="w-16 h-16 rounded-2xl border-2 border-dashed border-slate-300 hover:border-emerald-700 bg-slate-50/70 flex items-center justify-center overflow-hidden shrink-0 transition cursor-pointer group"
+                >
+                  {photoDataUrl ? (
+                    <img
+                      src={photoDataUrl}
+                      alt="Foto Aset"
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <ImageIcon className="w-7 h-7 text-slate-400 group-hover:text-emerald-800 transition" />
+                  )}
+                </button>
+                <div className="flex-1 min-w-0 space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold transition cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-emerald-800" />
+                      Upload Foto
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleOpenCamera}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-800/30 bg-emerald-50/70 hover:bg-emerald-100 text-[#123524] text-xs font-bold transition cursor-pointer"
+                    >
+                      <Camera className="w-3.5 h-3.5 text-emerald-800" />
+                      Buka Kamera
+                    </button>
+                    {photoDataUrl && (
+                      <button
+                        type="button"
+                        onClick={() => setPhotoDataUrl(null)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-semibold transition cursor-pointer"
+                        title="Hapus Foto"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-400">
+                    Bisa unggah file gambar (JPG/PNG) atau ambil foto langsung dari kamera perangkat.
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+
           {/* 1. Kode Aset & Tanggal Beli */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
@@ -612,9 +899,9 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               <input
                 type="text"
                 value={assetCode}
-                onChange={(e) => setAssetCode(e.target.value)}
+                onChange={(e) => setAssetCode(e.target.value.toUpperCase())}
                 placeholder="Contoh: AST-001 (kosongkan = otomatis)"
-                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
               />
             </div>
             <div>
@@ -643,7 +930,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                   </option>
                 ))}
               </select>
-              {/* Ikon Kelola Kategori (Gambar 2 — Sliders Horizontal button) */}
+              {/* Ikon Kelola Kategori (Sliders Horizontal button) */}
               <button
                 type="button"
                 onClick={() => setShowManageCategory((v) => !v)}
@@ -675,7 +962,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             </div>
           </div>
 
-          {/* Panel Kelola Kategori Aset (Semua kategori punya ikon x untuk hapus) */}
+          {/* Panel Kelola Kategori Aset */}
           {showManageCategory && (
             <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-2.5">
               <div className="flex items-center justify-between">
@@ -692,9 +979,9 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                 <input
                   type="text"
                   value={newCategoryName}
-                  onChange={(e) => setNewCategoryName(e.target.value)}
-                  placeholder="Nama kategori baru (misal: Linen & Bedding)..."
-                  className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800"
+                  onChange={(e) => setNewCategoryName(e.target.value.toUpperCase())}
+                  placeholder="Nama kategori baru (misal: LINEN & BEDDING)..."
+                  className="flex-1 px-3 py-1.5 text-xs rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
                 />
                 <button
                   type="button"
@@ -733,13 +1020,37 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             <input
               type="text"
               value={assetName}
-              onChange={(e) => setAssetName(e.target.value)}
-              placeholder="Contoh: AC Kamar, Kasur, TV, dll"
-              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+              onChange={(e) => setAssetName(e.target.value.toUpperCase())}
+              placeholder="Contoh: AC KAMAR, KASUR, TV, DLL"
+              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
             />
           </div>
 
-          {/* 4. Lokasi Penyimpanan */}
+          {/* 4. Merek & No. Seri */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Merek</label>
+              <input
+                type="text"
+                value={brand}
+                onChange={(e) => setBrand(e.target.value.toUpperCase())}
+                placeholder="Contoh: DAIKIN, SAMSUNG, KING KOIL..."
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">No. Seri</label>
+              <input
+                type="text"
+                value={serialNumber}
+                onChange={(e) => setSerialNumber(e.target.value.toUpperCase())}
+                placeholder="Contoh: SN-9928371..."
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
+              />
+            </div>
+          </div>
+
+          {/* 5. Lokasi Penyimpanan */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Lokasi Penyimpanan
@@ -748,9 +1059,9 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               type="text"
               list="oak-asset-storage-locations"
               value={storageLocation}
-              onChange={(e) => setStorageLocation(e.target.value)}
-              placeholder="Contoh: Kamar 101, Lobby, Gudang HK, Dapur..."
-              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+              onChange={(e) => setStorageLocation(e.target.value.toUpperCase())}
+              placeholder="Contoh: KAMAR 101, LOBBY, GUDANG HK, DAPUR..."
+              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
             />
             <datalist id="oak-asset-storage-locations">
               {DEFAULT_STORAGE_LOCATIONS.map((loc) => (
@@ -759,34 +1070,37 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             </datalist>
           </div>
 
-          {/* 5 & 6. Harga Beli & Nilai Saat Ini */}
+          {/* 6 & 7. Harga Beli & Nilai Saat Ini (Format Titik Ribuan 1.000 / 100.000) */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Harga Beli (Rp)</label>
               <input
-                type="number"
-                value={purchasePrice}
+                type="text"
+                inputMode="numeric"
+                value={purchasePriceText}
                 onChange={(e) => {
-                  setPurchasePrice(e.target.value);
-                  if (currentValue === '') setCurrentValue(e.target.value);
+                  const formatted = formatRibuanInput(e.target.value);
+                  setPurchasePriceText(formatted);
+                  if (currentValueText === '') setCurrentValueText(formatted);
                 }}
-                placeholder="0"
-                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+                placeholder="Contoh: 1.500.000"
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 font-semibold"
               />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Nilai Saat Ini (Rp)</label>
               <input
-                type="number"
-                value={currentValue}
-                onChange={(e) => setCurrentValue(e.target.value)}
+                type="text"
+                inputMode="numeric"
+                value={currentValueText}
+                onChange={(e) => setCurrentValueText(formatRibuanInput(e.target.value))}
                 placeholder="Kosongkan = harga beli"
-                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 font-semibold"
               />
             </div>
           </div>
 
-          {/* 7. Depresiasi */}
+          {/* 8. Depresiasi */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">Depresiasi (%/tahun)</label>
             <input
@@ -798,34 +1112,311 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             />
           </div>
 
-          {/* 8. Catatan */}
+          {/* 9. Catatan */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan</label>
             <textarea
               rows={2}
               value={notes}
-              onChange={(e) => setNotes(e.target.value)}
+              onChange={(e) => setNotes(e.target.value.toUpperCase())}
               placeholder="Catatan tambahan..."
-              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800 uppercase"
             />
           </div>
           <div className="pt-2 flex items-center justify-end gap-2">
             <button
               type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100"
+              onClick={() => {
+                stopCameraStream();
+                onClose();
+              }}
+              className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700 font-semibold hover:bg-slate-100 cursor-pointer"
             >
               Batal
             </button>
             <button
               type="submit"
               disabled={saving}
-              className="px-5 py-2 rounded-lg bg-[#123524] hover:bg-emerald-900 text-[#E6C786] font-bold shadow-xs disabled:opacity-50"
+              className="px-5 py-2 rounded-lg bg-[#123524] hover:bg-emerald-900 text-[#E6C786] font-bold shadow-xs disabled:opacity-50 cursor-pointer"
             >
-              {saving ? 'Menyimpan...' : 'Simpan'}
+              {saving ? 'Menyimpan...' : isEdit ? 'Simpan Perubahan' : 'Simpan'}
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// QUICK ASSET PHOTO UPLOAD / CAMERA MODAL (KLIK LANGSUNG DARI TABEL ASET)
+// ============================================================================
+
+export interface AssetPhotoQuickModalProps {
+  propertyId: number;
+  asset: FixedAssetItem;
+  onClose: () => void;
+  onSaved: () => void;
+}
+
+export const AssetPhotoQuickModal: React.FC<AssetPhotoQuickModalProps> = ({
+  propertyId,
+  asset,
+  onClose,
+  onSaved,
+}) => {
+  const [photoDataUrl, setPhotoDataUrl] = useState<string | null>(asset.photo_data_url || null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const cameraFallbackInputRef = useRef<HTMLInputElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const [cameraOpen, setCameraOpen] = useState(false);
+
+  const stopCameraStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop());
+      streamRef.current = null;
+    }
+    setCameraOpen(false);
+  };
+
+  useEffect(() => {
+    return () => {
+      stopCameraStream();
+    };
+  }, []);
+
+  const savePhotoToServer = async (nextDataUrl: string | null) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const res = await authenticatedFetch(`/api/reports/accounting/assets/${asset.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          photo_data_url: nextDataUrl,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal menyimpan foto aset');
+      }
+      setPhotoDataUrl(nextDataUrl);
+      stopCameraStream();
+      onSaved();
+      onClose();
+    } catch (err: any) {
+      setError(err.message || 'Gagal menyimpan foto aset');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    try {
+      setError(null);
+      const dataUrl = await compressImageBlobToDataUrl(file);
+      await savePhotoToServer(dataUrl);
+    } catch (err: any) {
+      setError(err.message || 'Gagal memproses foto');
+    }
+  };
+
+  const handleOpenCamera = async () => {
+    setError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      cameraFallbackInputRef.current?.click();
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' } },
+        audio: false,
+      });
+      streamRef.current = stream;
+      setCameraOpen(true);
+      setTimeout(() => {
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+      }, 60);
+    } catch {
+      cameraFallbackInputRef.current?.click();
+    }
+  };
+
+  const handleCaptureAndSave = async () => {
+    const video = videoRef.current;
+    if (!video) return;
+    const vw = video.videoWidth || 640;
+    const vh = video.videoHeight || 480;
+    const maxDim = 720;
+    let w = vw;
+    let h = vh;
+    if (w > maxDim || h > maxDim) {
+      if (w >= h) {
+        h = Math.round((h * maxDim) / w);
+        w = maxDim;
+      } else {
+        w = Math.round((w * maxDim) / h);
+        h = maxDim;
+      }
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, w);
+    canvas.height = Math.max(1, h);
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+      stopCameraStream();
+      await savePhotoToServer(dataUrl);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-xs p-4">
+      <div className="bg-[#FDFBF7] border border-emerald-900/15 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+        <div className="flex items-center justify-between px-6 py-4 bg-[#123524] text-white">
+          <div>
+            <h3 className="text-sm font-bold">Foto / Gambar Aset</h3>
+            <p className="text-[11px] text-[#E6C786] font-semibold">
+              {asset.asset_code || `AST-${String(asset.id).padStart(4, '0')}`} · {asset.asset_name}
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              stopCameraStream();
+              onClose();
+            }}
+            className="text-white/75 hover:text-white cursor-pointer"
+          >
+            <IconX className="w-5 h-5" />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4 text-sm">
+          {error && (
+            <div className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs font-medium">
+              {error}
+            </div>
+          )}
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+          <input
+            ref={cameraFallbackInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            onChange={handleFileChange}
+            className="hidden"
+          />
+
+          {cameraOpen ? (
+            <div className="p-3 rounded-xl border border-emerald-300 bg-slate-900 text-white space-y-3">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full max-h-64 object-contain rounded-lg bg-black"
+              />
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={stopCameraStream}
+                  className="px-3.5 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-xs font-semibold cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={handleCaptureAndSave}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold cursor-pointer disabled:opacity-50"
+                >
+                  <Camera className="w-4 h-4" />
+                  {saving ? 'Menyimpan...' : 'Ambil & Simpan Foto'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-4">
+              <div
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full h-56 rounded-2xl border-2 border-dashed border-slate-300 hover:border-emerald-700 bg-white flex flex-col items-center justify-center overflow-hidden cursor-pointer transition group"
+              >
+                {photoDataUrl ? (
+                  <img
+                    src={photoDataUrl}
+                    alt={asset.asset_name}
+                    className="w-full h-full object-contain bg-slate-950/5"
+                  />
+                ) : (
+                  <div className="text-center space-y-2 p-4">
+                    <div className="w-14 h-14 rounded-2xl border border-slate-200 bg-slate-50 flex items-center justify-center mx-auto group-hover:border-emerald-600 transition">
+                      <ImageIcon className="w-7 h-7 text-slate-400 group-hover:text-emerald-800" />
+                    </div>
+                    <div className="text-xs font-bold text-slate-700">
+                      Belum ada foto untuk aset ini
+                    </div>
+                    <div className="text-[11px] text-slate-400">
+                      Klik di sini untuk upload gambar atau gunakan tombol kamera di bawah
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 text-xs font-bold shadow-2xs transition cursor-pointer disabled:opacity-50"
+                >
+                  <Upload className="w-4 h-4 text-emerald-800" />
+                  {photoDataUrl ? 'Ganti Foto (Upload)' : 'Upload Foto'}
+                </button>
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={handleOpenCamera}
+                  className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-2xs transition cursor-pointer disabled:opacity-50"
+                >
+                  <Camera className="w-4 h-4" />
+                  Buka Kamera
+                </button>
+                {photoDataUrl && (
+                  <button
+                    type="button"
+                    disabled={saving}
+                    onClick={() => savePhotoToServer(null)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 text-rose-700 text-xs font-bold transition cursor-pointer disabled:opacity-50"
+                    title="Hapus Foto Aset"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                    Hapus Foto
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
