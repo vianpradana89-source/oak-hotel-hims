@@ -7,6 +7,7 @@ import {
   Pencil,
   Search,
   SlidersHorizontal,
+  Upload,
   UserPlus,
   X,
 } from 'lucide-react';
@@ -35,6 +36,7 @@ interface GuestDatabaseTableProps {
   onSelectGuest: (guestId: number) => void;
   onEditGuest: (guest: Guest) => void;
   onCreateGuest: () => void;
+  onOpenImportModal?: () => void;
   onMerged?: () => void;
   onOpenWaTemplateModal?: (target: 'birthday' | 'followup' | 'database') => void;
 }
@@ -79,6 +81,7 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
   onSelectGuest,
   onEditGuest,
   onCreateGuest,
+  onOpenImportModal,
   onMerged,
   onOpenWaTemplateModal,
 }) => {
@@ -291,6 +294,17 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
               className="px-2.5 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-600 text-xs font-medium rounded-lg transition-colors cursor-pointer"
             >
               Reset Pilihan
+            </button>
+          )}
+          {onOpenImportModal && (
+            <button
+              type="button"
+              onClick={onOpenImportModal}
+              className="px-3 py-1.5 bg-[#FAF8F3] hover:bg-[#F1EDE2] text-[#1E392A] text-xs font-semibold rounded-lg transition-colors border border-[#E6DFC8] flex items-center gap-1.5 cursor-pointer"
+              title="Import Data Pelanggan dari Excel (.xlsx/.csv) & Deteksi Duplikat"
+            >
+              <Upload className="w-3.5 h-3.5" />
+              <span>Import XLSX</span>
             </button>
           )}
           <button

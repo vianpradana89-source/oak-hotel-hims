@@ -270,6 +270,22 @@ function triggerXlsxDownload(bytes: Uint8Array, filename: string): void {
   setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
+export function triggerBrowserDownload(
+  filename: string,
+  bytes: Uint8Array,
+  mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+): void {
+  const blob = new Blob([bytes as unknown as BlobPart], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
 // ── 4 Template Generators ────────────────────────────────────────────────────
 
 export function downloadProductTemplateXlsx(templateType: ProductTypeCode): void {
@@ -762,6 +778,52 @@ function parseFlexibleNumber(raw: string): number {
   const normalized = cleaned.replace(/,/g, '.');
   const num = Number(normalized);
   return Number.isFinite(num) ? Math.max(0, num) : 0;
+}
+
+export async function parseSpreadsheetBuffer(
+  buffer: ArrayBuffer,
+  fileName = ''
+): Promise<string[][]> {
+  const lowerName = (fileName || '').toLowerCase();
+  const bytes = new Uint8Array(buffer);
+  const isZip =
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04;
+
+  if (!isZip || lowerName.endsWith('.csv')) {
+    const text = new TextDecoder('utf-8').decode(bytes);
+    const lines = text.split(/\r?\n/).filter((l) => l.trim().length > 0);
+    if (lines.length === 0) return [];
+    const firstLine = lines[0];
+    const sep =
+      (firstLine.match(/;/g) || []).length > (firstLine.match(/,/g) || []).length
+        ? ';'
+        : ',';
+    return lines.map((line) =>
+      line.split(sep).map((cell) => cell.replace(/^["']|["']$/g, '').trim())
+    );
+  }
+
+  const entries = await extractZipTextEntries(buffer);
+  const sharedStringsXml = entries.get('xl/sharedStrings.xml');
+  const sharedStrings = sharedStringsXml ? parseSharedStringsXml(sharedStringsXml) : [];
+
+  let sheetXml = entries.get('xl/worksheets/sheet1.xml');
+  if (!sheetXml) {
+    for (const [key, val] of entries.entries()) {
+      if (key.startsWith('xl/worksheets/sheet')) {
+        sheetXml = val;
+        break;
+      }
+    }
+  }
+  if (!sheetXml) {
+    throw new Error('Lembar kerja (worksheet) tidak ditemukan di dalam file Excel.');
+  }
+  return parseWorksheetXmlToGrid(sheetXml, sharedStrings);
 }
 
 export async function parseProductsFromXlsxFile(

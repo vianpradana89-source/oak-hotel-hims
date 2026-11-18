@@ -232,46 +232,69 @@ export default function QuotationPrint({
           <div style={{ padding: '16px', textAlign: 'center', color: '#888', fontStyle: 'italic', fontSize: '11px', background: '#faf9f6', borderRadius: '4px', border: '1px dashed #e4dfd7' }}>
             Belum ada item penawaran.
           </div>
-        ) : (
-          <table className="oak-doc-fin-table">
-            <thead>
-              <tr>
-                <th style={{ width: '36px', textAlign: 'center' }}>No.</th>
-                <th>Deskripsi</th>
-                <th className="right" style={{ width: '50px' }}>Qty</th>
-                <th style={{ width: '60px' }}>Satuan</th>
-                <th className="right" style={{ width: '110px' }}>Harga Satuan</th>
-                <th className="right" style={{ width: '110px' }}>Jumlah</th>
-              </tr>
-            </thead>
-            <tbody>
-              {printableItems.map(({ item, originalIndex }, printableIndex) => {
-                const amount = totals.itemTotals[originalIndex] ?? 0;
-                return (
-                  <tr key={item.id || originalIndex}>
-                    <td style={{ textAlign: 'center', color: '#888' }}>{printableIndex + 1}</td>
-                    <td>
-                      <div style={{ fontWeight: 500 }}>{item.description}</div>
-                      {item.note?.trim() ? (
-                        <div style={{ fontSize: '10px', color: '#666', marginTop: '2px', whiteSpace: 'pre-line', wordBreak: 'break-word' }}>
-                          {item.note}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className="right">{item.qty}</td>
-                    <td>{item.unit?.trim() || ''}</td>
-                    <td className="right">
-                      {formatHotelCurrency(item.unitPrice, currencyCode)}
-                    </td>
-                    <td className="right" style={{ fontWeight: 600 }}>
-                      {formatHotelCurrency(amount, currencyCode)}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        )}
+        ) : (() => {
+          const hasAnyItemDiscount = printableItems.some(
+            ({ originalIndex }) => (totals.itemDiscounts?.[originalIndex] ?? 0) > 0
+          );
+          return (
+            <table className="oak-doc-fin-table">
+              <thead>
+                <tr>
+                  <th style={{ width: '32px', textAlign: 'center' }}>No.</th>
+                  <th>Deskripsi</th>
+                  <th className="right" style={{ width: '46px' }}>Qty</th>
+                  <th style={{ width: '56px' }}>Satuan</th>
+                  <th className="right" style={{ width: '105px' }}>Harga Satuan</th>
+                  {hasAnyItemDiscount && (
+                    <th className="right" style={{ width: '95px' }}>Diskon</th>
+                  )}
+                  <th className="right" style={{ width: '110px' }}>Jumlah</th>
+                </tr>
+              </thead>
+              <tbody>
+                {printableItems.map(({ item, originalIndex }, printableIndex) => {
+                  const amount = totals.itemTotals[originalIndex] ?? 0;
+                  const itemDiscAmt = totals.itemDiscounts?.[originalIndex] ?? 0;
+                  return (
+                    <tr key={item.id || originalIndex}>
+                      <td style={{ textAlign: 'center', color: '#888' }}>{printableIndex + 1}</td>
+                      <td>
+                        <div style={{ fontWeight: 500 }}>{item.description}</div>
+                        {item.note?.trim() ? (
+                          <div style={{ fontSize: '10px', color: '#666', marginTop: '2px', whiteSpace: 'pre-line', wordBreak: 'break-word' }}>
+                            {item.note}
+                          </div>
+                        ) : null}
+                      </td>
+                      <td className="right">{item.qty}</td>
+                      <td>{item.unit?.trim() || ''}</td>
+                      <td className="right">
+                        {formatHotelCurrency(item.unitPrice, currencyCode)}
+                      </td>
+                      {hasAnyItemDiscount && (
+                        <td className="right" style={{ color: itemDiscAmt > 0 ? '#b91c1c' : '#888' }}>
+                          {itemDiscAmt > 0 ? (
+                            <span>
+                              -{formatHotelCurrency(itemDiscAmt, currencyCode)}
+                              {item.discountType === 'percent' && Number(item.discountValue) > 0
+                                ? ` (${item.discountValue}%)`
+                                : ''}
+                            </span>
+                          ) : (
+                            '—'
+                          )}
+                        </td>
+                      )}
+                      <td className="right" style={{ fontWeight: 600 }}>
+                        {formatHotelCurrency(amount, currencyCode)}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          );
+        })()}
       </div>
 
       {/* 5. Financial Summary */}

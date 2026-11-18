@@ -7,8 +7,23 @@ import type {
 import {
   createQuotationDraftItem,
   calculateQuotationDraftTotals,
+  calculateQuotationItemDiscount,
 } from './quotationDraft';
 import { formatHotelCurrency } from './GuestDocumentContent';
+
+function formatThousandDots(val: number | string | undefined | null): string {
+  if (val === undefined || val === null || val === '') return '';
+  const digits = String(val).replace(/\D/g, '');
+  if (!digits) return '0';
+  return Number(digits).toLocaleString('id-ID');
+}
+
+function parseThousandDots(raw: string): number {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return 0;
+  const num = Number(digits);
+  return Number.isFinite(num) ? num : 0;
+}
 
 export interface QuotationEditorProps {
   draft: QuotationDraft;
@@ -307,9 +322,11 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
          ) : (
            <div className="space-y-2.5">
              {draft.items.map((item, index) => {
-               const itemTotal = Math.round(
-                 Math.max(0, Number(item.qty) || 0) * Math.max(0, Number(item.unitPrice) || 0)
-               );
+               const { grossTotal, discountAmount: itemDiscAmt, netTotal: itemTotal } =
+                 calculateQuotationItemDiscount(item);
+               const itemDiscType: QuotationAdjustmentType =
+                 item.discountType === 'percent' ? 'percent' : 'amount';
+               const itemDiscVal = Number(item.discountValue || 0);
                return (
                  <div
                    key={item.id}
@@ -321,14 +338,14 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                      <button
                        type="button"
                        onClick={() => removeItem(index)}
-                       className="text-rose-600 hover:text-rose-800 font-medium hover:underline inline-flex items-center gap-1"
+                       className="text-rose-600 hover:text-rose-800 font-medium hover:underline inline-flex items-center gap-1 cursor-pointer"
                      >
                        Hapus
                      </button>
                    </div>
 
                    {/* Main Fields Row: Deskripsi, Qty, Satuan, Harga Satuan */}
-                   <div className="grid grid-cols-12 sm:grid-cols-[minmax(0,1fr)_68px_90px_155px] gap-2">
+                   <div className="grid grid-cols-12 sm:grid-cols-[minmax(0,1fr)_64px_84px_150px] gap-2">
                      {/* 1. Deskripsi Item */}
                      <div className="col-span-12 sm:col-auto min-w-0">
                        <input
@@ -376,16 +393,14 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                            Rp
                          </span>
                          <input
-                           type="number"
-                           min="0"
-                           step="1000"
+                           type="text"
+                           inputMode="numeric"
                            className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
                            placeholder="Harga"
-                           value={item.unitPrice}
+                           value={formatThousandDots(item.unitPrice)}
                            onChange={(e) => {
-                             const val = e.target.value;
                              updateItem(index, {
-                               unitPrice: val === '' ? 0 : Math.max(0, Number(val)),
+                               unitPrice: parseThousandDots(e.target.value),
                              });
                            }}
                          />
@@ -393,20 +408,84 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                      </div>
                    </div>
 
-                   {/* Note Row: Full Width */}
-                   <div>
-                     <input
-                       type="text"
-                       className="w-full min-w-0 rounded border border-stone-200 px-2.5 py-1.5 text-xs text-stone-600 placeholder-stone-400 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
-                       placeholder="Catatan baris item (opsional)..."
-                       value={item.note || ''}
-                       onChange={(e) => updateItem(index, { note: e.target.value })}
-                     />
+                   {/* Second Row: Diskon Item + Catatan Baris Item */}
+                   <div className="grid grid-cols-1 sm:grid-cols-12 gap-2 items-center">
+                     <div className="sm:col-span-5 flex items-center gap-1.5">
+                       <span className="text-[11px] font-medium text-stone-500 whitespace-nowrap">
+                         Diskon Item:
+                       </span>
+                       <select
+                         className="rounded border border-stone-300 px-1.5 py-1 text-xs text-stone-700 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600"
+                         value={itemDiscType}
+                         onChange={(e) => {
+                           const nextType = e.target.value as QuotationAdjustmentType;
+                           updateItem(index, {
+                             discountType: nextType,
+                             discountValue:
+                               nextType === 'percent' && itemDiscVal > 100
+                                 ? Math.min(100, itemDiscVal)
+                                 : itemDiscVal,
+                           });
+                         }}
+                       >
+                         <option value="amount">Rp</option>
+                         <option value="percent">%</option>
+                       </select>
+                       <div className="relative flex-1 flex items-stretch rounded border border-stone-300 bg-white focus-within:ring-1 focus-within:ring-emerald-600 overflow-hidden">
+                         {itemDiscType === 'amount' ? (
+                           <input
+                             type="text"
+                             inputMode="numeric"
+                             className="w-full min-w-0 px-2 py-1 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                             placeholder="0"
+                             value={formatThousandDots(itemDiscVal)}
+                             onChange={(e) =>
+                               updateItem(index, {
+                                 discountValue: parseThousandDots(e.target.value),
+                               })
+                             }
+                           />
+                         ) : (
+                           <input
+                             type="number"
+                             min="0"
+                             max="100"
+                             step="0.5"
+                             className="w-full min-w-0 px-2 py-1 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                             placeholder="0"
+                             value={itemDiscVal}
+                             onChange={(e) => {
+                               const num = e.target.value === '' ? 0 : Number(e.target.value);
+                               updateItem(index, {
+                                 discountValue: Math.min(100, Math.max(0, num)),
+                               });
+                             }}
+                           />
+                         )}
+                       </div>
+                     </div>
+
+                     <div className="sm:col-span-7">
+                       <input
+                         type="text"
+                         className="w-full min-w-0 rounded border border-stone-200 px-2.5 py-1 text-xs text-stone-600 placeholder-stone-400 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-600 focus:border-emerald-600"
+                         placeholder="Catatan baris item (opsional)..."
+                         value={item.note || ''}
+                         onChange={(e) => updateItem(index, { note: e.target.value })}
+                       />
+                     </div>
                    </div>
 
                    {/* Subtotal Row */}
-                   <div className="flex items-center justify-between pt-1 border-t border-stone-200/60 text-xs">
-                     <span className="text-[11px] text-stone-500">Subtotal Item:</span>
+                   <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-stone-200/60 text-xs">
+                     <div className="flex items-center gap-2 text-[11px] text-stone-500">
+                       <span>Subtotal Item:</span>
+                       {itemDiscAmt > 0 && (
+                         <span className="text-rose-600 font-medium">
+                           (Harga {formatHotelCurrency(grossTotal)} - Diskon {formatHotelCurrency(itemDiscAmt)})
+                         </span>
+                       )}
+                     </div>
                      <span className="font-semibold text-stone-800 font-mono">
                        {formatHotelCurrency(itemTotal)}
                      </span>
@@ -463,23 +542,29 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                    Rp
                  </span>
                )}
-               <input
-                 type="number"
-                 min="0"
-                 max={draft.discountType === 'percent' ? 100 : undefined}
-                 step={draft.discountType === 'percent' ? '0.1' : '1000'}
-                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                 value={draft.discountValue}
-                 onChange={(e) => {
-                   const val = e.target.value;
-                   const num = val === '' ? 0 : Number(val);
-                   const clamped =
-                     draft.discountType === 'percent'
-                       ? Math.min(100, Math.max(0, num))
-                       : Math.max(0, num);
-                   updateDraftField('discountValue', clamped);
-                 }}
-               />
+               {draft.discountType === 'amount' ? (
+                 <input
+                   type="text"
+                   inputMode="numeric"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={formatThousandDots(draft.discountValue)}
+                   onChange={(e) => updateDraftField('discountValue', parseThousandDots(e.target.value))}
+                 />
+               ) : (
+                 <input
+                   type="number"
+                   min="0"
+                   max={100}
+                   step="0.1"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={draft.discountValue}
+                   onChange={(e) => {
+                     const val = e.target.value;
+                     const num = val === '' ? 0 : Number(val);
+                     updateDraftField('discountValue', Math.min(100, Math.max(0, num)));
+                   }}
+                 />
+               )}
                {draft.discountType === 'percent' && (
                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
                    %
@@ -519,23 +604,29 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                    Rp
                  </span>
                )}
-               <input
-                 type="number"
-                 min="0"
-                 max={draft.serviceType === 'percent' ? 100 : undefined}
-                 step={draft.serviceType === 'percent' ? '0.1' : '1000'}
-                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                 value={draft.serviceValue}
-                 onChange={(e) => {
-                   const val = e.target.value;
-                   const num = val === '' ? 0 : Number(val);
-                   const clamped =
-                     draft.serviceType === 'percent'
-                       ? Math.min(100, Math.max(0, num))
-                       : Math.max(0, num);
-                   updateDraftField('serviceValue', clamped);
-                 }}
-               />
+               {draft.serviceType === 'amount' ? (
+                 <input
+                   type="text"
+                   inputMode="numeric"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={formatThousandDots(draft.serviceValue)}
+                   onChange={(e) => updateDraftField('serviceValue', parseThousandDots(e.target.value))}
+                 />
+               ) : (
+                 <input
+                   type="number"
+                   min="0"
+                   max={100}
+                   step="0.1"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={draft.serviceValue}
+                   onChange={(e) => {
+                     const val = e.target.value;
+                     const num = val === '' ? 0 : Number(val);
+                     updateDraftField('serviceValue', Math.min(100, Math.max(0, num)));
+                   }}
+                 />
+               )}
                {draft.serviceType === 'percent' && (
                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
                    %
@@ -575,23 +666,29 @@ export default function QuotationEditor({ draft, onChange }: QuotationEditorProp
                    Rp
                  </span>
                )}
-               <input
-                 type="number"
-                 min="0"
-                 max={draft.taxType === 'percent' ? 100 : undefined}
-                 step={draft.taxType === 'percent' ? '0.1' : '1000'}
-                 className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none"
-                 value={draft.taxValue}
-                 onChange={(e) => {
-                   const val = e.target.value;
-                   const num = val === '' ? 0 : Number(val);
-                   const clamped =
-                     draft.taxType === 'percent'
-                       ? Math.min(100, Math.max(0, num))
-                       : Math.max(0, num);
-                   updateDraftField('taxValue', clamped);
-                 }}
-               />
+               {draft.taxType === 'amount' ? (
+                 <input
+                   type="text"
+                   inputMode="numeric"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={formatThousandDots(draft.taxValue)}
+                   onChange={(e) => updateDraftField('taxValue', parseThousandDots(e.target.value))}
+                 />
+               ) : (
+                 <input
+                   type="number"
+                   min="0"
+                   max={100}
+                   step="0.1"
+                   className="w-full min-w-0 px-2 py-1.5 text-xs text-stone-800 bg-transparent focus:outline-none font-mono"
+                   value={draft.taxValue}
+                   onChange={(e) => {
+                     const val = e.target.value;
+                     const num = val === '' ? 0 : Number(val);
+                     updateDraftField('taxValue', Math.min(100, Math.max(0, num)));
+                   }}
+                 />
+               )}
                {draft.taxType === 'percent' && (
                  <span className="inline-flex items-center px-2 text-xs font-medium text-stone-500 bg-stone-100 border-l border-stone-200 select-none">
                    %

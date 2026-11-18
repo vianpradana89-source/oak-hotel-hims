@@ -6976,5 +6976,70 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
           CHECK (tax_percent_snapshot >= 0 AND tax_percent_snapshot <= 100);
       END IF;
     END $$;
+
+    -- ═══ Normalize existing operational text fields to UPPERCASE (idempotent) ═══
+    DO $$ BEGIN
+      UPDATE guests
+         SET full_name = UPPER(full_name),
+             preferred_name = CASE WHEN preferred_name IS NOT NULL THEN UPPER(preferred_name) ELSE NULL END,
+             birth_place = CASE WHEN birth_place IS NOT NULL THEN UPPER(birth_place) ELSE NULL END,
+             city = CASE WHEN city IS NOT NULL THEN UPPER(city) ELSE NULL END,
+             province = CASE WHEN province IS NOT NULL THEN UPPER(province) ELSE NULL END,
+             country = CASE WHEN country IS NOT NULL THEN UPPER(country) ELSE NULL END,
+             address = CASE WHEN address IS NOT NULL THEN UPPER(address) ELSE NULL END,
+             religion = CASE WHEN religion IS NOT NULL THEN UPPER(religion) ELSE NULL END,
+             occupation = CASE WHEN occupation IS NOT NULL THEN UPPER(occupation) ELSE NULL END,
+             marital_status = CASE WHEN marital_status IS NOT NULL THEN UPPER(marital_status) ELSE NULL END,
+             citizenship = CASE WHEN citizenship IS NOT NULL THEN UPPER(citizenship) ELSE NULL END,
+             nationality = CASE WHEN nationality IS NOT NULL THEN UPPER(nationality) ELSE NULL END,
+             notes = CASE WHEN notes IS NOT NULL THEN UPPER(notes) ELSE NULL END
+       WHERE full_name IS DISTINCT FROM UPPER(full_name)
+          OR birth_place IS DISTINCT FROM UPPER(birth_place)
+          OR city IS DISTINCT FROM UPPER(city)
+          OR address IS DISTINCT FROM UPPER(address)
+          OR notes IS DISTINCT FROM UPPER(notes);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$ BEGIN
+      UPDATE reservations
+         SET guest_name = CASE WHEN guest_name IS NOT NULL THEN UPPER(guest_name) ELSE NULL END,
+             special_requests = CASE WHEN special_requests IS NOT NULL THEN UPPER(special_requests) ELSE NULL END
+       WHERE guest_name IS DISTINCT FROM UPPER(guest_name);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$ BEGIN
+      UPDATE bookings
+         SET booker_name = CASE WHEN booker_name IS NOT NULL THEN UPPER(booker_name) ELSE NULL END,
+             notes = CASE WHEN notes IS NOT NULL THEN UPPER(notes) ELSE NULL END
+       WHERE booker_name IS DISTINCT FROM UPPER(booker_name);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$ BEGIN
+      UPDATE pos_orders
+         SET guest_name = CASE WHEN guest_name IS NOT NULL THEN UPPER(guest_name) ELSE NULL END,
+             table_number = CASE WHEN table_number IS NOT NULL THEN UPPER(table_number) ELSE NULL END,
+             notes = CASE WHEN notes IS NOT NULL THEN UPPER(notes) ELSE NULL END,
+             discount_reason = CASE WHEN discount_reason IS NOT NULL THEN UPPER(discount_reason) ELSE NULL END
+       WHERE guest_name IS DISTINCT FROM UPPER(guest_name)
+          OR table_number IS DISTINCT FROM UPPER(table_number);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$ BEGIN
+      UPDATE pos_menu_items
+         SET name = UPPER(name)
+       WHERE name IS DISTINCT FROM UPPER(name);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
+
+    DO $$ BEGIN
+      UPDATE pos_menu_categories
+         SET name = UPPER(name)
+       WHERE name IS DISTINCT FROM UPPER(name);
+    EXCEPTION WHEN OTHERS THEN NULL;
+    END $$;
   `);
 }

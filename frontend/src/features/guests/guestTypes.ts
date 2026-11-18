@@ -148,6 +148,8 @@ export interface GuestCrmCityStat {
 }
 
 export interface GuestCrmDemographics {
+  selected_month?: string;
+  available_months?: string[];
   wni_count: number;
   wna_count: number;
   wni_pct: number;

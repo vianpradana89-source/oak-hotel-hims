@@ -17,6 +17,7 @@ import {
   buildQuotationDraftFromReservation,
   buildQuotationDraftFromSavedRecord,
   calculateQuotationDraftTotals,
+  calculateQuotationItemDiscount,
 } from './quotationDraft';
 import { formatHotelDateIndonesian, formatHotelCurrency } from './GuestDocumentContent';
 import type { PropertyInfoDto, PropertyBrandingDto } from './GuestDocumentContent';
@@ -787,12 +788,21 @@ export default function DocumentCenter({
         customer_address: quotationDraft.address?.trim() || null,
         check_in_date: quotationDraft.checkIn || null,
         check_out_date: quotationDraft.checkOut || null,
-        items: validItems.map((it) => ({
-          description: it.description.trim(),
-          quantity: Math.max(0, Number(it.qty) || 1),
-          unit_price: Math.max(0, Number(it.unitPrice) || 0),
-          discount: 0,
-        })),
+        items: validItems.map((it) => {
+          const { discountAmount, netTotal } = calculateQuotationItemDiscount(it);
+          return {
+            id: it.id,
+            description: it.description.trim(),
+            quantity: Math.max(0, Number(it.qty) || 1),
+            unit: it.unit || '',
+            unit_price: Math.max(0, Number(it.unitPrice) || 0),
+            discount_type: it.discountType === 'percent' ? 'percent' : 'amount',
+            discount_value: Math.max(0, Number(it.discountValue) || 0),
+            discount: discountAmount,
+            amount: netTotal,
+            note: it.note || '',
+          };
+        }),
         pricing: {
           subtotal: totals.subtotal,
           service_rate:
@@ -1656,19 +1666,19 @@ export default function DocumentCenter({
   const sidebar = (
     <aside className="document-center-sidebar doc-center-sidebar-fixed min-w-0">
 
-      {/* Top Fixed Header & Control Area */}
+      {/* Top Fixed Header & Control Area (Compact & Clean) */}
       <div className="doc-center-fixed-top shrink-0 bg-white border-b border-[#e8e5dd]">
         {/* Header with Title & Action */}
-        <div className="document-center-header flex items-center justify-between gap-3 border-b-0 pb-3">
+        <div className="px-4 py-2.5 flex items-center justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="document-center-title">Dokumen &amp; Print</h2>
-            <p className="document-center-subtitle">Buat, tinjau, dan cetak dokumen tamu</p>
+            <h2 className="text-base font-bold text-[#1b4332] leading-tight">Dokumen &amp; Print</h2>
+            <p className="text-[11px] text-stone-500">Buat, tinjau, dan cetak dokumen resmi tamu</p>
           </div>
           <div className="flex-shrink-0 flex flex-col items-end">
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5">
               <button
                 type="button"
-                className="document-center-print-btn whitespace-nowrap !w-auto px-3.5 py-1.5 text-xs font-semibold rounded-md shadow-sm"
+                className="document-center-print-btn whitespace-nowrap !w-auto px-3 py-1.5 text-xs font-semibold rounded-md shadow-xs"
                 onClick={handlePrint}
                 disabled={!printEnabled || isSavingPdf}
                 title={!printEnabled ? printHint : undefined}
@@ -1677,7 +1687,7 @@ export default function DocumentCenter({
               </button>
               <button
                 type="button"
-                className="document-center-print-btn whitespace-nowrap !w-auto px-3.5 py-1.5 text-xs font-semibold rounded-md shadow-sm !bg-[#c5a880] hover:!bg-[#b3956c] !text-[#1b4332] font-bold"
+                className="document-center-print-btn whitespace-nowrap !w-auto px-3 py-1.5 text-xs font-semibold rounded-md shadow-xs !bg-[#c5a880] hover:!bg-[#b3956c] !text-[#1b4332] font-bold"
                 onClick={handleOpenSavePdfDialog}
                 disabled={!printEnabled || isSavingPdf}
                 title={!printEnabled ? printHint : undefined}
@@ -1686,79 +1696,96 @@ export default function DocumentCenter({
               </button>
             </div>
             {!printEnabled && printHint ? (
-              <span className="text-[10px] text-stone-400 mt-1 max-w-[220px] text-right truncate" title={printHint}>
+              <span className="text-[10px] text-stone-400 mt-0.5 max-w-[210px] text-right truncate" title={printHint}>
                 {printHint}
               </span>
             ) : null}
             {savePdfError ? (
-              <span className="text-[10px] text-rose-600 mt-1 max-w-[220px] text-right truncate" title={savePdfError}>
+              <span className="text-[10px] text-rose-600 mt-0.5 max-w-[210px] text-right truncate" title={savePdfError}>
                 {savePdfError}
               </span>
             ) : null}
           </div>
         </div>
 
-        {/* Document type */}
-        <div className="document-center-block border-t border-[#ece9e2]">
-          <div className="document-center-block-label">Jenis Dokumen</div>
-          <div className="grid grid-cols-3 gap-2">
+        {/* Compact Document Type Tabs */}
+        <div className="px-4 py-2 border-t border-[#ece9e2] bg-[#faf8f4]">
+          <div className="grid grid-cols-3 gap-1.5">
             <button
               type="button"
-              className={`document-center-kind-card ${kind === 'confirmation' ? 'active' : ''}`}
+              className={`px-2.5 py-1.5 rounded-lg text-left border transition-all cursor-pointer ${
+                kind === 'confirmation'
+                  ? 'bg-[#1b4332] text-white border-[#1b4332] shadow-xs'
+                  : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+              }`}
               onClick={() => handleSwitchKind('confirmation')}
             >
-              <span className="document-center-kind-name">Guest Bill</span>
-              <span className="document-center-kind-desc">Ringkasan tagihan &amp; pembayaran</span>
+              <div className="text-xs font-bold leading-tight">Guest Bill</div>
+              <div className={`text-[10px] truncate ${kind === 'confirmation' ? 'text-emerald-100' : 'text-stone-400'}`}>
+                Ringkasan tagihan
+              </div>
             </button>
             <button
               type="button"
-              className={`document-center-kind-card ${kind === 'quotation' ? 'active' : ''}`}
+              className={`px-2.5 py-1.5 rounded-lg text-left border transition-all cursor-pointer ${
+                kind === 'quotation'
+                  ? 'bg-[#1b4332] text-white border-[#1b4332] shadow-xs'
+                  : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+              }`}
               onClick={() => handleSwitchKind('quotation')}
             >
-              <span className="document-center-kind-name">Quotation / Penawaran</span>
-              <span className="document-center-kind-desc">Penawaran tarif kamar &amp; paket</span>
+              <div className="text-xs font-bold leading-tight">Quotation / Penawaran</div>
+              <div className={`text-[10px] truncate ${kind === 'quotation' ? 'text-emerald-100' : 'text-stone-400'}`}>
+                Penawaran tarif &amp; paket
+              </div>
             </button>
             <button
               type="button"
-              className={`document-center-kind-card ${kind === 'folio' ? 'active' : ''}`}
+              className={`px-2.5 py-1.5 rounded-lg text-left border transition-all cursor-pointer ${
+                kind === 'folio'
+                  ? 'bg-[#1b4332] text-white border-[#1b4332] shadow-xs'
+                  : 'bg-white text-stone-700 border-stone-200 hover:bg-stone-50'
+              }`}
               onClick={() => handleSwitchKind('folio')}
             >
-              <span className="document-center-kind-name">Tagihan Tamu (Guest Folio)</span>
-              <span className="document-center-kind-desc">Rincian tagihan, bayar &amp; saldo</span>
+              <div className="text-xs font-bold leading-tight">Tagihan Tamu (Folio)</div>
+              <div className={`text-[10px] truncate ${kind === 'folio' ? 'text-emerald-100' : 'text-stone-400'}`}>
+                Rincian tagihan &amp; saldo
+              </div>
             </button>
           </div>
         </div>
 
-        {/* Source mode selector (Quotation only) */}
+        {/* Compact Quotation Toolbar (Source Mode + Save/Load in one clean block) */}
         {kind === 'quotation' && (
-          <div className="document-center-block border-t border-[#ece9e2]">
-            <div className="document-center-block-label">Sumber Penawaran</div>
-            <div className="document-center-kind-grid">
-              <button
-                type="button"
-                className={`document-center-kind-card ${quotationMode === 'reservation' ? 'active' : ''}`}
-                onClick={() => handleSwitchMode('reservation')}
-              >
-                <span className="document-center-kind-name">Dari Reservasi</span>
-                <span className="document-center-kind-desc">Muat data dari reservasi hotel</span>
-              </button>
-              <button
-                type="button"
-                className={`document-center-kind-card ${quotationMode === 'manual' ? 'active' : ''}`}
-                onClick={() => handleSwitchMode('manual')}
-              >
-                <span className="document-center-kind-name">Manual</span>
-                <span className="document-center-kind-desc">Entri penawaran kustom langsung</span>
-              </button>
-            </div>
-          </div>
-        )}
+          <div className="px-4 py-2.5 border-t border-[#ece9e2] bg-white space-y-2">
+            {/* Row 1: Sumber PenawaranSegmented Switch + Status Badge */}
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="inline-flex items-center p-0.5 rounded-lg bg-stone-100 border border-stone-200">
+                <button
+                  type="button"
+                  onClick={() => handleSwitchMode('reservation')}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                    quotationMode === 'reservation'
+                      ? 'bg-[#1b4332] text-white shadow-2xs'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  Dari Reservasi
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchMode('manual')}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-all cursor-pointer ${
+                    quotationMode === 'manual'
+                      ? 'bg-[#1b4332] text-white shadow-2xs'
+                      : 'text-stone-600 hover:text-stone-900'
+                  }`}
+                >
+                  Manual
+                </button>
+              </div>
 
-        {/* Quotation Management Toolbar (Quotation only) */}
-        {kind === 'quotation' && (
-          <div className="document-center-block border-t border-[#ece9e2]">
-            <div className="flex items-center justify-between mb-2">
-              <span className="document-center-block-label !mb-0">Kelola Quotation</span>
               {savedQuotationRecord ? (
                 <div className="flex items-center gap-1.5">
                   <span className="inline-flex items-center px-2 py-0.5 rounded text-[11px] font-semibold bg-[#1b4332]/10 text-[#1b4332]">
@@ -1791,7 +1818,7 @@ export default function DocumentCenter({
             {/* Quotation action status message */}
             {quotationActionMessage && (
               <div
-                className={`mb-2.5 p-2 rounded text-xs flex items-center justify-between ${
+                className={`p-2 rounded text-xs flex items-center justify-between ${
                   quotationActionMessage.type === 'success'
                     ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
                     : 'bg-rose-50 text-rose-800 border border-rose-200'
@@ -1808,40 +1835,39 @@ export default function DocumentCenter({
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-2 mb-2">
+            {/* Row 2: Action Buttons (+ Baru, Daftar Tersimpan, Simpan Quotation) */}
+            <div className="grid grid-cols-12 gap-1.5">
               <button
                 type="button"
-                className="px-2.5 py-1.5 text-xs font-medium rounded border border-[#c5a880]/60 bg-[#faf8f5] hover:bg-[#f3ede2] text-[#1b4332] text-center"
+                className="col-span-4 px-2 py-1.5 text-xs font-medium rounded border border-[#c5a880]/60 bg-[#faf8f5] hover:bg-[#f3ede2] text-[#1b4332] text-center truncate cursor-pointer"
                 onClick={handleNewQuotationClick}
               >
                 + Quotation Baru
               </button>
               <button
                 type="button"
-                className="px-2.5 py-1.5 text-xs font-medium rounded border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-center"
+                className="col-span-4 px-2 py-1.5 text-xs font-medium rounded border border-stone-200 bg-white hover:bg-stone-50 text-stone-700 text-center truncate cursor-pointer"
                 onClick={handleOpenSavedListClick}
               >
                 📁 Daftar Tersimpan
               </button>
+              <button
+                type="button"
+                className={`col-span-4 py-1.5 px-2.5 text-xs font-bold rounded shadow-2xs text-center truncate transition-colors cursor-pointer ${
+                  savedQuotationRecord
+                    ? 'bg-[#1b4332] hover:bg-[#143225] text-[#f7f4ee]'
+                    : 'bg-[#c5a880] hover:bg-[#b3956c] text-[#1b4332]'
+                } ${isSavingQuotation ? 'opacity-70 cursor-not-allowed' : ''}`}
+                onClick={handleSaveQuotation}
+                disabled={isSavingQuotation}
+              >
+                {isSavingQuotation
+                  ? 'Menyimpan...'
+                  : savedQuotationRecord
+                    ? `Simpan R${savedQuotationRecord.revision_number + 1}`
+                    : 'Simpan Quotation'}
+              </button>
             </div>
-
-            {/* Primary Save / Revise button */}
-            <button
-              type="button"
-              className={`w-full py-2 px-3 text-xs font-semibold rounded shadow-sm text-center transition-colors ${
-                savedQuotationRecord
-                  ? 'bg-[#1b4332] hover:bg-[#143225] text-[#f7f4ee]'
-                  : 'bg-[#c5a880] hover:bg-[#b3956c] text-[#1b4332]'
-              } ${isSavingQuotation ? 'opacity-70 cursor-not-allowed' : ''}`}
-              onClick={handleSaveQuotation}
-              disabled={isSavingQuotation}
-            >
-              {isSavingQuotation
-                ? 'Menyimpan...'
-                : savedQuotationRecord
-                  ? `Simpan Revisi (${savedQuotationRecord.quotation_number} - R${savedQuotationRecord.revision_number + 1})`
-                  : 'Simpan Quotation'}
-            </button>
           </div>
         )}
       </div>
@@ -2312,7 +2338,7 @@ export default function DocumentCenter({
       <style>{`
         @media (min-width: 901px) {
           .doc-center-desktop-grid {
-            grid-template-columns: minmax(560px, 720px) minmax(0, 1fr) !important;
+            grid-template-columns: minmax(430px, 520px) minmax(0, 1fr) !important;
           }
           .doc-center-sidebar-fixed {
             height: calc(100vh - 64px);
@@ -2325,6 +2351,11 @@ export default function DocumentCenter({
             flex: 1 1 0;
             min-height: 0;
             overflow-y: auto;
+          }
+        }
+        @media (min-width: 1440px) {
+          .doc-center-desktop-grid {
+            grid-template-columns: minmax(480px, 560px) minmax(0, 1fr) !important;
           }
         }
         @media (max-width: 900px) {

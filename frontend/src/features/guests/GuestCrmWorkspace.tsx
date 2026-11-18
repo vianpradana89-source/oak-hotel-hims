@@ -17,6 +17,7 @@ import { GuestProfileModal } from './GuestProfileModal';
 import { GuestEditModal } from './GuestEditModal';
 import { GuestDuplicateModal } from './GuestDuplicateModal';
 import { GuestLoyaltyPanel } from './GuestLoyaltyPanel';
+import { GuestImportModal } from './GuestImportModal';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestCrmWorkspaceProps {
@@ -46,6 +47,8 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
   const [editingGuest, setEditingGuest] = useState<Guest | null>(null);
   const [isEditModalOpen, setIsEditModalOpen] = useState<boolean>(false);
   const [isDuplicateModalOpen, setIsDuplicateModalOpen] = useState<boolean>(false);
+  const [isImportModalOpen, setIsImportModalOpen] = useState<boolean>(false);
+  const [demographicsMonth, setDemographicsMonth] = useState<string>('ALL');
 
   // Quick WA Message Template Modal (Ref. Gambar 3)
   const [waModalTarget, setWaModalTarget] = useState<'birthday' | 'followup' | 'database' | null>(null);
@@ -65,7 +68,9 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
     try {
       const [guestsRes, summaryRes, dupRes, settingsRes] = await Promise.all([
         authenticatedFetch(`/api/guests?property_id=${propertyId}&limit=1000`),
-        authenticatedFetch(`/api/guests/crm-summary?property_id=${propertyId}&hotel_date=${hotelDate}`),
+        authenticatedFetch(
+          `/api/guests/crm-summary?property_id=${propertyId}&hotel_date=${hotelDate}&demographics_month=${encodeURIComponent(demographicsMonth)}`
+        ),
         authenticatedFetch(`/api/guests/duplicate-candidates?property_id=${propertyId}`),
         authenticatedFetch(`/api/guests/loyalty-settings?property_id=${propertyId}`),
       ]);
@@ -91,7 +96,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
     } finally {
       setLoading(false);
     }
-  }, [propertyId, hotelDate]);
+  }, [propertyId, hotelDate, demographicsMonth]);
 
   useEffect(() => {
     loadData();
@@ -229,6 +234,8 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             summary={crmSummary}
             loading={loading}
             loyaltySettings={loyaltySettings}
+            demographicsMonth={demographicsMonth}
+            onChangeDemographicsMonth={setDemographicsMonth}
             onSelectGuest={handleOpenProfile}
             onOpenDuplicateReview={() => setIsDuplicateModalOpen(true)}
             duplicateCount={duplicateClusters.length}
@@ -246,6 +253,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             onSelectGuest={handleOpenProfile}
             onEditGuest={handleEditGuest}
             onCreateGuest={handleCreateNew}
+            onOpenImportModal={() => setIsImportModalOpen(true)}
             onMerged={loadData}
             onOpenWaTemplateModal={handleOpenWaTemplateModal}
           />
@@ -296,6 +304,13 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
         onMerged={loadData}
       />
 
+      <GuestImportModal
+        propertyId={propertyId}
+        isOpen={isImportModalOpen}
+        onClose={() => setIsImportModalOpen(false)}
+        onImported={loadData}
+      />
+
       {/* WhatsApp Template Editor Modal (Ref. Gambar 3) */}
       {waModalTarget && (
         <div
@@ -326,6 +341,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             <div>
               <textarea
                 rows={4}
+                data-no-uppercase="true"
                 value={waMessageDraft}
                 onChange={(e) => setWaMessageDraft(e.target.value)}
                 className="w-full p-3.5 text-sm text-stone-800 bg-[#FAF8F3] border-2 border-blue-600 rounded-2xl focus:outline-hidden focus:ring-2 focus:ring-blue-600/20"

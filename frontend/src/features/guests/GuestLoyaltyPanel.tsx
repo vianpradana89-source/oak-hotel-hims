@@ -38,6 +38,22 @@ function formatRupiah(val: number | undefined | null): string {
   return `Rp ${Math.round(num).toLocaleString('id-ID')}`;
 }
 
+function formatThousandDots(val: number | string | undefined | null): string {
+  if (val === undefined || val === null || val === '') return '0';
+  const digits = String(val).replace(/\D/g, '');
+  if (!digits) return '0';
+  const num = Number(digits);
+  if (!Number.isFinite(num)) return '0';
+  return Math.round(num).toLocaleString('id-ID');
+}
+
+function parseThousandDots(raw: string): number {
+  const digits = String(raw || '').replace(/\D/g, '');
+  if (!digits) return 0;
+  const num = Number(digits);
+  return Number.isFinite(num) ? Math.round(num) : 0;
+}
+
 const DEFAULT_TIERS: PropertyLoyaltyTierConfig[] = [
   { code: 'BRONZE', name: 'Bronze', min_spend: 0, discount_pct: 0 },
   { code: 'SILVER', name: 'Silver', min_spend: 500000, discount_pct: 2 },
@@ -490,11 +506,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Poin per Belanja (Rp)
               </label>
               <input
-                type="number"
-                min={1}
-                value={spendPerPoint}
-                onChange={(e) => setSpendPerPoint(Math.max(1, Number(e.target.value || 1)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(spendPerPoint)}
+                onChange={(e) => setSpendPerPoint(Math.max(1, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Setiap belanja sejumlah ini menghasilkan poin.
@@ -506,11 +522,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Jumlah Poin Didapat
               </label>
               <input
-                type="number"
-                min={0}
-                value={pointsEarnedPerUnit}
-                onChange={(e) => setPointsEarnedPerUnit(Math.max(0, Number(e.target.value || 0)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(pointsEarnedPerUnit)}
+                onChange={(e) => setPointsEarnedPerUnit(Math.max(0, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Poin per kelipatan belanja di atas.
@@ -522,11 +538,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Poin per Kunjungan
               </label>
               <input
-                type="number"
-                min={0}
-                value={pointsPerVisit}
-                onChange={(e) => setPointsPerVisit(Math.max(0, Number(e.target.value || 0)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(pointsPerVisit)}
+                onChange={(e) => setPointsPerVisit(Math.max(0, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Bonus poin setiap satu transaksi/kedatangan selesai.
@@ -541,11 +557,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Nilai 1 Poin (Rp)
               </label>
               <input
-                type="number"
-                min={1}
-                value={pointValueIdr}
-                onChange={(e) => setPointValueIdr(Math.max(1, Number(e.target.value || 1)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(pointValueIdr)}
+                onChange={(e) => setPointValueIdr(Math.max(1, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Nilai potongan Rupiah untuk setiap 1 poin yang ditukarkan.
@@ -557,11 +573,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Minimal Penukaran (poin)
               </label>
               <input
-                type="number"
-                min={1}
-                value={minRedeemPoints}
-                onChange={(e) => setMinRedeemPoints(Math.max(1, Number(e.target.value || 1)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(minRedeemPoints)}
+                onChange={(e) => setMinRedeemPoints(Math.max(1, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Batas minimal saldo poin agar bisa memotong transaksi.
@@ -573,11 +589,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 Masa Berlaku Poin (bulan)
               </label>
               <input
-                type="number"
-                min={1}
-                value={pointExpiryMonths}
-                onChange={(e) => setPointExpiryMonths(Math.max(1, Number(e.target.value || 1)))}
-                className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                type="text"
+                inputMode="numeric"
+                value={formatThousandDots(pointExpiryMonths)}
+                onChange={(e) => setPointExpiryMonths(Math.max(1, parseThousandDots(e.target.value)))}
+                className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
               />
               <p className="text-[11px] text-stone-400 mt-1">
                 Durasi aktif poin sejak diperoleh pelanggan.
@@ -596,11 +612,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                   Silver (poin)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={silverThreshold}
-                  onChange={(e) => setSilverThreshold(Math.max(0, Number(e.target.value || 0)))}
-                  className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                  type="text"
+                  inputMode="numeric"
+                  value={formatThousandDots(silverThreshold)}
+                  onChange={(e) => setSilverThreshold(Math.max(0, parseThousandDots(e.target.value)))}
+                  className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
                 />
               </div>
 
@@ -609,11 +625,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                   Gold (poin)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={goldThreshold}
-                  onChange={(e) => setGoldThreshold(Math.max(0, Number(e.target.value || 0)))}
-                  className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                  type="text"
+                  inputMode="numeric"
+                  value={formatThousandDots(goldThreshold)}
+                  onChange={(e) => setGoldThreshold(Math.max(0, parseThousandDots(e.target.value)))}
+                  className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
                 />
               </div>
 
@@ -622,11 +638,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                   Platinum (poin)
                 </label>
                 <input
-                  type="number"
-                  min={0}
-                  value={platinumThreshold}
-                  onChange={(e) => setPlatinumThreshold(Math.max(0, Number(e.target.value || 0)))}
-                  className="w-full px-3.5 py-2.5 text-sm bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
+                  type="text"
+                  inputMode="numeric"
+                  value={formatThousandDots(platinumThreshold)}
+                  onChange={(e) => setPlatinumThreshold(Math.max(0, parseThousandDots(e.target.value)))}
+                  className="w-full px-3.5 py-2.5 text-sm font-semibold bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20"
                 />
               </div>
             </div>
@@ -666,7 +682,7 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 {summaryStats.platinumCount.toLocaleString('id-ID')}
               </p>
               <p className="text-[11px] text-stone-500 mt-1">
-                &ge; {platinumThreshold.toLocaleString('id-ID')} poin / spend tier
+                Min. Belanja {formatRupiah(tiersConfig.find((t) => t.code === 'PLATINUM')?.min_spend ?? 5000000)}
               </p>
             </div>
 
@@ -686,7 +702,7 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 {summaryStats.goldCount.toLocaleString('id-ID')}
               </p>
               <p className="text-[11px] text-stone-500 mt-1">
-                &ge; {goldThreshold.toLocaleString('id-ID')} poin / spend tier
+                Min. Belanja {formatRupiah(tiersConfig.find((t) => t.code === 'GOLD')?.min_spend ?? 2500000)}
               </p>
             </div>
 
@@ -706,7 +722,7 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                 {summaryStats.silverCount.toLocaleString('id-ID')}
               </p>
               <p className="text-[11px] text-stone-500 mt-1">
-                &ge; {silverThreshold.toLocaleString('id-ID')} poin / spend tier
+                Min. Belanja {formatRupiah(tiersConfig.find((t) => t.code === 'SILVER')?.min_spend ?? 500000)}
               </p>
             </div>
 
@@ -1212,11 +1228,11 @@ export const GuestLoyaltyPanel: React.FC<GuestLoyaltyPanelProps> = ({
                           Min Belanja (Rp)
                         </label>
                         <input
-                          type="number"
-                          min={0}
+                          type="text"
+                          inputMode="numeric"
                           disabled={tier.code === 'BRONZE'}
-                          value={tier.min_spend}
-                          onChange={(e) => updateTierRow(tier.code, 'min_spend', e.target.value)}
+                          value={formatThousandDots(tier.min_spend)}
+                          onChange={(e) => updateTierRow(tier.code, 'min_spend', parseThousandDots(e.target.value))}
                           className="w-full px-3 py-2 text-xs font-semibold bg-white disabled:bg-stone-100 border border-stone-200 rounded-xl focus:outline-hidden focus:ring-2 focus:ring-emerald-600/20"
                         />
                       </div>

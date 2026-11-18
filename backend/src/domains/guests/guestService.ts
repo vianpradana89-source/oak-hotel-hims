@@ -240,6 +240,8 @@ export async function updatePropertyLoyaltySettings(
     actorUserId,
   });
 
+  await syncGuestLoyaltyVipTiers(pool, propertyId, correlationId, actorUserId).catch(() => {});
+
   return getPropertyLoyaltySettings(pool, propertyId);
 }
 
@@ -248,7 +250,7 @@ export function evaluateGuestLoyaltyMetrics(
   paidVisits: number,
   bonusPoints: number,
   redeemedPoints: number,
-  vipStatus: VipStatus,
+  _vipStatus: VipStatus,
   settings: PropertyLoyaltySettings
 ): {
   earned_points: number;
@@ -265,7 +267,6 @@ export function evaluateGuestLoyaltyMetrics(
   const earnedPoints = settings.points_enabled
     ? Math.floor(totalSpend / spendPerPoint) * pointsPerUnit + paidVisits * pointsPerVisit
     : 0;
-  const totalCumulativePoints = earnedPoints + bonusPoints;
   const loyaltyPoints = Math.max(0, earnedPoints + bonusPoints - redeemedPoints);
   const pointValueIdr = Math.round(loyaltyPoints * Number(settings.point_value_idr || 350));
 
@@ -282,23 +283,13 @@ export function evaluateGuestLoyaltyMetrics(
   const goldCfg = tierMap.get('GOLD') || { code: 'GOLD', name: 'Gold', min_spend: 2500000, discount_pct: 5 };
   const platCfg = tierMap.get('PLATINUM') || { code: 'PLATINUM', name: 'Platinum', min_spend: 5000000, discount_pct: 25 };
 
+  // Strictly follow the configured Loyalty Tier min_spend thresholds from Pengaturan Loyalty Tier
   let chosenTier: PropertyLoyaltyTierConfig = bronzeCfg;
-  if (
-    vipStatus === 'VVIP' ||
-    (platCfg.min_spend > 0 && totalSpend >= platCfg.min_spend) ||
-    (settings.platinum_point_threshold > 0 && totalCumulativePoints >= settings.platinum_point_threshold)
-  ) {
+  if (platCfg.min_spend > 0 && totalSpend >= platCfg.min_spend) {
     chosenTier = platCfg;
-  } else if (
-    vipStatus === 'VIP' ||
-    (goldCfg.min_spend > 0 && totalSpend >= goldCfg.min_spend) ||
-    (settings.gold_point_threshold > 0 && totalCumulativePoints >= settings.gold_point_threshold)
-  ) {
+  } else if (goldCfg.min_spend > 0 && totalSpend >= goldCfg.min_spend) {
     chosenTier = goldCfg;
-  } else if (
-    (silverCfg.min_spend > 0 && totalSpend >= silverCfg.min_spend) ||
-    (settings.silver_point_threshold > 0 && totalCumulativePoints >= settings.silver_point_threshold)
-  ) {
+  } else if (silverCfg.min_spend > 0 && totalSpend >= silverCfg.min_spend) {
     chosenTier = silverCfg;
   }
 
@@ -974,7 +965,8 @@ function resolveGuestCityLabel(row: any): string | null {
 export async function getCrmSummary(
   pool: Pool,
   propertyId: number,
-  hotelDateInput?: string
+  hotelDateInput?: string,
+  demographicsMonthInput?: string
 ): Promise<GuestCrmSummary> {
   await assertPropertyExists(pool, propertyId);
 
@@ -984,6 +976,10 @@ export async function getCrmSummary(
 
   const currentYear = Number(hotelDate.slice(0, 4));
   const currentMonth = Number(hotelDate.slice(5, 7));
+  const validDemographicsMonth =
+    demographicsMonthInput && /^\d{4}-\d{2}$/.test(demographicsMonthInput.trim())
+      ? demographicsMonthInput.trim()
+      : null;
 
   const baseFilter = `
     (
@@ -1123,51 +1119,135 @@ export async function getCrmSummary(
     [propertyId, hotelDate]
   );
 
-  const demographicsRowsRes = await pool.query(
-    `SELECT
-       g.id,
-       g.city,
-       reg.name AS ktp_regency_name,
-       g.birth_place,
-       g.address,
-       g.citizenship,
-       g.nationality,
-       g.country,
-       g.phone,
-       COALESCE(stay_sp.paid_spend, 0)::numeric(14,2) AS paid_spend
-     FROM guests g
-     LEFT JOIN regencies reg ON reg.id = g.ktp_regency_id
-     LEFT JOIN LATERAL (
-       SELECT
-         COALESCE(
-           SUM(
-             CASE
-               WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
-                 AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
-                 AND COALESCE(r.discount_percent, 0) < 100
-                 AND COALESCE(r.total_price, 0) > 0
-                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
-                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
-                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
-               THEN COALESCE(r.total_price, 0)
-               ELSE 0
-             END
-           ),
-           0
-         ) AS paid_spend
-       FROM reservation_guests rg
-       JOIN reservations r ON rg.reservation_id = r.id
+  const availableMonthsRes = await pool.query(
+    `SELECT DISTINCT ym FROM (
+       SELECT TO_CHAR(r.check_in, 'YYYY-MM') AS ym
+       FROM reservations r
        JOIN bookings b ON r.booking_id = b.id
-       WHERE rg.guest_id = g.id
-         AND b.property_id = $1
-         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
-         AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
-         AND COALESCE(b.booking_status, '') != 'CANCELLED'
-     ) stay_sp ON true
-     WHERE ${baseFilter}
-       AND (g.is_archived IS NULL OR g.is_archived = FALSE)`,
+       WHERE b.property_id = $1
+         AND r.check_in IS NOT NULL
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT', 'BOOKED')
+       UNION
+       SELECT TO_CHAR(g.created_at, 'YYYY-MM') AS ym
+       FROM guests g
+       WHERE ${baseFilter}
+         AND g.created_at IS NOT NULL
+     ) m
+     WHERE ym IS NOT NULL AND ym ~ '^[0-9]{4}-[0-9]{2}$'
+     ORDER BY ym DESC
+     LIMIT 24`,
     [propertyId]
   );
+  const currentYm = hotelDate.slice(0, 7);
+  const monthSet = new Set<string>([currentYm]);
+  for (const mRow of availableMonthsRes.rows) {
+    if (mRow.ym) monthSet.add(String(mRow.ym));
+  }
+  const availableMonths = Array.from(monthSet).sort((a, b) => b.localeCompare(a));
+
+  const demographicsRowsRes = validDemographicsMonth
+    ? await pool.query(
+        `SELECT
+           g.id,
+           g.city,
+           reg.name AS ktp_regency_name,
+           g.birth_place,
+           g.address,
+           g.citizenship,
+           g.nationality,
+           g.country,
+           g.phone,
+           COALESCE(stay_sp.paid_spend, 0)::numeric(14,2) AS paid_spend
+         FROM guests g
+         LEFT JOIN regencies reg ON reg.id = g.ktp_regency_id
+         LEFT JOIN LATERAL (
+           SELECT
+             COUNT(DISTINCT r.id)::int AS month_stays,
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                     AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                     AND COALESCE(r.discount_percent, 0) < 100
+                     AND COALESCE(r.total_price, 0) > 0
+                     AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                     AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                     AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+                   THEN COALESCE(r.total_price, 0)
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS paid_spend
+           FROM reservation_guests rg
+           JOIN reservations r ON rg.reservation_id = r.id
+           JOIN bookings b ON r.booking_id = b.id
+           WHERE rg.guest_id = g.id
+             AND b.property_id = $1
+             AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+             AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+             AND COALESCE(b.booking_status, '') != 'CANCELLED'
+             AND (TO_CHAR(r.check_in, 'YYYY-MM') = $2 OR TO_CHAR(r.check_out, 'YYYY-MM') = $2)
+         ) stay_sp ON true
+         WHERE ${baseFilter}
+           AND (g.is_archived IS NULL OR g.is_archived = FALSE)
+           AND (
+             COALESCE(stay_sp.month_stays, 0) > 0
+             OR EXISTS (
+               SELECT 1 FROM transactions t_m
+               WHERE t_m.property_id = $1
+                 AND t_m.guest_id = g.id
+                 AND t_m.deleted_at IS NULL
+                 AND TO_CHAR(t_m.transaction_date, 'YYYY-MM') = $2
+             )
+           )`,
+        [propertyId, validDemographicsMonth]
+      )
+    : await pool.query(
+        `SELECT
+           g.id,
+           g.city,
+           reg.name AS ktp_regency_name,
+           g.birth_place,
+           g.address,
+           g.citizenship,
+           g.nationality,
+           g.country,
+           g.phone,
+           COALESCE(stay_sp.paid_spend, 0)::numeric(14,2) AS paid_spend
+         FROM guests g
+         LEFT JOIN regencies reg ON reg.id = g.ktp_regency_id
+         LEFT JOIN LATERAL (
+           SELECT
+             COALESCE(
+               SUM(
+                 CASE
+                   WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                     AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                     AND COALESCE(r.discount_percent, 0) < 100
+                     AND COALESCE(r.total_price, 0) > 0
+                     AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                     AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                     AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+                   THEN COALESCE(r.total_price, 0)
+                   ELSE 0
+                 END
+               ),
+               0
+             ) AS paid_spend
+           FROM reservation_guests rg
+           JOIN reservations r ON rg.reservation_id = r.id
+           JOIN bookings b ON r.booking_id = b.id
+           WHERE rg.guest_id = g.id
+             AND b.property_id = $1
+             AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+             AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+             AND COALESCE(b.booking_status, '') != 'CANCELLED'
+         ) stay_sp ON true
+         WHERE ${baseFilter}
+           AND (g.is_archived IS NULL OR g.is_archived = FALSE)`,
+        [propertyId]
+      );
 
   let wniCount = 0;
   let wnaCount = 0;
@@ -1228,6 +1308,8 @@ export async function getCrmSummary(
       total_spend: Number(r.total_spend || 0),
     })),
     demographics: {
+      selected_month: validDemographicsMonth || 'ALL',
+      available_months: availableMonths,
       wni_count: wniCount,
       wna_count: wnaCount,
       wni_pct: wniPct,
@@ -1854,11 +1936,13 @@ export async function syncGuestLoyaltyVipTiers(
   let updatedCount = 0;
 
   for (const g of guests) {
-    let targetVip: VipStatus = g.vip_status;
-    if (g.loyalty_tier === 'PLATINUM' && g.vip_status !== 'VVIP') {
+    let targetVip: VipStatus = 'STANDARD';
+    if (g.loyalty_tier === 'PLATINUM') {
       targetVip = 'VVIP';
-    } else if (g.loyalty_tier === 'GOLD' && g.vip_status === 'STANDARD') {
+    } else if (g.loyalty_tier === 'GOLD') {
       targetVip = 'VIP';
+    } else {
+      targetVip = 'STANDARD';
     }
     if (targetVip !== g.vip_status) {
       await pool.query(
@@ -2167,40 +2251,40 @@ export async function createGuest(
   const propertyId = parsePropertyId(input.property_id, 'property_id');
   await assertPropertyExists(pool, propertyId);
 
-  const fullName = String(input.full_name || '').trim();
+  const fullName = String(input.full_name || '').trim().toUpperCase();
   if (!fullName) {
     throw httpError(400, 'VALIDATION_ERROR', 'full_name is required');
   }
 
-  const preferredName = input.preferred_name ? String(input.preferred_name).trim() || null : null;
+  const preferredName = input.preferred_name ? String(input.preferred_name).trim().toUpperCase() || null : null;
   const gender = normalizeGender(input.gender);
-  const birthPlace = input.birth_place ? String(input.birth_place).trim() || null : null;
+  const birthPlace = input.birth_place ? String(input.birth_place).trim().toUpperCase() || null : null;
   const birthDate = input.birth_date ? String(input.birth_date).trim() || null : null;
-  const nationality = input.nationality ? String(input.nationality).trim() || 'ID' : 'ID';
+  const nationality = input.nationality ? String(input.nationality).trim().toUpperCase() || 'ID' : 'ID';
   const phone = normalizePhone(input.phone);
   const normalizedPhone = normalizeDigitsOnly(input.phone);
   const email = normalizeEmail(input.email);
   const normalizedEmail = email;
-  const address = input.address ? String(input.address).trim() || null : null;
-  const city = input.city ? String(input.city).trim() || null : null;
-  const province = input.province ? String(input.province).trim() || null : null;
-  const country = input.country ? String(input.country).trim() || 'Indonesia' : 'Indonesia';
+  const address = input.address ? String(input.address).trim().toUpperCase() || null : null;
+  const city = input.city ? String(input.city).trim().toUpperCase() || null : null;
+  const province = input.province ? String(input.province).trim().toUpperCase() || null : null;
+  const country = input.country ? String(input.country).trim().toUpperCase() || 'INDONESIA' : 'INDONESIA';
   const guestSegment = input.guest_segment ? String(input.guest_segment).trim() : 'Reguler';
   const vipStatus = normalizeVipStatus(input.vip_status);
-  const preferences = input.preferences ? String(input.preferences).trim() || null : null;
-  const notes = input.notes ? String(input.notes).trim() || null : null;
-  const identityType = input.identity_type ? String(input.identity_type).trim() : 'KTP';
-  const identityNumber = input.identity_number ? String(input.identity_number).trim() : null;
+  const preferences = input.preferences ? String(input.preferences).trim().toUpperCase() || null : null;
+  const notes = input.notes ? String(input.notes).trim().toUpperCase() || null : null;
+  const identityType = input.identity_type ? String(input.identity_type).trim().toUpperCase() : 'KTP';
+  const identityNumber = input.identity_number ? String(input.identity_number).trim().toUpperCase() : null;
   const normalizedIdentity = normalizeIdentityNumber(input.identity_number);
   const identityPath = input.identity_path ? String(input.identity_path).trim() : null;
   const hasValidIdentity = input.has_valid_identity !== undefined ? Boolean(input.has_valid_identity) : Boolean(identityNumber || identityPath);
   const rtRw = input.rt_rw ? String(input.rt_rw).trim() || null : null;
-  const villageKelurahan = input.village_kelurahan ? String(input.village_kelurahan).trim() || null : null;
-  const districtKecamatan = input.district_kecamatan ? String(input.district_kecamatan).trim() || null : null;
-  const religion = input.religion ? String(input.religion).trim() || null : null;
-  const maritalStatus = input.marital_status ? String(input.marital_status).trim() || null : null;
-  const occupation = input.occupation ? String(input.occupation).trim() || null : null;
-  const citizenship = input.citizenship ? String(input.citizenship).trim() || null : null;
+  const villageKelurahan = input.village_kelurahan ? String(input.village_kelurahan).trim().toUpperCase() || null : null;
+  const districtKecamatan = input.district_kecamatan ? String(input.district_kecamatan).trim().toUpperCase() || null : null;
+  const religion = input.religion ? String(input.religion).trim().toUpperCase() || null : null;
+  const maritalStatus = input.marital_status ? String(input.marital_status).trim().toUpperCase() || null : null;
+  const occupation = input.occupation ? String(input.occupation).trim().toUpperCase() || null : null;
+  const citizenship = input.citizenship ? String(input.citizenship).trim().toUpperCase() || null : null;
   const validUntil = input.valid_until ? String(input.valid_until).trim() || null : null;
   const ktpOcrConfidence = input.ktp_ocr_confidence !== undefined ? input.ktp_ocr_confidence : null;
   const ktpOcrProvider = input.ktp_ocr_provider ? String(input.ktp_ocr_provider).trim() || null : null;
@@ -2320,44 +2404,44 @@ export async function updateGuest(
     }
     const existing = existingRes.rows[0];
 
-    const fullName = input.full_name !== undefined ? String(input.full_name || '').trim() : existing.full_name;
+    const fullName = (input.full_name !== undefined ? String(input.full_name || '').trim() : String(existing.full_name || '').trim()).toUpperCase();
     if (!fullName) {
       throw httpError(400, 'VALIDATION_ERROR', 'full_name must not be empty');
     }
 
-    const guestCode = input.guest_code !== undefined ? (input.guest_code ? String(input.guest_code).trim() : null) : existing.guest_code;
-    const preferredName = input.preferred_name !== undefined ? (input.preferred_name ? String(input.preferred_name).trim() : null) : existing.preferred_name;
+    const guestCode = input.guest_code !== undefined ? (input.guest_code ? String(input.guest_code).trim().toUpperCase() : null) : existing.guest_code;
+    const preferredName = input.preferred_name !== undefined ? (input.preferred_name ? String(input.preferred_name).trim().toUpperCase() : null) : existing.preferred_name;
     const gender = input.gender !== undefined ? normalizeGender(input.gender) : existing.gender;
-    const birthPlace = input.birth_place !== undefined ? (input.birth_place ? String(input.birth_place).trim() : null) : existing.birth_place;
+    const birthPlace = input.birth_place !== undefined ? (input.birth_place ? String(input.birth_place).trim().toUpperCase() : null) : existing.birth_place;
     const birthDate = input.birth_date !== undefined ? (input.birth_date ? String(input.birth_date).trim() : null) : existing.birth_date;
-    const nationality = input.nationality !== undefined ? (input.nationality ? String(input.nationality).trim() : 'ID') : existing.nationality;
+    const nationality = input.nationality !== undefined ? (input.nationality ? String(input.nationality).trim().toUpperCase() : 'ID') : existing.nationality;
     const phone = input.phone !== undefined ? normalizePhone(input.phone) : existing.phone;
     const normalizedPhone = phone ? normalizeDigitsOnly(phone) : null;
     const email = input.email !== undefined ? normalizeEmail(input.email) : existing.email;
     const normalizedEmail = email;
-    const address = input.address !== undefined ? (input.address ? String(input.address).trim() : null) : existing.address;
-    const city = input.city !== undefined ? (input.city ? String(input.city).trim() : null) : existing.city;
-    const province = input.province !== undefined ? (input.province ? String(input.province).trim() : null) : existing.province;
-    const country = input.country !== undefined ? (input.country ? String(input.country).trim() : 'Indonesia') : existing.country;
+    const address = input.address !== undefined ? (input.address ? String(input.address).trim().toUpperCase() : null) : existing.address;
+    const city = input.city !== undefined ? (input.city ? String(input.city).trim().toUpperCase() : null) : existing.city;
+    const province = input.province !== undefined ? (input.province ? String(input.province).trim().toUpperCase() : null) : existing.province;
+    const country = input.country !== undefined ? (input.country ? String(input.country).trim().toUpperCase() : 'INDONESIA') : existing.country;
     const guestSegment = input.guest_segment !== undefined ? (input.guest_segment ? String(input.guest_segment).trim() : 'Reguler') : existing.guest_segment;
     const vipStatus = input.vip_status !== undefined ? normalizeVipStatus(input.vip_status) : existing.vip_status;
-    const preferences = input.preferences !== undefined ? (input.preferences ? String(input.preferences).trim() : null) : existing.preferences;
+    const preferences = input.preferences !== undefined ? (input.preferences ? String(input.preferences).trim().toUpperCase() : null) : existing.preferences;
     const isBlacklisted = input.is_blacklisted !== undefined ? Boolean(input.is_blacklisted) : existing.is_blacklisted;
-    const blacklistReason = input.blacklist_reason !== undefined ? (input.blacklist_reason ? String(input.blacklist_reason).trim() : null) : existing.blacklist_reason;
-    const identityType = input.identity_type !== undefined ? (input.identity_type ? String(input.identity_type).trim() : null) : existing.identity_type;
-    const identityNumber = input.identity_number !== undefined ? (input.identity_number ? String(input.identity_number).trim() : null) : existing.identity_number;
+    const blacklistReason = input.blacklist_reason !== undefined ? (input.blacklist_reason ? String(input.blacklist_reason).trim().toUpperCase() : null) : existing.blacklist_reason;
+    const identityType = input.identity_type !== undefined ? (input.identity_type ? String(input.identity_type).trim().toUpperCase() : null) : existing.identity_type;
+    const identityNumber = input.identity_number !== undefined ? (input.identity_number ? String(input.identity_number).trim().toUpperCase() : null) : existing.identity_number;
     const normalizedIdentity = identityNumber ? normalizeIdentityNumber(identityNumber) : null;
     const identityPath = input.identity_path !== undefined ? (input.identity_path ? String(input.identity_path).trim() : null) : existing.identity_path;
     const hasValidIdentity = input.has_valid_identity !== undefined
       ? Boolean(input.has_valid_identity)
       : (Boolean(identityNumber || identityPath) || existing.has_valid_identity);
     const rtRw = input.rt_rw !== undefined ? (input.rt_rw ? String(input.rt_rw).trim() : null) : existing.rt_rw;
-    const villageKelurahan = input.village_kelurahan !== undefined ? (input.village_kelurahan ? String(input.village_kelurahan).trim() : null) : existing.village_kelurahan;
-    const districtKecamatan = input.district_kecamatan !== undefined ? (input.district_kecamatan ? String(input.district_kecamatan).trim() : null) : existing.district_kecamatan;
-    const religion = input.religion !== undefined ? (input.religion ? String(input.religion).trim() : null) : existing.religion;
-    const maritalStatus = input.marital_status !== undefined ? (input.marital_status ? String(input.marital_status).trim() : null) : existing.marital_status;
-    const occupation = input.occupation !== undefined ? (input.occupation ? String(input.occupation).trim() : null) : existing.occupation;
-    const citizenship = input.citizenship !== undefined ? (input.citizenship ? String(input.citizenship).trim() : null) : existing.citizenship;
+    const villageKelurahan = input.village_kelurahan !== undefined ? (input.village_kelurahan ? String(input.village_kelurahan).trim().toUpperCase() : null) : existing.village_kelurahan;
+    const districtKecamatan = input.district_kecamatan !== undefined ? (input.district_kecamatan ? String(input.district_kecamatan).trim().toUpperCase() : null) : existing.district_kecamatan;
+    const religion = input.religion !== undefined ? (input.religion ? String(input.religion).trim().toUpperCase() : null) : existing.religion;
+    const maritalStatus = input.marital_status !== undefined ? (input.marital_status ? String(input.marital_status).trim().toUpperCase() : null) : existing.marital_status;
+    const occupation = input.occupation !== undefined ? (input.occupation ? String(input.occupation).trim().toUpperCase() : null) : existing.occupation;
+    const citizenship = input.citizenship !== undefined ? (input.citizenship ? String(input.citizenship).trim().toUpperCase() : null) : existing.citizenship;
     const validUntil = input.valid_until !== undefined ? (input.valid_until ? String(input.valid_until).trim() : null) : existing.valid_until;
     const ktpOcrConfidence = input.ktp_ocr_confidence !== undefined ? input.ktp_ocr_confidence : existing.ktp_ocr_confidence;
     const ktpOcrProvider = input.ktp_ocr_provider !== undefined ? (input.ktp_ocr_provider ? String(input.ktp_ocr_provider).trim() : null) : existing.ktp_ocr_provider;
@@ -3135,4 +3219,309 @@ export async function syncPrimaryGuestFromReservation(
   }
 
   return guestId;
+}
+
+export interface BulkImportGuestRowInput {
+  row_number?: number;
+  full_name?: string;
+  phone?: string | null;
+  email?: string | null;
+  identity_type?: string | null;
+  identity_number?: string | null;
+  gender?: string | null;
+  birth_place?: string | null;
+  birth_date?: string | null;
+  citizenship?: string | null;
+  city?: string | null;
+  address?: string | null;
+  notes?: string | null;
+  action?: 'CREATE' | 'MERGE' | 'SKIP';
+  target_guest_id?: number | null;
+}
+
+export async function bulkImportGuests(
+  pool: Pool,
+  input: {
+    property_id: number;
+    mode: 'preview' | 'commit';
+    rows: BulkImportGuestRowInput[];
+    created_by?: string | null;
+  },
+  correlationId?: string,
+  actorUserId?: number | null
+) {
+  const propertyId = parsePropertyId(input.property_id, 'property_id');
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+
+  const mode = input.mode === 'commit' ? 'commit' : 'preview';
+  const rawRows = Array.isArray(input.rows) ? input.rows : [];
+  if (rawRows.length === 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Tidak ada baris data pelanggan untuk diimport.');
+  }
+  if (rawRows.length > 2000) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Maksimal 2.000 baris per proses import.');
+  }
+
+  const { guests: existingGuests } = await searchGuests(pool, propertyId, undefined, 2000, 0, undefined, false);
+
+  const byNik = new Map<string, GuestWithStats>();
+  const byPhone = new Map<string, GuestWithStats>();
+  const byName = new Map<string, GuestWithStats>();
+  const byId = new Map<number, GuestWithStats>();
+
+  for (const g of existingGuests) {
+    byId.set(Number(g.id), g);
+    const nik = normalizeIdentityNumber(g.identity_number);
+    if (nik && nik.length >= 6 && !byNik.has(nik)) {
+      byNik.set(nik, g);
+    }
+    const ph = normalizeDigitsOnly(g.phone);
+    if (ph && ph.length >= 7 && !byPhone.has(ph)) {
+      byPhone.set(ph, g);
+    }
+    const nm = String(g.full_name || '').trim().replace(/\s+/g, ' ').toUpperCase();
+    if (nm && !byName.has(nm)) {
+      byName.set(nm, g);
+    }
+  }
+
+  function normalizeDateStr(raw: unknown): string | null {
+    if (!raw) return null;
+    const s = String(raw).trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const dmy = s.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
+    if (dmy) {
+      return `${dmy[3]}-${dmy[2].padStart(2, '0')}-${dmy[1].padStart(2, '0')}`;
+    }
+    return null;
+  }
+
+  function mapGenderInput(raw: unknown): 'MALE' | 'FEMALE' | 'OTHER' | null {
+    if (!raw) return null;
+    const s = String(raw).trim().toUpperCase();
+    if (['L', 'LK', 'LAKI-LAKI', 'LAKI', 'PRIA', 'MALE', 'M'].includes(s)) return 'MALE';
+    if (['P', 'PR', 'PEREMPUAN', 'WANITA', 'FEMALE', 'F', 'W'].includes(s)) return 'FEMALE';
+    if (s === 'OTHER') return 'OTHER';
+    return null;
+  }
+
+  const previewItems = rawRows.map((r, idx) => {
+    const rowNumber = Number(r.row_number || idx + 2);
+    const fullName = String(r.full_name || '').trim().replace(/\s+/g, ' ').toUpperCase();
+    const phone = normalizePhone(r.phone);
+    const normPhone = normalizeDigitsOnly(phone);
+    const email = normalizeEmail(r.email);
+    const identityType = String(r.identity_type || 'KTP').trim().toUpperCase() || 'KTP';
+    const identityNumber = r.identity_number ? String(r.identity_number).trim().toUpperCase() : null;
+    const normNik = normalizeIdentityNumber(identityNumber);
+    const gender = mapGenderInput(r.gender);
+    const birthPlace = r.birth_place ? String(r.birth_place).trim().toUpperCase() : null;
+    const birthDate = normalizeDateStr(r.birth_date);
+    const rawCit = String(r.citizenship || 'WNI').trim().toUpperCase();
+    const citizenship = rawCit === 'WNA' || rawCit === 'ASING' || rawCit === 'FOREIGN' ? 'WNA' : 'WNI';
+    const city = r.city ? String(r.city).trim().toUpperCase() : null;
+    const address = r.address ? String(r.address).trim().toUpperCase() : null;
+    const notes = r.notes ? String(r.notes).trim().toUpperCase() : null;
+
+    if (!fullName) {
+      return {
+        row_number: rowNumber,
+        status: 'INVALID' as const,
+        recommended_action: 'SKIP' as const,
+        action: 'SKIP' as const,
+        match_reason: 'Nama lengkap kosong',
+        matched_guest: null,
+        row_data: {
+          full_name: '',
+          phone,
+          email,
+          identity_type: identityType,
+          identity_number: identityNumber,
+          gender,
+          birth_place: birthPlace,
+          birth_date: birthDate,
+          citizenship,
+          city,
+          address,
+          notes,
+        },
+      };
+    }
+
+    let matched: GuestWithStats | null = null;
+    let matchReason = '';
+
+    if (r.target_guest_id && byId.has(Number(r.target_guest_id))) {
+      matched = byId.get(Number(r.target_guest_id)) || null;
+      matchReason = 'Dipilih untuk Merger';
+    } else if (normNik && normNik.length >= 6 && byNik.has(normNik)) {
+      matched = byNik.get(normNik) || null;
+      matchReason = 'NIK / No. Identitas Sama';
+    } else if (normPhone && normPhone.length >= 7 && byPhone.has(normPhone)) {
+      matched = byPhone.get(normPhone) || null;
+      matchReason = 'No. Telepon / WhatsApp Sama';
+    } else if (byName.has(fullName)) {
+      matched = byName.get(fullName) || null;
+      matchReason = 'Nama Pelanggan Sama';
+    }
+
+    const status = matched ? ('DUPLICATE' as const) : ('NEW' as const);
+    const recommendedAction = matched ? ('MERGE' as const) : ('CREATE' as const);
+    const chosenAction = r.action && ['CREATE', 'MERGE', 'SKIP'].includes(r.action)
+      ? r.action
+      : recommendedAction;
+
+    return {
+      row_number: rowNumber,
+      status,
+      recommended_action: recommendedAction,
+      action: chosenAction,
+      match_reason: matchReason || null,
+      matched_guest: matched
+        ? {
+            id: matched.id,
+            guest_code: matched.guest_code,
+            full_name: matched.full_name,
+            phone: matched.phone,
+            email: matched.email,
+            identity_number: matched.identity_number,
+            city: matched.city,
+            birth_date: matched.birth_date,
+            citizenship: matched.citizenship,
+            visit_count: matched.visit_count,
+            total_spend: matched.total_spend,
+          }
+        : null,
+      row_data: {
+        full_name: fullName,
+        phone,
+        email,
+        identity_type: identityType,
+        identity_number: identityNumber,
+        gender,
+        birth_place: birthPlace,
+        birth_date: birthDate,
+        citizenship,
+        city,
+        address,
+        notes,
+      },
+    };
+  });
+
+  if (mode === 'preview') {
+    const newCount = previewItems.filter((i) => i.status === 'NEW').length;
+    const dupCount = previewItems.filter((i) => i.status === 'DUPLICATE').length;
+    const invalidCount = previewItems.filter((i) => i.status === 'INVALID').length;
+    return {
+      mode: 'preview',
+      total_rows: previewItems.length,
+      new_count: newCount,
+      duplicate_count: dupCount,
+      invalid_count: invalidCount,
+      items: previewItems,
+    };
+  }
+
+  // Commit mode
+  let createdCount = 0;
+  let mergedCount = 0;
+  let skippedCount = 0;
+  const errors: Array<{ row_number: number; message: string }> = [];
+
+  for (const item of previewItems) {
+    if (item.status === 'INVALID' || item.action === 'SKIP') {
+      skippedCount++;
+      continue;
+    }
+
+    const d = item.row_data;
+    try {
+      if (item.action === 'MERGE' && item.matched_guest?.id) {
+        const targetId = Number(item.matched_guest.id);
+        const existing = byId.get(targetId);
+        await updateGuest(
+          pool,
+          targetId,
+          {
+            property_id: propertyId,
+            full_name: existing?.full_name ? existing.full_name.toUpperCase() : d.full_name,
+            phone: existing?.phone || d.phone || undefined,
+            email: existing?.email || d.email || undefined,
+            identity_type: existing?.identity_type || d.identity_type || undefined,
+            identity_number: existing?.identity_number || d.identity_number || undefined,
+            gender: (existing?.gender as any) || d.gender || undefined,
+            birth_place: existing?.birth_place || d.birth_place || undefined,
+            birth_date: existing?.birth_date || d.birth_date || undefined,
+            citizenship: existing?.citizenship || d.citizenship || undefined,
+            nationality: (existing?.citizenship || d.citizenship) === 'WNA' ? 'WNA' : 'WNI',
+            city: existing?.city || d.city || undefined,
+            address: existing?.address || d.address || undefined,
+            notes: existing?.notes
+              ? d.notes && !existing.notes.includes(d.notes)
+                ? `${existing.notes} | ${d.notes}`
+                : existing.notes
+              : d.notes || undefined,
+          },
+          correlationId
+        );
+        mergedCount++;
+      } else {
+        await createGuest(
+          pool,
+          {
+            property_id: propertyId,
+            full_name: d.full_name,
+            phone: d.phone,
+            email: d.email,
+            identity_type: d.identity_type,
+            identity_number: d.identity_number,
+            gender: d.gender,
+            birth_place: d.birth_place,
+            birth_date: d.birth_date,
+            citizenship: d.citizenship,
+            nationality: d.citizenship === 'WNA' ? 'WNA' : 'WNI',
+            city: d.city,
+            address: d.address,
+            notes: d.notes,
+            created_by: input.created_by || 'Import CRM',
+          },
+          correlationId
+        );
+        createdCount++;
+      }
+    } catch (err: any) {
+      errors.push({
+        row_number: item.row_number,
+        message: String(err?.message || 'Gagal memproses baris'),
+      });
+    }
+  }
+
+  await writeGuestAudit(pool, {
+    action: 'GUEST_CREATE',
+    entity: 'GUEST',
+    recordId: propertyId,
+    newValue: {
+      action: 'BULK_IMPORT_COMMIT',
+      created_count: createdCount,
+      merged_count: mergedCount,
+      skipped_count: skippedCount,
+      error_count: errors.length,
+    },
+    propertyId,
+    correlationId,
+    actorUserId,
+  });
+
+  return {
+    mode: 'commit',
+    total_rows: previewItems.length,
+    created_count: createdCount,
+    merged_count: mergedCount,
+    skipped_count: skippedCount,
+    error_count: errors.length,
+    errors,
+  };
 }

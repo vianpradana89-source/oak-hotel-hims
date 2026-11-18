@@ -4,6 +4,7 @@ import {
   addLoyaltyLedgerEntry,
   addReservationGuest,
   archiveGuest,
+  bulkImportGuests,
   checkGuestDuplicates,
   createGuest,
   deleteGuest,
@@ -50,15 +51,44 @@ function handleRouterError(err: any, res: any) {
 export function createGuestsRouter(pool: Pool) {
   const router = Router();
 
-  // GET /api/guests/crm-summary?property_id=X&hotel_date=YYYY-MM-DD
+  // GET /api/guests/crm-summary?property_id=X&hotel_date=YYYY-MM-DD&demographics_month=YYYY-MM
   router.get('/crm-summary', async (req: any, res: any) => {
     try {
       const propertyId = parsePropertyId(req.query.property_id, 'property_id');
       const hotelDate = typeof req.query.hotel_date === 'string' ? req.query.hotel_date : undefined;
-      const summary = await getCrmSummary(pool, propertyId, hotelDate);
+      const demographicsMonth = typeof req.query.demographics_month === 'string' ? req.query.demographics_month : undefined;
+      const summary = await getCrmSummary(pool, propertyId, hotelDate, demographicsMonth);
       return res.json({
         status: 'SUCCESS',
         data: summary
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/bulk-import
+  router.post('/bulk-import', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const result = await bulkImportGuests(
+        pool,
+        {
+          property_id: propertyId,
+          mode: req.body?.mode === 'commit' ? 'commit' : 'preview',
+          rows: Array.isArray(req.body?.rows) ? req.body.rows : [],
+          created_by: req.user?.full_name || req.user?.username || 'Import CRM',
+        },
+        correlationId,
+        actorUserId
+      );
+      return res.json({
+        status: 'SUCCESS',
+        data: result,
       });
     } catch (err: any) {
       return handleRouterError(err, res);

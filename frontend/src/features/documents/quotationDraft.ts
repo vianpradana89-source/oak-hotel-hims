@@ -12,6 +12,8 @@ export interface QuotationDraftItem {
   qty: number;
   unit: string;
   unitPrice: number;
+  discountType?: QuotationAdjustmentType;
+  discountValue?: number;
   note?: string;
 }
 
@@ -62,11 +64,42 @@ export interface QuotationDraft {
 
 export interface QuotationDraftTotals {
   itemTotals: number[];
+  itemGrossTotals: number[];
+  itemDiscounts: number[];
   subtotal: number;
   discountAmount: number;
   serviceAmount: number;
   taxAmount: number;
   grandTotal: number;
+}
+
+export function calculateQuotationItemDiscount(item: QuotationDraftItem): {
+  grossTotal: number;
+  discountAmount: number;
+  netTotal: number;
+} {
+  const rawQty = Number(item.qty);
+  const qty = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 0;
+  const rawPrice = Number(item.unitPrice);
+  const unitPrice = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 0;
+  const grossTotal = Math.round(qty * unitPrice);
+
+  const rawDiscVal = Number(item.discountValue);
+  const validDiscVal = Number.isFinite(rawDiscVal) && rawDiscVal > 0 ? rawDiscVal : 0;
+  const discType: QuotationAdjustmentType = item.discountType === 'percent' ? 'percent' : 'amount';
+
+  let discountAmount = 0;
+  if (discType === 'percent') {
+    const pct = Math.min(100, Math.max(0, validDiscVal));
+    discountAmount = Math.round((grossTotal * pct) / 100);
+  } else {
+    discountAmount = Math.round(validDiscVal);
+  }
+  if (discountAmount > grossTotal) {
+    discountAmount = grossTotal;
+  }
+  const netTotal = Math.max(0, grossTotal - discountAmount);
+  return { grossTotal, discountAmount, netTotal };
 }
 
 
@@ -112,6 +145,8 @@ export function createQuotationDraftItem(partial?: Partial<QuotationDraftItem>):
     qty: partial?.qty !== undefined ? Math.max(0, Number(partial.qty) || 0) : 1,
     unit: partial?.unit ?? '',
     unitPrice: partial?.unitPrice !== undefined ? Math.max(0, Number(partial.unitPrice) || 0) : 0,
+    discountType: partial?.discountType === 'percent' ? 'percent' : 'amount',
+    discountValue: partial?.discountValue !== undefined ? Math.max(0, Number(partial.discountValue) || 0) : 0,
     ...(partial?.note !== undefined ? { note: partial.note } : {}),
   };
 }
@@ -315,13 +350,10 @@ export function buildQuotationDraftFromReservation(
  * Pure financial calculation following OAK HIMS quotation rounding and adjustment rules.
  */
 export function calculateQuotationDraftTotals(draft: QuotationDraft): QuotationDraftTotals {
-  const itemTotals: number[] = (draft.items || []).map((item) => {
-    const rawQty = Number(item.qty);
-    const qty = Number.isFinite(rawQty) && rawQty > 0 ? rawQty : 0;
-    const rawPrice = Number(item.unitPrice);
-    const unitPrice = Number.isFinite(rawPrice) && rawPrice > 0 ? rawPrice : 0;
-    return Math.round(qty * unitPrice);
-  });
+  const itemCalcs = (draft.items || []).map((item) => calculateQuotationItemDiscount(item));
+  const itemTotals: number[] = itemCalcs.map((c) => c.netTotal);
+  const itemGrossTotals: number[] = itemCalcs.map((c) => c.grossTotal);
+  const itemDiscounts: number[] = itemCalcs.map((c) => c.discountAmount);
 
   const subtotal = itemTotals.reduce((sum, current) => sum + current, 0);
 
@@ -363,6 +395,8 @@ export function calculateQuotationDraftTotals(draft: QuotationDraft): QuotationD
 
   return {
     itemTotals,
+    itemGrossTotals,
+    itemDiscounts,
     subtotal,
     discountAmount,
     serviceAmount,
@@ -419,6 +453,8 @@ export function buildQuotationDraftFromSavedRecord(detail: any): QuotationDraft 
       qty: Math.max(0, Number(it.quantity ?? it.qty) || 1),
       unit: it.unit || '',
       unitPrice: Math.max(0, Number(it.unit_price ?? it.unitPrice) || 0),
+      discountType: it.discount_type === 'percent' || it.discountType === 'percent' ? 'percent' : 'amount',
+      discountValue: Math.max(0, Number(it.discount_value ?? it.discountValue ?? it.discount ?? 0)),
       note: it.note || '',
     })),
 

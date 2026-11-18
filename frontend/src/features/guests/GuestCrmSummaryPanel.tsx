@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
   AlertTriangle,
   Cake,
+  Calendar,
   Clock,
   Globe2,
   MapPin,
@@ -25,11 +26,37 @@ interface GuestCrmSummaryPanelProps {
   loading: boolean;
   loyaltySettings: PropertyLoyaltySettings | null;
   propertyName?: string;
+  demographicsMonth?: string;
+  onChangeDemographicsMonth?: (month: string) => void;
   onSelectGuest: (guestId: number) => void;
   onOpenDuplicateReview: () => void;
   duplicateCount: number;
   onOpenWaTemplateModal: (target: 'birthday' | 'followup' | 'database') => void;
   onQuickFilterDatabase?: (query: string) => void;
+}
+
+function formatIndoMonthYear(ym: string): string {
+  if (!ym || ym === 'ALL') return 'Semua Waktu (Kumulatif)';
+  const [y, m] = ym.split('-');
+  const months = [
+    'Januari',
+    'Februari',
+    'Maret',
+    'April',
+    'Mei',
+    'Juni',
+    'Juli',
+    'Agustus',
+    'September',
+    'Oktober',
+    'November',
+    'Desember',
+  ];
+  const idx = Number(m) - 1;
+  if (idx >= 0 && idx < 12) {
+    return `${months[idx]} ${y}`;
+  }
+  return ym;
 }
 
 function normalizeWaPhone(raw: string | null | undefined): string | null {
@@ -126,6 +153,8 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
   loading,
   loyaltySettings,
   propertyName = 'OAK Hotel Lawang',
+  demographicsMonth = 'ALL',
+  onChangeDemographicsMonth,
   onSelectGuest,
   onOpenDuplicateReview,
   duplicateCount,
@@ -487,21 +516,49 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
 
       {/* Demographics Dashboard: Laporan Kota Asal Tamu & WNI vs WNA */}
       {summary.demographics && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
-          {/* WNI vs WNA Breakdown (5 cols) */}
-          <div className="lg:col-span-5 bg-white border border-stone-200 rounded-2xl shadow-xs p-5 flex flex-col justify-between">
-            <div>
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center space-x-2">
-                  <Globe2 className="w-4 h-4 text-[#1E392A]" />
-                  <h3 className="text-sm font-bold text-stone-900">
-                    Kewarganegaraan Tamu (WNI vs WNA)
-                  </h3>
+        <div className="space-y-3">
+          {/* Shared Month Filter Toolbar */}
+          <div className="bg-white border border-stone-200 rounded-2xl shadow-2xs px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-2 text-xs text-stone-700 font-semibold">
+              <Calendar className="w-4 h-4 text-[#1E392A]" />
+              <span>Filter Periode Laporan Kewarganegaraan & Asal Kota:</span>
+              <span className="px-2 py-0.5 rounded-full bg-[#FAF8F3] border border-[#E6DFC8] text-[#1E392A] font-bold">
+                {formatIndoMonthYear(demographicsMonth)}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-[11px] font-semibold text-stone-500">Pilih Bulan:</label>
+              <select
+                value={demographicsMonth}
+                onChange={(e) => onChangeDemographicsMonth?.(e.target.value)}
+                className="px-3 py-1.5 text-xs font-semibold text-stone-800 bg-[#FAF8F3] border border-[#E6DFC8] rounded-xl focus:outline-hidden focus:ring-2 focus:ring-[#1E392A]/20 cursor-pointer"
+              >
+                <option value="ALL">Semua Waktu (Kumulatif)</option>
+                {(summary.demographics.available_months || []).map((ym) => (
+                  <option key={ym} value={ym}>
+                    {formatIndoMonthYear(ym)}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+            {/* WNI vs WNA Breakdown (5 cols) */}
+            <div className="lg:col-span-5 bg-white border border-stone-200 rounded-2xl shadow-xs p-5 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <div className="flex items-center space-x-2">
+                    <Globe2 className="w-4 h-4 text-[#1E392A]" />
+                    <h3 className="text-sm font-bold text-stone-900">
+                      Kewarganegaraan Tamu (WNI vs WNA)
+                    </h3>
+                  </div>
+                  <span className="text-[11px] font-medium text-stone-400 shrink-0">
+                    Total {(summary.demographics.wni_count + summary.demographics.wna_count).toLocaleString('id-ID')} Tamu
+                  </span>
                 </div>
-                <span className="text-[11px] font-medium text-stone-400">
-                  Total {(summary.demographics.wni_count + summary.demographics.wna_count).toLocaleString('id-ID')} Tamu
-                </span>
-              </div>
 
               {/* Stacked Progress Bar */}
               <div className="w-full h-3.5 bg-stone-100 rounded-full overflow-hidden flex border border-stone-200/70 mb-4">
@@ -629,6 +686,7 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
                 })}
               </div>
             )}
+          </div>
           </div>
         </div>
       )}
