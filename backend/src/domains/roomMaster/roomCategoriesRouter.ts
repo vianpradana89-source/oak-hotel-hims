@@ -321,23 +321,29 @@ export function createRoomCategoriesRouter(pool: Pool) {
         throw httpError(404, 'ROOM_CATEGORY_NOT_FOUND', `room category ${categoryId} not found`);
       }
       const current = currentResult.rows[0];
+      const forceDelete = String(req.query.force || '').toLowerCase() === 'true';
 
-      const typeRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM room_types WHERE room_category_id = $1',
-        [categoryId]
-      );
-      if (Number(typeRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_CATEGORY_HAS_ROOM_TYPES',
-          `room category ${current.code} is referenced by ${typeRefs.rows[0].c} room type(s); permanent deletion is rejected`);
-      }
+      if (forceDelete) {
+        await client.query('UPDATE room_types SET room_category_id = NULL WHERE room_category_id = $1', [categoryId]);
+        await client.query('UPDATE reservations SET booked_room_category_id_snapshot = NULL WHERE booked_room_category_id_snapshot = $1', [categoryId]);
+      } else {
+        const typeRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM room_types WHERE room_category_id = $1',
+          [categoryId]
+        );
+        if (Number(typeRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_CATEGORY_HAS_ROOM_TYPES',
+            `room category ${current.code} is referenced by ${typeRefs.rows[0].c} room type(s); permanent deletion is rejected`);
+        }
 
-      const snapshotRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM reservations WHERE booked_room_category_id_snapshot = $1',
-        [categoryId]
-      );
-      if (Number(snapshotRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_CATEGORY_HAS_RESERVATION_HISTORY',
-          `room category ${current.code} is referenced by ${snapshotRefs.rows[0].c} reservation snapshot(s); permanent deletion is rejected`);
+        const snapshotRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM reservations WHERE booked_room_category_id_snapshot = $1',
+          [categoryId]
+        );
+        if (Number(snapshotRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_CATEGORY_HAS_RESERVATION_HISTORY',
+            `room category ${current.code} is referenced by ${snapshotRefs.rows[0].c} reservation snapshot(s); permanent deletion is rejected`);
+        }
       }
 
       await client.query('DELETE FROM room_categories WHERE id = $1', [categoryId]);

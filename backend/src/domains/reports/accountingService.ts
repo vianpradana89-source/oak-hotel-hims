@@ -332,6 +332,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            AND t.transaction_type = 'PURCHASE'
            AND t.deleted_at IS NULL
            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+           AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED'
 
          UNION ALL
 
@@ -352,7 +353,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          FROM pos_purchase_orders ppo
          LEFT JOIN pos_suppliers ps ON ps.id = ppo.supplier_id AND ps.property_id = ppo.property_id
          WHERE ppo.property_id = $1
-           AND COALESCE(ppo.status, 'DRAFT') != 'CANCELLED'
+           AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
+           AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
            AND NOT EXISTS (
              SELECT 1
              FROM transactions t
@@ -804,7 +806,17 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const r of ctx.roomSales || []) {
     if (r.is_complimentary) continue;
-    const amount = Math.round(Number(r.total_price) || 0);
+    const pMethod = String(r.payment_method || '').trim();
+    const pMethodUpper = pMethod.toUpperCase();
+    const pStatusUpper = String(r.payment_status || '').toUpperCase();
+    if (pMethodUpper.includes('BELUM BAYAR') || pMethodUpper.includes('PIUTANG')) continue;
+    const paidAmt = Math.round(Number(r.amount_paid) || 0);
+    const totalAmt = Math.round(Number(r.total_price) || 0);
+    const isPaidOrOtaCollect =
+      pStatusUpper === 'PAID' ||
+      pStatusUpper === 'LUNAS' ||
+      pMethodUpper === 'OTA COLLECT';
+    const amount = paidAmt > 0 ? paidAmt : isPaidOrOtaCollect ? totalAmt : 0;
     if (amount <= 0) continue;
     const txDate = String(r.tx_date || r.check_in || '').slice(0, 10);
     const txDatetime = r.tx_datetime ? String(r.tx_datetime).slice(0, 16) : `${txDate}, 14.00`;
@@ -828,6 +840,15 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const p of ctx.posItemSales || []) {
     if (p.is_complimentary) continue;
+    const pStatusUpper = String(p.payment_status || 'PAID').toUpperCase();
+    const pMethodUpper = String(p.payment_method || '').toUpperCase();
+    if (
+      ['UNPAID', 'OPEN', 'PENDING', 'BILL_TO_ROOM', 'BILLED_TO_ROOM'].includes(pStatusUpper) ||
+      pMethodUpper.includes('BELUM BAYAR') ||
+      pMethodUpper.includes('PIUTANG')
+    ) {
+      continue;
+    }
     const amount = Math.round(Number(p.line_total) || 0);
     if (amount <= 0) continue;
     const txDate = String(p.tx_date || '').slice(0, 10);
@@ -847,6 +868,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   }
 
   for (const inc of ctx.financialsData?.other_income?.items || []) {
+    if (String((inc as any).payment_status || 'PAID').toUpperCase() === 'UNPAID') continue;
     const amount = Math.round(Number(inc.net_amount) || 0);
     if (amount <= 0) continue;
     const txDate = String(inc.transaction_date || '').slice(0, 10);
@@ -865,6 +887,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   }
 
   for (const exp of ctx.financialsData?.expense?.items || []) {
+    if (String((exp as any).payment_status || 'PAID').toUpperCase() === 'UNPAID') continue;
     const amount = Math.round(Number(exp.net_amount) || 0);
     if (amount <= 0) continue;
     const txDate = String(exp.transaction_date || '').slice(0, 10);
@@ -884,8 +907,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
 
   for (const pur of payablesItems) {
     if (pur.tx_date < ctx.startDate || pur.tx_date > ctx.endDate) continue;
-    const amount = Math.round(Number(pur.total_amount) || 0);
-    if (amount <= 0) continue;
+    const paidAmt = Math.round(Number(pur.paid_amount) || 0);
+    if (paidAmt <= 0) continue;
     rawJournal.push({
       sortKey: `${pur.tx_date}_5_${pur.transaction_no}`,
       id: `JRN-PUR-${pur.id}`,
@@ -896,7 +919,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       description: `${pur.notes || 'Pembelian Barang'} — ${pur.supplier_name}`,
       payment_method: String(pur.payment_method || 'Cash'),
       cash_in: 0,
-      cash_out: amount,
+      cash_out: paidAmt,
     });
   }
 

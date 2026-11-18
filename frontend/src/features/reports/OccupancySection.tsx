@@ -72,6 +72,8 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
   const [showDailyTable, setShowDailyTable] = useState<boolean>(true);
   const [showRoomTypeTable, setShowRoomTypeTable] = useState<boolean>(true);
   const [showFinCard, setShowFinCard] = useState<boolean>(true);
+  const [showOoHistoryTable, setShowOoHistoryTable] = useState<boolean>(true);
+  const [ooHistoryFilter, setOoHistoryFilter] = useState<'multi_day' | 'all'>('all');
 
   const requestVersionRef = useRef<number>(0);
 
@@ -628,6 +630,157 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
     );
   };
 
+  const renderOoHistoryTable = () => {
+    if (!data) return null;
+    const rawHistory = data.oo_blocks_history || [];
+    const multiDayCount = rawHistory.filter((item) => Number(item.duration_days || 0) > 1).length;
+    const filteredHistory = ooHistoryFilter === 'multi_day'
+      ? rawHistory.filter((item) => Number(item.duration_days || 0) > 1)
+      : rawHistory;
+
+    return (
+      <div className="bg-white border border-rose-200 rounded-xl shadow-sm overflow-hidden">
+        <div className="w-full flex flex-wrap items-center justify-between gap-2 px-4 py-3 bg-rose-50/70 border-b border-rose-200">
+          <button
+            type="button"
+            onClick={() => setShowOoHistoryTable((prev) => !prev)}
+            className="flex items-center gap-2 text-left text-xs font-bold text-rose-900 hover:text-rose-950 cursor-pointer"
+          >
+            <span>Laporan & Riwayat Kamar OO / Out of Order ({filteredHistory.length} Catatan)</span>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-rose-600 text-white">
+              OO &gt; 1 Hari: {multiDayCount}
+            </span>
+          </button>
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-lg border border-rose-200 bg-white p-0.5">
+              <button
+                type="button"
+                onClick={() => setOoHistoryFilter('multi_day')}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                  ooHistoryFilter === 'multi_day'
+                    ? 'bg-rose-700 text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                OO &gt; 1 Hari ({multiDayCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setOoHistoryFilter('all')}
+                className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                  ooHistoryFilter === 'all'
+                    ? 'bg-rose-700 text-white'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Semua OO/OOS ({rawHistory.length})
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowOoHistoryTable((prev) => !prev)}
+              className="text-xs font-semibold text-slate-500 hover:text-slate-800 flex items-center gap-1 cursor-pointer"
+            >
+              {showOoHistoryTable ? (
+                <>
+                  <IconChevronUp className="w-3.5 h-3.5" /> Tutup
+                </>
+              ) : (
+                <>
+                  <IconChevronDown className="w-3.5 h-3.5" /> Tampilkan
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {showOoHistoryTable && (
+          <div className="overflow-x-auto max-h-[420px] overflow-y-auto">
+            {filteredHistory.length === 0 ? (
+              <div className="p-6 text-center text-xs text-slate-500">
+                Tidak ada riwayat kamar OO (Out of Order / Out of Service) pada filter ini.
+              </div>
+            ) : (
+              <table className="min-w-full text-xs divide-y divide-slate-200">
+                <thead className="sticky top-0 z-10 bg-slate-100 text-slate-700 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-200">
+                  <tr>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Kamar</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Tipe Kamar</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Jenis Blokir</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Rentang Tanggal</th>
+                    <th className="py-2.5 px-3 text-right bg-slate-100">Total Durasi</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Alasan / Kendala</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Petugas (PIC)</th>
+                    <th className="py-2.5 px-3 text-left bg-slate-100">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
+                  {filteredHistory.map((item) => {
+                    const isMultiDay = Number(item.duration_days || 0) > 1;
+                    return (
+                      <tr key={item.id} className={`hover:bg-slate-50/80 transition-colors ${isMultiDay ? 'bg-rose-50/30' : ''}`}>
+                        <td className="py-2.5 px-3 font-bold text-slate-900">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-slate-900 text-white font-mono text-xs">
+                            {item.room_number}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-800">
+                          <div className="font-semibold">{item.room_type_name}</div>
+                          {item.room_type_code && (
+                            <div className="text-[10px] text-slate-400 font-mono">{item.room_type_code}</div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            item.block_type === 'OUT_OF_ORDER'
+                              ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                              : 'bg-amber-100 text-amber-800 border border-amber-200'
+                          }`}>
+                            {item.block_type === 'OUT_OF_ORDER' ? 'OO (Out of Order)' : 'OOS (Out of Service)'}
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-800">
+                          <div>{formatDateIndonesian(item.start_date)} s/d {formatDateIndonesian(item.end_date)}</div>
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
+                          <span className={`px-2 py-0.5 rounded font-bold ${
+                            isMultiDay
+                              ? 'bg-rose-600 text-white'
+                              : 'bg-slate-100 text-slate-800'
+                          }`}>
+                            {item.duration_days} Hari
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-700 max-w-xs">
+                          {item.reason || '-'}
+                        </td>
+                        <td className="py-2.5 px-3 text-slate-700">
+                          <div>Dibuat: <span className="font-semibold text-slate-900">{item.created_by || '-'}</span></div>
+                          {item.released_by && (
+                            <div className="text-[10px] text-emerald-700">Dilepas: {item.released_by}</div>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            item.status === 'ACTIVE'
+                              ? 'bg-red-100 text-red-800 border border-red-200'
+                              : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          }`}>
+                            {item.status === 'ACTIVE' ? 'MASIH OO (AKTIF)' : 'SELESAI / DILEPAS'}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   return (
     <div className="space-y-4 pt-2">
       <div className="flex items-center justify-between">
@@ -652,6 +805,7 @@ export const OccupancySection: React.FC<OccupancySectionProps> = ({
       {(subView === 'all' || subView === 'kpi_fin') && renderFinCard()}
       {(subView === 'all' || subView === 'daily_trend') && renderDailyTable()}
       {(subView === 'all' || subView === 'room_types') && renderRoomTypeBreakdown()}
+      {renderOoHistoryTable()}
     </div>
   );
 };

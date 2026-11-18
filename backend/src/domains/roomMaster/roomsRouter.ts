@@ -5,6 +5,7 @@ import {
   assertPropertyExists,
   assertRoomBelongsToProperty,
   countActiveReservationsForRoom,
+  forceCascadeDeleteRoomMasterData,
   getActiveReservationsForRoom,
   getActivePhysicalCapacity,
   httpError,
@@ -373,54 +374,62 @@ export function createRoomsRouter(pool: Pool) {
         throw httpError(403, 'PROPERTY_MISMATCH', `room ${roomId} does not belong to property ${propertyId}`);
       }
       const roomLabel = String(current.room_number ?? roomId);
+      const forceDelete = String(req.query.force || '').toLowerCase() === 'true';
 
-      // History guard 1: reservations (any status, incl. CHECKED_OUT/CANCELLED).
-      const reservationRefs = await client.query(
-        `SELECT COUNT(*)::int AS c,
-                COUNT(*) FILTER (WHERE status IN ('BOOKED','CHECKED_IN'))::int AS active_c
-         FROM reservations WHERE room_id = $1`,
-        [roomId]
-      );
-      if (Number(reservationRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_HAS_HISTORY',
-          `room ${roomLabel} has ${reservationRefs.rows[0].c} reservation record(s) (${reservationRefs.rows[0].active_c} active); permanent deletion is rejected`);
-      }
+      if (forceDelete) {
+        await forceCascadeDeleteRoomMasterData(client, {
+          propertyId,
+          roomId
+        });
+      } else {
+        // History guard 1: reservations (any status, incl. CHECKED_OUT/CANCELLED).
+        const reservationRefs = await client.query(
+          `SELECT COUNT(*)::int AS c,
+                  COUNT(*) FILTER (WHERE status IN ('BOOKED','CHECKED_IN'))::int AS active_c
+           FROM reservations WHERE room_id = $1`,
+          [roomId]
+        );
+        if (Number(reservationRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_HAS_HISTORY',
+            `room ${roomLabel} has ${reservationRefs.rows[0].c} reservation record(s) (${reservationRefs.rows[0].active_c} active); permanent deletion is rejected`);
+        }
 
-      // History guard 2/3: housekeeping & maintenance traces by room number.
-      const hkRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE room_number = $1 AND property_id = $2',
-        [String(current.room_number ?? ''), current.property_id]
-      );
-      if (Number(hkRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_HAS_HISTORY',
-          `room ${roomLabel} has ${hkRefs.rows[0].c} housekeeping task record(s); permanent deletion is rejected`);
-      }
-      const mtRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM maintenance_tasks WHERE room_number = $1 AND property_id = $2',
-        [String(current.room_number ?? ''), current.property_id]
-      );
-      if (Number(mtRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_HAS_HISTORY',
-          `room ${roomLabel} has ${mtRefs.rows[0].c} maintenance task record(s); permanent deletion is rejected`);
-      }
+        // History guard 2/3: housekeeping & maintenance traces by room number.
+        const hkRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM housekeeping_tasks WHERE room_number = $1 AND property_id = $2',
+          [String(current.room_number ?? ''), current.property_id]
+        );
+        if (Number(hkRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_HAS_HISTORY',
+            `room ${roomLabel} has ${hkRefs.rows[0].c} housekeeping task record(s); permanent deletion is rejected`);
+        }
+        const mtRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM maintenance_tasks WHERE room_number = $1 AND property_id = $2',
+          [String(current.room_number ?? ''), current.property_id]
+        );
+        if (Number(mtRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_HAS_HISTORY',
+            `room ${roomLabel} has ${mtRefs.rows[0].c} maintenance task record(s); permanent deletion is rejected`);
+        }
 
-      // Inventory safety: removing one active physical room lowers future
-      // capacity; reject if already-reserved nights would exceed it.
-      const typeId = current.room_type_id === null || current.room_type_id === undefined
-        ? null
-        : Number(current.room_type_id);
-      if (typeId !== null) {
-        const capacityAfterDelete = (await getActivePhysicalCapacity(client, typeId)) - 1;
-        await assertDeactivationInventorySafe(client, typeId, capacityAfterDelete);
-      }
+        // Inventory safety: removing one active physical room lowers future
+        // capacity; reject if already-reserved nights would exceed it.
+        const typeId = current.room_type_id === null || current.room_type_id === undefined
+          ? null
+          : Number(current.room_type_id);
+        if (typeId !== null) {
+          const capacityAfterDelete = (await getActivePhysicalCapacity(client, typeId)) - 1;
+          await assertDeactivationInventorySafe(client, typeId, capacityAfterDelete);
+        }
 
-      await client.query('DELETE FROM rooms WHERE id = $1', [roomId]);
+        await client.query('DELETE FROM rooms WHERE id = $1', [roomId]);
 
-      if (typeId !== null) {
-        const sync = await syncLedgerCapacityFromMaster(client, typeId);
-        if (sync.conflictRows > 0) {
-          throw httpError(409, 'CAPACITY_CONFLICT',
-            `ledger holds reserved quantities above the resulting capacity for room type ${typeId}`);
+        if (typeId !== null) {
+          const sync = await syncLedgerCapacityFromMaster(client, typeId);
+          if (sync.conflictRows > 0) {
+            throw httpError(409, 'CAPACITY_CONFLICT',
+              `ledger holds reserved quantities above the resulting capacity for room type ${typeId}`);
+          }
         }
       }
 

@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import type { HousekeepingTaskFinding } from './housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { useAuth } from '../auth/AuthContext';
 
 interface MaintenanceIssuesModalProps {
   isOpen: boolean;
@@ -19,6 +20,9 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
   onRefreshParent,
   initialRoomId
 }) => {
+  const { user } = useAuth();
+  const currentUserName = user?.full_name || user?.username || 'Staff';
+  const currentUserRole = user?.role || 'Staff';
   const [findings, setFindings] = useState<HousekeepingTaskFinding[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -90,8 +94,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
       const payload: any = {
         property_id: propertyId,
         resolution_note: resolutionNote.trim(),
-        actor_name: 'Receptionist / Front Desk',
-        actor_role: 'Front Office'
+        actor_name: currentUserName,
+        actor_role: currentUserRole
       };
 
       if (targetRoomStatus === 'VACANT_CLEAN') {

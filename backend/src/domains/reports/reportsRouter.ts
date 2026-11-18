@@ -933,6 +933,7 @@ export function createReportsRouter(pool: Pool): Router {
             AND t.transaction_type = 'PURCHASE'
             AND t.deleted_at IS NULL
             AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED'
             AND t.transaction_date >= $2::date
             AND t.transaction_date <= $3::date
 
@@ -963,7 +964,8 @@ export function createReportsRouter(pool: Pool): Router {
           LEFT JOIN pos_menu_items pmi ON pmi.id = ppoi.product_id AND pmi.property_id = ppo.property_id
           LEFT JOIN pos_product_uoms u ON u.id = ppoi.uom_id
           WHERE ppo.property_id = $1
-            AND COALESCE(ppo.status, 'DRAFT') != 'CANCELLED'
+            AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
+            AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
             AND ppo.order_date >= $2::date
             AND ppo.order_date <= $3::date
             AND NOT EXISTS (
@@ -1621,6 +1623,7 @@ export function createReportsRouter(pool: Pool): Router {
               FROM pos_purchase_orders ppo
               WHERE ppo.property_id = $1
                 AND ppo.status = 'COMPLETED'
+                AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
                 AND ppo.order_date >= $2::date
                 AND ppo.order_date <= $3::date
                 AND NOT EXISTS (

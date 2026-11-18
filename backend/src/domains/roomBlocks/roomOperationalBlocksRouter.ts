@@ -276,8 +276,8 @@ export function createRoomOperationalBlocksRouter(pool: Pool) {
     }
   });
 
-  // PATCH /api/room-operational-blocks/:id/release
-  router.patch('/:id/release', async (req: any, res: any) => {
+  // PATCH / POST /api/room-operational-blocks/:id/release
+  const releaseBlockHandler = async (req: any, res: any) => {
     const blockId = Number(req.params.id);
     if (!Number.isInteger(blockId) || blockId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid block id' });
@@ -350,6 +350,13 @@ export function createRoomOperationalBlocksRouter(pool: Pool) {
 
       const updatedBlock = updated.rows[0];
 
+      if (body.target_room_status && ['VACANT_DIRTY', 'VACANT_CLEAN', 'INSPECTED'].includes(String(body.target_room_status).toUpperCase())) {
+        await client.query(
+          `UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3`,
+          [String(body.target_room_status).toUpperCase(), block.room_id, propertyId]
+        );
+      }
+
       await writeRoomBlockAudit(client, {
         action: nextStatus === 'CANCELLED' ? 'CANCEL' : 'RELEASE',
         blockId,
@@ -396,10 +403,12 @@ export function createRoomOperationalBlocksRouter(pool: Pool) {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/:id/release', releaseBlockHandler);
+  router.post('/:id/release', releaseBlockHandler);
 
-  // PATCH /api/room-operational-blocks/:id/cancel
-  router.patch('/:id/cancel', async (req: any, res: any) => {
+  // PATCH / POST /api/room-operational-blocks/:id/cancel
+  const cancelBlockHandler = async (req: any, res: any) => {
     const blockId = Number(req.params.id);
     if (!Number.isInteger(blockId) || blockId <= 0) {
       return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid block id' });
@@ -504,7 +513,9 @@ export function createRoomOperationalBlocksRouter(pool: Pool) {
     } finally {
       client.release();
     }
-  });
+  };
+  router.patch('/:id/cancel', cancelBlockHandler);
+  router.post('/:id/cancel', cancelBlockHandler);
 
   return router;
 }

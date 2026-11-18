@@ -581,13 +581,14 @@ export async function getHousekeepingDailyOperations(
   client: PoolClient | Pool,
   propertyId: number,
   dateStr: string
-): Promise<{ metrics: HousekeepingDailyMetrics; tasks: HousekeepingTaskRecord[] }> {
-  // 1. Query rooms for property
+): Promise<{ metrics: HousekeepingDailyMetrics; tasks: HousekeepingTaskRecord[]; rooms?: any[] }> {
+  // 1. Query active rooms for property
   const roomsRes = await client.query(
     `SELECT r.id, r.room_number, r.status, r.room_type_id, COALESCE(rt.name, r.name) as room_type_name
      FROM rooms r
      LEFT JOIN room_types rt ON rt.id = r.room_type_id
      WHERE r.property_id = $1
+       AND COALESCE(r.is_active, TRUE) = TRUE
      ORDER BY r.room_number ASC`,
     [propertyId]
   );
@@ -724,15 +725,39 @@ export async function getHousekeepingDailyOperations(
   );
   const activeFindingRoomIds = new Set<number>(activeFindingsRoomsRes.rows.map((r: any) => Number(r.room_id)));
 
+  // Query rooms with active room_operational_blocks overlapping dateStr
+  const activeBlocksRes = await client.query(
+    `SELECT id, room_id, block_type, to_char(start_date, 'YYYY-MM-DD') AS start_date,
+            to_char(end_date, 'YYYY-MM-DD') AS end_date, reason, status, created_by
+     FROM room_operational_blocks
+     WHERE property_id = $1
+       AND status = 'ACTIVE'
+       AND start_date <= $2::date
+       AND end_date > $2::date
+     ORDER BY id DESC`,
+    [propertyId, dateStr]
+  );
+  const activeBlockByRoom = new Map<number, any>();
+  for (const b of activeBlocksRes.rows) {
+    const rid = Number(b.room_id);
+    if (!activeBlockByRoom.has(rid)) {
+      activeBlockByRoom.set(rid, b);
+    }
+  }
+
   for (const r of rooms) {
     const s = String(r.status || '').toUpperCase();
     const hasActiveFinding = activeFindingRoomIds.has(Number(r.id));
-    if (s === 'VACANT_DIRTY' || s === 'OCCUPIED_DIRTY') dirtyCount++;
+    const activeBlock = activeBlockByRoom.get(Number(r.id)) || null;
+    r.active_block = activeBlock;
+    r.has_active_finding = hasActiveFinding;
+
+    if (s === 'VACANT_DIRTY' || s === 'OCCUPIED_DIRTY' || s === 'DIRTY') dirtyCount++;
     else if (s === 'CLEANING') cleaningCount++;
     else if (s === 'VACANT_CLEAN') vacantCleanCount++;
     else if (s === 'INSPECTED') inspectedCount++;
 
-    if (s === 'OUT_OF_ORDER' || s === 'OUT_OF_SERVICE' || s === 'MAINTENANCE' || s === 'REPAIR' || hasActiveFinding) {
+    if (s === 'OUT_OF_ORDER' || s === 'OUT_OF_SERVICE' || s === 'MAINTENANCE' || s === 'REPAIR' || hasActiveFinding || activeBlock) {
       maintenanceCount++;
     }
   }
@@ -763,7 +788,8 @@ export async function getHousekeepingDailyOperations(
       priority_turnover: priorityTurnoverCount,
       maintenance: maintenanceCount
     },
-    tasks: enrichedTasks
+    tasks: enrichedTasks,
+    rooms
   };
 }
 
@@ -1211,7 +1237,13 @@ export async function acknowledgeHousekeepingTask(
     `UPDATE housekeeping_tasks
      SET status = 'ACKNOWLEDGED',
          acknowledged_at = COALESCE(acknowledged_at, NOW()),
-         assigned_user_name_snapshot = COALESCE(assigned_user_name_snapshot, $1),
+         assigned_user_name_snapshot = CASE
+           WHEN assigned_user_name_snapshot IS NULL
+             OR TRIM(assigned_user_name_snapshot) = ''
+             OR UPPER(TRIM(assigned_user_name_snapshot)) IN ('HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM', 'SYSTEM (DIRTY EVENT)', 'SYSTEM (CHECKOUT TRIGGER)')
+           THEN COALESCE($1, assigned_user_name_snapshot)
+           ELSE assigned_user_name_snapshot
+         END,
          updated_at = NOW()
      WHERE id = $2
      RETURNING *`,
@@ -1249,7 +1281,13 @@ export async function startHousekeepingTask(
     `UPDATE housekeeping_tasks
      SET status = 'IN_PROGRESS',
          started_at = COALESCE(started_at, NOW()),
-         assigned_user_name_snapshot = COALESCE(assigned_user_name_snapshot, $1),
+         assigned_user_name_snapshot = CASE
+           WHEN assigned_user_name_snapshot IS NULL
+             OR TRIM(assigned_user_name_snapshot) = ''
+             OR UPPER(TRIM(assigned_user_name_snapshot)) IN ('HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM', 'SYSTEM (DIRTY EVENT)', 'SYSTEM (CHECKOUT TRIGGER)')
+           THEN COALESCE($1, assigned_user_name_snapshot)
+           ELSE assigned_user_name_snapshot
+         END,
          updated_at = NOW()
      WHERE id = $2
      RETURNING *`,
@@ -1561,6 +1599,13 @@ export async function completeHousekeepingTask(
          cleaning_note = COALESCE($3, cleaning_note),
          cleaning_note_by = CASE WHEN $3 IS NOT NULL THEN $4 ELSE cleaning_note_by END,
          cleaning_note_at = CASE WHEN $3 IS NOT NULL THEN NOW() ELSE cleaning_note_at END,
+         assigned_user_name_snapshot = CASE
+           WHEN assigned_user_name_snapshot IS NULL
+             OR TRIM(assigned_user_name_snapshot) = ''
+             OR UPPER(TRIM(assigned_user_name_snapshot)) IN ('HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM', 'SYSTEM (DIRTY EVENT)', 'SYSTEM (CHECKOUT TRIGGER)')
+           THEN COALESCE($4, assigned_user_name_snapshot)
+           ELSE assigned_user_name_snapshot
+         END,
          inspection_result = $5,
          issue_type = $6,
          issue_note = $7,

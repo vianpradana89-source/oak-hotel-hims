@@ -362,30 +362,105 @@ export const BuktiBayarModal: React.FC<{
 // ============================================================================
 
 export const SubViewSumberPenjualan: React.FC<{ roomSales: RoomSaleRow[] }> = ({ roomSales }) => {
+  const [selectedOtaFilter, setSelectedOtaFilter] = useState<string>('ALL');
+  const [chartMetric, setChartMetric] = useState<'REVENUE' | 'BOOKINGS'>('REVENUE');
+
   const isOtaRow = (r: RoomSaleRow) => {
     const ch = `${r.ota_source_name || ''} ${r.booking_channel || ''}`.toUpperCase();
     return (
       Boolean(r.ota_source_name && r.ota_source_name.trim() !== '') ||
       ch.includes('OTA') ||
+      ch.includes('TRIP') ||
       ch.includes('TRAVELOKA') ||
       ch.includes('TIKET') ||
       ch.includes('BOOKING') ||
       ch.includes('AGODA') ||
-      ch.includes('EXPEDIA')
+      ch.includes('EXPEDIA') ||
+      ch.includes('AIRBNB')
     );
   };
+
+  const normalizeOtaPlatform = (r: RoomSaleRow): string => {
+    const raw = `${r.ota_source_name || ''} ${r.booking_channel || ''}`.toUpperCase();
+    if (raw.includes('TIKET')) return 'Tiket.com';
+    if (raw.includes('TRIP')) return 'Trip.com';
+    if (raw.includes('AGODA')) return 'Agoda';
+    if (raw.includes('BOOKING.COM') || raw.includes('BOOKING COM') || (raw.includes('BOOKING') && !raw.includes('QUICK'))) return 'Booking.com';
+    if (raw.includes('TRAVELOKA')) return 'Traveloka';
+    if (raw.includes('EXPEDIA')) return 'Expedia';
+    if (raw.includes('AIRBNB')) return 'Airbnb';
+    const clean = (r.ota_source_name || r.booking_channel || 'OTA Lainnya').trim();
+    return clean || 'OTA Lainnya';
+  };
+
+  const otaBrandColors: Record<string, { bar: string; bg: string; text: string; border: string; hex: string }> = {
+    'Tiket.com': { bar: 'bg-sky-500', bg: 'bg-sky-50', text: 'text-sky-800', border: 'border-sky-200', hex: '#0ea5e9' },
+    'Trip.com': { bar: 'bg-blue-600', bg: 'bg-blue-50', text: 'text-blue-800', border: 'border-blue-200', hex: '#2563eb' },
+    'Agoda': { bar: 'bg-indigo-600', bg: 'bg-indigo-50', text: 'text-indigo-800', border: 'border-indigo-200', hex: '#4f46e5' },
+    'Booking.com': { bar: 'bg-blue-900', bg: 'bg-slate-100', text: 'text-blue-950', border: 'border-blue-300', hex: '#1e3a8a' },
+    'Traveloka': { bar: 'bg-cyan-500', bg: 'bg-cyan-50', text: 'text-cyan-800', border: 'border-cyan-200', hex: '#06b6d4' },
+    'Expedia': { bar: 'bg-amber-500', bg: 'bg-amber-50', text: 'text-amber-800', border: 'border-amber-200', hex: '#f59e0b' },
+    'Airbnb': { bar: 'bg-rose-500', bg: 'bg-rose-50', text: 'text-rose-800', border: 'border-rose-200', hex: '#f43f5e' },
+  };
+
+  const getOtaStyle = (name: string) =>
+    otaBrandColors[name] || {
+      bar: 'bg-teal-600',
+      bg: 'bg-teal-50',
+      text: 'text-teal-800',
+      border: 'border-teal-200',
+      hex: '#0d9488',
+    };
 
   const walkInRows = roomSales.filter((r) => !isOtaRow(r));
   const otaRows = roomSales.filter((r) => isOtaRow(r));
 
   const walkInTotal = walkInRows.reduce((s, r) => s + (Number(r.total_price) || 0), 0);
   const otaTotal = otaRows.reduce((s, r) => s + (Number(r.total_price) || 0), 0);
+  const grandTotal = walkInTotal + otaTotal;
+
+  // Build breakdown across core OTA channels + any custom OTA found in data
+  const defaultOtaChannels = ['Tiket.com', 'Trip.com', 'Agoda', 'Booking.com', 'Traveloka'];
+  const otaMap = new Map<
+    string,
+    { platform: string; count: number; nights: number; revenue: number }
+  >();
+  for (const ch of defaultOtaChannels) {
+    otaMap.set(ch, { platform: ch, count: 0, nights: 0, revenue: 0 });
+  }
+  for (const r of otaRows) {
+    const platform = normalizeOtaPlatform(r);
+    const prev = otaMap.get(platform) || { platform, count: 0, nights: 0, revenue: 0 };
+    prev.count += 1;
+    prev.nights += Math.max(1, Number(r.nights) || 1);
+    prev.revenue += Number(r.total_price) || 0;
+    otaMap.set(platform, prev);
+  }
+
+  const otaBreakdown = Array.from(otaMap.values()).sort((a, b) => {
+    if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+    if (b.count !== a.count) return b.count - a.count;
+    return defaultOtaChannels.indexOf(a.platform) - defaultOtaChannels.indexOf(b.platform);
+  });
+
+  const maxOtaRevenue = Math.max(1, ...otaBreakdown.map((o) => o.revenue));
+  const maxOtaCount = Math.max(1, ...otaBreakdown.map((o) => o.count));
+
+  const filteredOtaRows =
+    selectedOtaFilter === 'ALL'
+      ? otaRows
+      : otaRows.filter((r) => normalizeOtaPlatform(r) === selectedOtaFilter);
 
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="text-xs text-slate-500 font-semibold">Walk-in</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-slate-500 font-semibold">Walk-in / Direct Booking</div>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+              {grandTotal > 0 ? `${((walkInTotal / grandTotal) * 100).toFixed(1)}% Omzet` : '0%'}
+            </span>
+          </div>
           <div className="text-2xl font-extrabold text-emerald-700 mt-1">
             {walkInRows.length} booking
           </div>
@@ -394,7 +469,12 @@ export const SubViewSumberPenjualan: React.FC<{ roomSales: RoomSaleRow[] }> = ({
           </div>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
-          <div className="text-xs text-slate-500 font-semibold">OTA (Online Travel Agent)</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-slate-500 font-semibold">OTA (Online Travel Agent)</div>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+              {grandTotal > 0 ? `${((otaTotal / grandTotal) * 100).toFixed(1)}% Omzet` : '0%'}
+            </span>
+          </div>
           <div className="text-2xl font-extrabold text-blue-700 mt-1">{otaRows.length} booking</div>
           <div className="text-xs text-slate-500 mt-1">
             Total pendapatan: <strong className="text-slate-800">{formatIdr(otaTotal)}</strong>
@@ -402,9 +482,185 @@ export const SubViewSumberPenjualan: React.FC<{ roomSales: RoomSaleRow[] }> = ({
         </div>
       </div>
 
+      {/* Grafik Perbandingan Sumber OTA (Tiket.com vs Trip.com vs Agoda vs Booking.com vs Traveloka) */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs space-y-4">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 border-b border-slate-100 pb-3">
+          <div>
+            <div className="text-sm font-extrabold text-slate-800 flex items-center gap-2">
+              <span>Grafik Perbandingan Sumber OTA</span>
+              <span className="text-[11px] font-semibold px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 border border-blue-200">
+                {otaRows.length} Booking • {formatIdr(otaTotal)}
+              </span>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-0.5">
+              Perbandingan kontribusi pendapatan & jumlah reservasi antar platform OTA (Tiket.com, Trip.com, Agoda, Booking.com, Traveloka). Klik platform untuk memfilter rincian.
+            </p>
+          </div>
+          <div className="flex items-center gap-1.5 self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setChartMetric('REVENUE')}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                chartMetric === 'REVENUE'
+                  ? 'bg-[#1b4332] text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              Berdasarkan Omzet (Rp)
+            </button>
+            <button
+              type="button"
+              onClick={() => setChartMetric('BOOKINGS')}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition-colors cursor-pointer ${
+                chartMetric === 'BOOKINGS'
+                  ? 'bg-[#1b4332] text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
+            >
+              Berdasarkan Jumlah Booking
+            </button>
+          </div>
+        </div>
+
+        {/* Stacked Share Distribution Bar */}
+        {otaTotal > 0 && (
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[11px] text-slate-500 font-semibold">
+              <span>Distribusi Pangsa Pasar OTA (Share %)</span>
+              <span>100% Total OTA ({formatIdr(otaTotal)})</span>
+            </div>
+            <div className="h-3.5 w-full rounded-full bg-slate-100 overflow-hidden flex border border-slate-200/80">
+              {otaBreakdown
+                .filter((o) => o.revenue > 0)
+                .map((o) => {
+                  const pct = (o.revenue / otaTotal) * 100;
+                  const st = getOtaStyle(o.platform);
+                  return (
+                    <div
+                      key={o.platform}
+                      style={{ width: `${Math.max(pct, 2)}%`, backgroundColor: st.hex }}
+                      title={`${o.platform}: ${formatIdr(o.revenue)} (${pct.toFixed(1)}%)`}
+                      onClick={() =>
+                        setSelectedOtaFilter((prev) => (prev === o.platform ? 'ALL' : o.platform))
+                      }
+                      className="h-full transition-all duration-300 cursor-pointer hover:opacity-85 border-r border-white/40 last:border-r-0"
+                    />
+                  );
+                })}
+            </div>
+            <div className="flex items-center gap-3 flex-wrap pt-1">
+              {otaBreakdown.map((o) => {
+                const pct = otaTotal > 0 ? (o.revenue / otaTotal) * 100 : 0;
+                const st = getOtaStyle(o.platform);
+                return (
+                  <button
+                    key={o.platform}
+                    type="button"
+                    onClick={() =>
+                      setSelectedOtaFilter((prev) => (prev === o.platform ? 'ALL' : o.platform))
+                    }
+                    className={`flex items-center gap-1.5 text-[11px] px-2 py-0.5 rounded-md border transition-all cursor-pointer ${
+                      selectedOtaFilter === o.platform
+                        ? `${st.bg} ${st.text} ${st.border} font-bold ring-1 ring-current`
+                        : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                    }`}
+                  >
+                    <span
+                      className="w-2.5 h-2.5 rounded-xs shrink-0"
+                      style={{ backgroundColor: st.hex }}
+                    />
+                    <span>{o.platform}</span>
+                    <span className="font-mono font-bold text-[10px] opacity-80">
+                      {pct.toFixed(1)}%
+                    </span>
+                  </button>
+                );
+              })}
+              {selectedOtaFilter !== 'ALL' && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedOtaFilter('ALL')}
+                  className="text-[11px] font-bold text-rose-700 hover:underline ml-auto cursor-pointer"
+                >
+                  Reset Filter ({selectedOtaFilter}) ✕
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* Horizontal Bar Chart Comparison */}
+        <div className="space-y-3 pt-1">
+          {otaBreakdown.map((o) => {
+            const st = getOtaStyle(o.platform);
+            const sharePct =
+              chartMetric === 'REVENUE'
+                ? otaTotal > 0
+                  ? (o.revenue / otaTotal) * 100
+                  : 0
+                : otaRows.length > 0
+                  ? (o.count / otaRows.length) * 100
+                  : 0;
+            const barWidthPct =
+              chartMetric === 'REVENUE'
+                ? o.revenue > 0
+                  ? Math.max(4, (o.revenue / maxOtaRevenue) * 100)
+                  : 0
+                : o.count > 0
+                  ? Math.max(4, (o.count / maxOtaCount) * 100)
+                  : 0;
+            const isSelected = selectedOtaFilter === o.platform;
+
+            return (
+              <div
+                key={o.platform}
+                onClick={() =>
+                  setSelectedOtaFilter((prev) => (prev === o.platform ? 'ALL' : o.platform))
+                }
+                className={`p-3 rounded-xl border transition-all cursor-pointer ${
+                  isSelected
+                    ? `${st.bg} ${st.border} ring-1 ring-blue-400 shadow-xs`
+                    : 'bg-slate-50/70 border-slate-200/80 hover:bg-slate-100/70'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2 text-xs mb-1.5">
+                  <div className="flex items-center gap-2">
+                    <span
+                      className="w-3 h-3 rounded-sm shrink-0"
+                      style={{ backgroundColor: st.hex }}
+                    />
+                    <span className="font-extrabold text-slate-800">{o.platform}</span>
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${st.bg} ${st.text} border ${st.border}`}>
+                      {o.count} booking • {o.nights} malam
+                    </span>
+                  </div>
+                  <div className="text-right flex items-center gap-2">
+                    <span className="font-extrabold text-slate-900 tabular-nums">
+                      {formatIdr(o.revenue)}
+                    </span>
+                    <span className="text-[11px] font-mono font-bold text-slate-500 min-w-[46px] text-right">
+                      ({sharePct.toFixed(1)}%)
+                    </span>
+                  </div>
+                </div>
+                <div className="w-full h-3 bg-slate-200/80 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full transition-all duration-500"
+                    style={{
+                      width: `${barWidthPct}%`,
+                      backgroundColor: st.hex,
+                    }}
+                  />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
       {/* Rincian Walk-in */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
-        <div className="text-xs font-bold text-slate-800">Rincian Walk-in</div>
+        <div className="text-xs font-bold text-slate-800">Rincian Walk-in ({walkInRows.length})</div>
         {walkInRows.length === 0 ? (
           <div className="text-xs text-slate-400 py-4 text-center">Belum ada transaksi Walk-in</div>
         ) : (
@@ -435,36 +691,53 @@ export const SubViewSumberPenjualan: React.FC<{ roomSales: RoomSaleRow[] }> = ({
 
       {/* Rincian OTA */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
-        <div className="text-xs font-bold text-slate-800">Rincian OTA</div>
-        {otaRows.length === 0 ? (
-          <div className="text-xs text-slate-400 py-4 text-center">Belum ada transaksi OTA</div>
+        <div className="flex items-center justify-between">
+          <div className="text-xs font-bold text-slate-800">
+            Rincian OTA {selectedOtaFilter !== 'ALL' ? `— Filter: ${selectedOtaFilter}` : ''} ({filteredOtaRows.length})
+          </div>
+          {selectedOtaFilter !== 'ALL' && (
+            <button
+              type="button"
+              onClick={() => setSelectedOtaFilter('ALL')}
+              className="text-[11px] font-bold text-blue-700 hover:underline cursor-pointer"
+            >
+              Tampilkan Semua OTA ({otaRows.length})
+            </button>
+          )}
+        </div>
+        {filteredOtaRows.length === 0 ? (
+          <div className="text-xs text-slate-400 py-4 text-center">Belum ada transaksi OTA pada filter ini</div>
         ) : (
           <div className="space-y-2 max-h-80 overflow-y-auto pr-1">
-            {otaRows.map((r) => (
-              <div
-                key={r.reservation_id}
-                className="flex items-center justify-between px-3.5 py-2.5 rounded-lg bg-slate-50 border border-slate-200/70 text-xs"
-              >
-                <div>
-                  <div className="font-bold text-slate-800">{r.guest_name}</div>
-                  <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
-                    <span>
-                      {r.booking_code} • {r.room_number} {r.room_type_name} ({r.room_number}) •{' '}
-                      {r.nights} malam
-                    </span>
-                    <span className="px-2 py-0.5 rounded bg-blue-100 text-blue-800 font-sans font-bold text-[10px]">
-                      {r.ota_source_name || r.booking_channel || 'OTA'}
-                    </span>
+            {filteredOtaRows.map((r) => {
+              const platform = normalizeOtaPlatform(r);
+              const st = getOtaStyle(platform);
+              return (
+                <div
+                  key={r.reservation_id}
+                  className="flex items-center justify-between px-3.5 py-2.5 rounded-lg bg-slate-50 border border-slate-200/70 text-xs"
+                >
+                  <div>
+                    <div className="font-bold text-slate-800">{r.guest_name}</div>
+                    <div className="text-[11px] text-slate-500 font-mono mt-0.5 flex items-center gap-1.5 flex-wrap">
+                      <span>
+                        {r.booking_code} • {r.room_number} {r.room_type_name} ({r.room_number}) •{' '}
+                        {r.nights} malam
+                      </span>
+                      <span className={`px-2 py-0.5 rounded ${st.bg} ${st.text} border ${st.border} font-sans font-bold text-[10px]`}>
+                        {platform}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-right">
+                    <div className="text-[11px] text-slate-400">{r.tx_date}</div>
+                    <div className="font-extrabold text-blue-700 mt-0.5 tabular-nums">
+                      {formatIdr(r.total_price)}
+                    </div>
                   </div>
                 </div>
-                <div className="text-right">
-                  <div className="text-[11px] text-slate-400">{r.tx_date}</div>
-                  <div className="font-extrabold text-blue-700 mt-0.5 tabular-nums">
-                    {formatIdr(r.total_price)}
-                  </div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

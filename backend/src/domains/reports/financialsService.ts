@@ -471,6 +471,7 @@ export async function calculateFinancials(
         AND t.transaction_type = 'PURCHASE'
         AND t.deleted_at IS NULL
         AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+        AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED'
         AND t.transaction_date >= $2::date
         AND t.transaction_date <= $3::date
       UNION ALL
@@ -479,7 +480,8 @@ export async function calculateFinancials(
         CASE WHEN ppo.status = 'COMPLETED' THEN 'PAID' ELSE 'UNPAID' END AS payment_status
       FROM pos_purchase_orders ppo
       WHERE ppo.property_id = $1
-        AND COALESCE(ppo.status, 'DRAFT') != 'CANCELLED'
+        AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
+        AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
         AND ppo.order_date >= $2::date
         AND ppo.order_date <= $3::date
         AND NOT EXISTS (

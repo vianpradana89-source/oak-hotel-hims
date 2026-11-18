@@ -40,9 +40,20 @@ import {
   deleteChecklistTemplateGroup,
   reorderChecklistTemplateGroups,
   repairActiveCleaningChecklistSnapshots,
-  reconcileDuplicateActiveCleaningTasks
+  reconcileDuplicateActiveCleaningTasks,
+  ensureDirtyRoomCleaningTask
 } from './housekeepingService';
 import { authorizeHousekeepingChecklistMutation } from './assignedCrewChecklistAccess';
+import {
+  assertRoomTypeBelongsToProperty,
+  assertSellableCapacitySafe,
+  findActiveRoomBlockOverlap,
+  findActiveRoomReservationOverlap,
+  getTodayJakartaDate,
+  httpError as blockHttpError,
+  normalizeHotelDate,
+  writeRoomBlockAudit
+} from '../roomBlocks/roomOperationalBlocksService';
 
 function parsePropertyId(raw: any, fieldName = 'property_id'): number {
   if (raw === undefined || raw === null || raw === '') {
@@ -1800,6 +1811,500 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
 
   router.post('/templates/:templateId/reorder', reorderItemsHandler);
   router.post('/templates/:templateId/items/reorder', reorderItemsHandler);
+
+  // 15. Staff List for Housekeeping PIC Assignment
+  router.get('/staff', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId || 1);
+      await assertPropertyExists(propertyId);
+
+      const staffNames = new Map<string, { id?: number | null; name: string; role: string; department: string }>();
+
+      // Users table
+      try {
+        const usersRes = await pool.query(
+          `SELECT id, username, full_name, role
+           FROM users
+           WHERE COALESCE(is_active, TRUE) = TRUE
+           ORDER BY COALESCE(NULLIF(TRIM(full_name), ''), username) ASC`
+        );
+        for (const u of usersRes.rows) {
+          const name = String(u.full_name || u.username || '').trim();
+          if (!name) continue;
+          const key = name.toUpperCase();
+          if (!staffNames.has(key)) {
+            staffNames.set(key, {
+              id: Number(u.id),
+              name,
+              role: String(u.role || 'Staff'),
+              department: 'System User'
+            });
+          }
+        }
+      } catch (_e) { /* ignore if users table schema differs */ }
+
+      // HR Employees table
+      try {
+        const empRes = await pool.query(
+          `SELECT id, user_id, name, role, department
+           FROM hr_employees
+           WHERE COALESCE(property_id, $1) = $1
+             AND COALESCE(status, 'ACTIVE') = 'ACTIVE'
+           ORDER BY name ASC`,
+          [propertyId]
+        );
+        for (const e of empRes.rows) {
+          const name = String(e.name || '').trim();
+          if (!name) continue;
+          const key = name.toUpperCase();
+          staffNames.set(key, {
+            id: e.user_id ? Number(e.user_id) : null,
+            name,
+            role: String(e.role || 'Housekeeping'),
+            department: String(e.department || 'Housekeeping')
+          });
+        }
+      } catch (_e) { /* ignore if hr_employees table schema differs */ }
+
+      res.json({ status: 'OK', data: Array.from(staffNames.values()) });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  });
+
+  // 16. Assign / Change PIC on Active or Historical Task
+  const assignTaskPicHandler = async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const taskId = Number(req.params.id);
+      const propertyId = await resolvePropertyId(req, undefined, taskId);
+      await assertPropertyExists(propertyId);
+
+      const assignedName = req.body.assigned_user_name_snapshot !== undefined
+        ? (req.body.assigned_user_name_snapshot ? String(req.body.assigned_user_name_snapshot).trim() : null)
+        : (req.body.assigned_to ? String(req.body.assigned_to).trim() : null);
+      const assignedUserId = req.body.assigned_user_id ? Number(req.body.assigned_user_id) : null;
+      const actorName = req.body.actor_name || assignedName || 'Staff';
+
+      await client.query('BEGIN');
+      const upd = await client.query(
+        `UPDATE housekeeping_tasks
+         SET assigned_user_name_snapshot = $1,
+             assigned_user_id = COALESCE($2, assigned_user_id),
+             updated_at = NOW()
+         WHERE id = $3 AND property_id = $4
+         RETURNING *`,
+        [assignedName, assignedUserId, taskId, propertyId]
+      );
+      if (!upd.rows.length) {
+        throw Object.assign(new Error('Tugas tidak ditemukan'), { statusCode: 404, code: 'NOT_FOUND' });
+      }
+      await client.query(
+        `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        ['HOUSEKEEPING', 'HK_TASK_ASSIGNED', 'HOUSEKEEPING_TASK', String(taskId), JSON.stringify({ assigned_user_name_snapshot: assignedName }), actorName, propertyId]
+      );
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: upd.rows[0] });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  };
+  router.patch('/tasks/:id/assign', assignTaskPicHandler);
+  router.post('/tasks/:id/assign', assignTaskPicHandler);
+
+  // 17. Ensure Dirty Room Cleaning Task (1-Click Create/Ensure from Dirty Room)
+  router.post('/ensure-dirty-task', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+      const roomId = Number(req.body.room_id);
+      if (!Number.isInteger(roomId) || roomId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'INVALID_ROOM_ID', message: 'room_id wajib valid' });
+      }
+
+      await client.query('BEGIN');
+      const actor = {
+        id: req.body.actor_id ? Number(req.body.actor_id) : undefined,
+        name: req.body.actor_name || 'Staff',
+        role: req.body.actor_role || 'Housekeeping'
+      };
+      const task = await ensureDirtyRoomCleaningTask(client, propertyId, roomId, {
+        sourceType: 'HK_MANUAL_SYNC',
+        actor
+      });
+      if (task && actor.name && (!task.assigned_user_name_snapshot || ['HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM'].includes(String(task.assigned_user_name_snapshot).toUpperCase()))) {
+        const upd = await client.query(
+          `UPDATE housekeeping_tasks SET assigned_user_name_snapshot = $1, updated_at = NOW() WHERE id = $2 RETURNING *`,
+          [actor.name, task.id]
+        );
+        if (upd.rows[0]) Object.assign(task, upd.rows[0]);
+      }
+      await client.query('COMMIT');
+      res.json({ status: 'OK', data: task });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  // 18. Housekeeping OO / OOS Room Operational Blocks (Integrated with Calendar & Reports)
+  router.get('/room-blocks', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      await assertPropertyExists(propertyId);
+
+      const statusFilter = req.query.status ? String(req.query.status).trim().toUpperCase() : 'ALL';
+      const conditions: string[] = ['b.property_id = $1'];
+      const params: any[] = [propertyId];
+
+      if (statusFilter !== 'ALL' && ['ACTIVE', 'RELEASED', 'CANCELLED'].includes(statusFilter)) {
+        params.push(statusFilter);
+        conditions.push(`b.status = $${params.length}`);
+      }
+
+      if (req.query.room_id) {
+        const rid = Number(req.query.room_id);
+        if (Number.isInteger(rid) && rid > 0) {
+          params.push(rid);
+          conditions.push(`b.room_id = $${params.length}`);
+        }
+      }
+
+      const result = await pool.query(
+        `SELECT b.id, b.property_id, b.room_id, b.room_type_id,
+                b.block_type,
+                to_char(b.start_date, 'YYYY-MM-DD') AS start_date,
+                to_char(b.end_date, 'YYYY-MM-DD') AS end_date,
+                GREATEST(0, (b.end_date - b.start_date))::int AS duration_days,
+                b.reason, b.maintenance_task_id, b.status,
+                b.created_by, b.created_at, b.released_by, b.released_at,
+                r.room_number, r.status AS current_room_status,
+                rt.code AS room_type_code,
+                rt.name AS room_type_name
+         FROM room_operational_blocks b
+         JOIN rooms r ON r.id = b.room_id
+         LEFT JOIN room_types rt ON rt.id = b.room_type_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY
+           CASE WHEN b.status = 'ACTIVE' THEN 0 ELSE 1 END ASC,
+           b.start_date DESC,
+           b.id DESC`,
+        params
+      );
+
+      res.json({ status: 'OK', data: result.rows });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  });
+
+  router.post('/room-blocks', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const body = req.body || {};
+      const propertyId = parsePropertyId(body.property_id || body.propertyId);
+      await assertPropertyExists(propertyId);
+
+      const roomId = Number(body.room_id);
+      if (!Number.isInteger(roomId) || roomId <= 0) {
+        throw blockHttpError(400, 'VALIDATION_ERROR', 'Kamar wajib dipilih.');
+      }
+
+      const blockType = String(body.block_type || 'OUT_OF_ORDER').trim().toUpperCase();
+      if (!['OUT_OF_ORDER', 'OUT_OF_SERVICE'].includes(blockType)) {
+        throw blockHttpError(400, 'VALIDATION_ERROR', 'Tipe blokir wajib OUT_OF_ORDER (OO) atau OUT_OF_SERVICE (OOS).');
+      }
+
+      const startDate = normalizeHotelDate(body.start_date);
+      const endDate = normalizeHotelDate(body.end_date);
+      if (!startDate || !endDate) {
+        throw blockHttpError(400, 'VALIDATION_ERROR', 'Tanggal mulai dan tanggal selesai wajib diisi (YYYY-MM-DD).');
+      }
+      if (endDate <= startDate) {
+        throw blockHttpError(400, 'VALIDATION_ERROR', 'Tanggal selesai wajib setelah tanggal mulai (minimal 1 malam).');
+      }
+
+      const reason = body.reason ? String(body.reason).trim().slice(0, 255) : 'Ditetapkan OO melalui Housekeeping';
+      const createdBy = body.created_by || body.actor_name
+        ? String(body.created_by || body.actor_name).trim().slice(0, 100)
+        : 'Housekeeping';
+
+      await client.query('BEGIN');
+
+      const roomResult = await client.query('SELECT * FROM rooms WHERE id = $1 FOR UPDATE', [roomId]);
+      if ((roomResult.rowCount ?? 0) === 0) {
+        throw blockHttpError(404, 'ROOM_NOT_FOUND', `Kamar tidak ditemukan.`);
+      }
+      const room = roomResult.rows[0];
+      if (room.property_id != null && Number(room.property_id) !== propertyId) {
+        throw blockHttpError(403, 'PROPERTY_MISMATCH', `Kamar tidak berada di properti ini.`);
+      }
+
+      const roomTypeId = Number(room.room_type_id);
+      if (!Number.isInteger(roomTypeId) || roomTypeId <= 0) {
+        throw blockHttpError(409, 'ROOM_HAS_NO_TYPE', `Kamar ${room.room_number} belum memiliki tipe kamar.`);
+      }
+
+      const roomType = await assertRoomTypeBelongsToProperty(client, roomTypeId, propertyId);
+
+      const reservationOverlaps = await findActiveRoomReservationOverlap(client, roomId, startDate, endDate);
+      if (reservationOverlaps.length > 0) {
+        const ov = reservationOverlaps[0];
+        throw blockHttpError(
+          409,
+          'ROOM_HAS_ACTIVE_RESERVATIONS',
+          `Kamar ${room.room_number} memiliki reservasi aktif (${ov.guest_name}, ${ov.check_in} s/d ${ov.check_out}) pada rentang tanggal tersebut.`
+        );
+      }
+
+      const blockOverlaps = await findActiveRoomBlockOverlap(client, roomId, startDate, endDate);
+      if (blockOverlaps.length > 0) {
+        const b = blockOverlaps[0];
+        throw blockHttpError(
+          409,
+          'OVERLAPPING_BLOCK',
+          `Kamar ${room.room_number} sudah memiliki status ${b.block_type} aktif pada tanggal tersebut.`
+        );
+      }
+
+      await assertSellableCapacitySafe(client, roomTypeId, startDate, endDate);
+
+      const inserted = await client.query(
+        `INSERT INTO room_operational_blocks (
+           property_id, room_id, room_type_id, block_type,
+           start_date, end_date, reason, status, created_by
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8)
+         RETURNING *`,
+        [propertyId, roomId, roomTypeId, blockType, startDate, endDate, reason, createdBy]
+      );
+      const createdBlock = inserted.rows[0];
+
+      // Sync physical room status if the block covers today
+      const hotelToday = getTodayJakartaDate();
+      if (startDate <= hotelToday && endDate > hotelToday) {
+        await client.query(
+          `UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3`,
+          [blockType, roomId, propertyId]
+        );
+      }
+
+      await writeRoomBlockAudit(client, {
+        action: 'CREATE',
+        blockId: createdBlock.id,
+        newValue: {
+          room_id: roomId,
+          room_number: room.room_number,
+          room_type_id: roomTypeId,
+          room_type_code: roomType.code,
+          block_type: blockType,
+          start_date: startDate,
+          end_date: endDate,
+          reason,
+          created_by: createdBy,
+          source: 'HOUSEKEEPING'
+        },
+        propertyId,
+        correlationId: (req.headers['x-correlation-id'] as string) || null
+      });
+
+      await client.query('COMMIT');
+
+      if (broadcastEvent) {
+        try {
+          broadcastEvent(
+            'RoomStatusUpdated',
+            {
+              room_id: roomId,
+              status: blockType,
+              source: 'HOUSEKEEPING_OO_BLOCK_CREATED',
+              block_id: createdBlock.id,
+              timestamp: new Date().toISOString()
+            },
+            propertyId
+          );
+        } catch (_e) { /* ignore */ }
+      }
+
+      res.status(201).json({
+        status: 'OK',
+        data: {
+          ...createdBlock,
+          start_date: startDate,
+          end_date: endDate,
+          room_number: room.room_number,
+          room_type_code: roomType.code,
+          room_type_name: roomType.name
+        }
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: sc === 409 ? 'CONFLICT' : 'ERROR',
+        code: err.code || 'INTERNAL',
+        message: err.message
+      });
+    } finally {
+      client.release();
+    }
+  });
+
+  const releaseHkRoomBlockHandler = async (req: Request, res: Response) => {
+    const blockId = Number(req.params.id);
+    if (!Number.isInteger(blockId) || blockId <= 0) {
+      return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'ID blokir kamar tidak valid' });
+    }
+
+    const client = await pool.connect();
+    try {
+      const body = req.body || {};
+      const propertyId = parsePropertyId(body.property_id || body.propertyId);
+      await assertPropertyExists(propertyId);
+
+      const releasedBy = body.released_by || body.actor_name
+        ? String(body.released_by || body.actor_name).trim().slice(0, 100)
+        : 'Housekeeping';
+      const releaseDate = body.effective_release_date
+        ? normalizeHotelDate(body.effective_release_date)
+        : getTodayJakartaDate();
+      if (!releaseDate) {
+        throw blockHttpError(400, 'VALIDATION_ERROR', 'Tanggal pelepasan OO tidak valid');
+      }
+
+      const targetRoomStatus = body.target_room_status && ['VACANT_DIRTY', 'VACANT_CLEAN', 'INSPECTED'].includes(String(body.target_room_status).toUpperCase())
+        ? String(body.target_room_status).toUpperCase()
+        : 'VACANT_DIRTY';
+
+      await client.query('BEGIN');
+
+      const blockResult = await client.query(
+        'SELECT * FROM room_operational_blocks WHERE id = $1 FOR UPDATE',
+        [blockId]
+      );
+      if ((blockResult.rowCount ?? 0) === 0) {
+        throw blockHttpError(404, 'NOT_FOUND', `Data blokir OO #${blockId} tidak ditemukan`);
+      }
+
+      const block = blockResult.rows[0];
+      if (Number(block.property_id) !== propertyId) {
+        throw blockHttpError(403, 'PROPERTY_MISMATCH', `Blokir kamar tidak berada pada properti ini`);
+      }
+      if (block.status !== 'ACTIVE') {
+        throw blockHttpError(409, 'BLOCK_NOT_ACTIVE', `Blokir kamar sudah berstatus ${block.status}`);
+      }
+
+      const blockStart = normalizeHotelDate(block.start_date)!;
+      const blockEnd = normalizeHotelDate(block.end_date)!;
+
+      let nextStatus = 'RELEASED';
+      let nextEndDate = blockEnd;
+
+      if (releaseDate <= blockStart) {
+        nextStatus = 'CANCELLED';
+        nextEndDate = blockEnd;
+      } else if (releaseDate < blockEnd) {
+        nextStatus = 'RELEASED';
+        nextEndDate = releaseDate;
+      } else {
+        nextStatus = 'RELEASED';
+        nextEndDate = blockEnd;
+      }
+
+      const updated = await client.query(
+        `UPDATE room_operational_blocks
+         SET status = $1,
+             end_date = $2,
+             released_by = $3,
+             released_at = CURRENT_TIMESTAMP
+         WHERE id = $4
+         RETURNING *`,
+        [nextStatus, nextEndDate, releasedBy, blockId]
+      );
+      const updatedBlock = updated.rows[0];
+
+      // Update physical room status back to targetRoomStatus (VACANT_DIRTY or VACANT_CLEAN)
+      await client.query(
+        `UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3`,
+        [targetRoomStatus, block.room_id, propertyId]
+      );
+
+      // If targetRoomStatus is VACANT_DIRTY, automatically ensure an active ROOM_CLEANING task exists
+      if (targetRoomStatus === 'VACANT_DIRTY') {
+        await ensureDirtyRoomCleaningTask(client, propertyId, Number(block.room_id), {
+          sourceType: 'OO_RELEASED',
+          sourceEntityId: String(blockId),
+          actor: { name: releasedBy }
+        });
+      }
+
+      await writeRoomBlockAudit(client, {
+        action: nextStatus === 'CANCELLED' ? 'CANCEL' : 'RELEASE',
+        blockId,
+        newValue: {
+          before: { status: block.status, start_date: blockStart, end_date: blockEnd },
+          after: { status: updatedBlock.status, start_date: blockStart, end_date: nextEndDate, released_by: releasedBy, target_room_status: targetRoomStatus },
+          effective_release_date: releaseDate,
+          reason: body.reason || null
+        },
+        propertyId,
+        correlationId: (req.headers['x-correlation-id'] as string) || null
+      });
+
+      await client.query('COMMIT');
+
+      if (broadcastEvent) {
+        try {
+          broadcastEvent(
+            'RoomStatusUpdated',
+            {
+              room_id: Number(block.room_id),
+              status: targetRoomStatus,
+              source: 'HOUSEKEEPING_OO_BLOCK_RELEASED',
+              block_id: blockId,
+              timestamp: new Date().toISOString()
+            },
+            propertyId
+          );
+        } catch (_e) { /* ignore */ }
+      }
+
+      res.json({
+        status: 'OK',
+        data: {
+          ...updatedBlock,
+          start_date: blockStart,
+          end_date: nextEndDate,
+          target_room_status: targetRoomStatus
+        }
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({
+        status: sc === 409 ? 'CONFLICT' : 'ERROR',
+        code: err.code || 'INTERNAL',
+        message: err.message
+      });
+    } finally {
+      client.release();
+    }
+  };
+  router.patch('/room-blocks/:id/release', releaseHkRoomBlockHandler);
+  router.post('/room-blocks/:id/release', releaseHkRoomBlockHandler);
+  router.patch('/room-blocks/:id/cancel', releaseHkRoomBlockHandler);
+  router.post('/room-blocks/:id/cancel', releaseHkRoomBlockHandler);
 
   return router;
 }

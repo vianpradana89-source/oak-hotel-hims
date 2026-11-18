@@ -80,7 +80,7 @@ export const roomMasterApi = {
   },
 
   async deleteRoomCategory(id: number, propertyId: number): Promise<void> {
-    await request<{ id: number }>(`/api/room-categories/${id}?property_id=${propertyId}`, { method: 'DELETE' });
+    await request<{ id: number }>(`/api/room-categories/${id}?property_id=${propertyId}&force=true`, { method: 'DELETE' });
   },
 
   async listRoomTypes(propertyId: number, active?: boolean): Promise<RoomType[]> {
@@ -121,10 +121,10 @@ export const roomMasterApi = {
   },
 
   async deleteRoom(id: number, propertyId: number): Promise<void> {
-    await request<{ id: number }>(`/api/rooms/${id}?property_id=${propertyId}`, { method: 'DELETE' });
+    await request<{ id: number }>(`/api/rooms/${id}?property_id=${propertyId}&force=true`, { method: 'DELETE' });
   },
 
   async deleteRoomType(id: number, propertyId: number): Promise<void> {
-    await request<{ id: number }>(`/api/room-types/${id}?property_id=${propertyId}`, { method: 'DELETE' });
+    await request<{ id: number }>(`/api/room-types/${id}?property_id=${propertyId}&force=true`, { method: 'DELETE' });
   }
 };

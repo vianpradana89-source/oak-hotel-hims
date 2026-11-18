@@ -40,6 +40,26 @@ export interface RoomTypeOccupancyItem {
   daily?: DailyOccupancyItem[];
 }
 
+export interface OoBlockHistoryItem {
+  id: number;
+  room_id: number;
+  room_number: string;
+  room_type_id: number;
+  room_type_code: string | null;
+  room_type_name: string;
+  block_type: string;
+  start_date: string;
+  end_date: string;
+  duration_days: number;
+  period_nights: number;
+  reason: string | null;
+  status: string;
+  created_by: string | null;
+  created_at: string | null;
+  released_by: string | null;
+  released_at: string | null;
+}
+
 export interface OccupancyReportData {
   property_id: number;
   start_date: string;
@@ -49,6 +69,7 @@ export interface OccupancyReportData {
   financials: OccupancyFinancials;
   daily: DailyOccupancyItem[];
   room_types?: RoomTypeOccupancyItem[];
+  oo_blocks_history?: OoBlockHistoryItem[];
 }
 
 export interface OccupancyFinancials {

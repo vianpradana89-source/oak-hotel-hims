@@ -22,6 +22,8 @@ interface CreateTaskModalProps {
   rooms: Array<{ id: number; room_number: string }>;
   templates: ChecklistTemplate[];
   initialCategory?: HkTaskCategory;
+  staffList?: Array<{ id?: number | null; name: string; role?: string }>;
+  defaultAssigneeName?: string;
 }
 
 export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
@@ -30,7 +32,9 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   onSubmit,
   rooms,
   templates,
-  initialCategory = 'ROOM_OPERATIONS'
+  initialCategory = 'ROOM_OPERATIONS',
+  staffList = [],
+  defaultAssigneeName = ''
 }) => {
   const [taskCategory, setTaskCategory] = useState<HkTaskCategory>(initialCategory);
   const [taskType, setTaskType] = useState<HkTaskType>('ROOM_CLEANING');
@@ -38,7 +42,7 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [priority, setPriority] = useState<HkTaskPriority>('NORMAL');
-  const [assigneeName, setAssigneeName] = useState('');
+  const [assigneeName, setAssigneeName] = useState(defaultAssigneeName);
   const [templateCode, setTemplateCode] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -225,11 +229,19 @@ export const CreateTaskModal: React.FC<CreateTaskModalProps> = ({
                 <label className="text-xs font-semibold text-neutral-700 block mb-1">Petugas (PIC)</label>
                 <input
                   type="text"
+                  list="hk-create-task-staff-list"
                   value={assigneeName}
                   onChange={(e) => setAssigneeName(e.target.value)}
-                  placeholder="Nama staff..."
+                  placeholder={defaultAssigneeName || 'Pilih atau ketik nama petugas...'}
                   className="w-full text-xs p-2 rounded-lg border border-neutral-300 bg-white focus:outline-hidden focus:ring-1 focus:ring-emerald-500"
                 />
+                <datalist id="hk-create-task-staff-list">
+                  {staffList.map((st, idx) => (
+                    <option key={`${st.name}-${idx}`} value={st.name}>
+                      {st.role ? `${st.name} (${st.role})` : st.name}
+                    </option>
+                  ))}
+                </datalist>
               </div>
             </div>
 

@@ -50,6 +50,26 @@ export interface RoomTypeOccupancyItem extends OccupancyMetrics {
   daily?: DailyOccupancyItem[];
 }
 
+export interface OoBlockHistoryItem {
+  id: number;
+  room_id: number;
+  room_number: string;
+  room_type_id: number;
+  room_type_code: string | null;
+  room_type_name: string;
+  block_type: string;
+  start_date: string;
+  end_date: string;
+  duration_days: number;
+  period_nights: number;
+  reason: string | null;
+  status: string;
+  created_by: string | null;
+  created_at: string | null;
+  released_by: string | null;
+  released_at: string | null;
+}
+
 export interface OccupancyReportResult {
   property_id: number;
   start_date: string;
@@ -59,6 +79,7 @@ export interface OccupancyReportResult {
   financials: FinancialMetrics;
   daily: DailyOccupancyItem[];
   room_types?: RoomTypeOccupancyItem[];
+  oo_blocks_history?: OoBlockHistoryItem[];
 }
 
 export interface CapacityCoverageCheck {
@@ -786,6 +807,45 @@ export async function calculateOccupancy(
     }
   }
 
+  // 6. Query OO / OOS Operational Blocks History (including > 1 day OO blocks)
+  const ooBlocksRes = await pool.query(
+    `SELECT
+       b.id,
+       b.room_id,
+       b.room_type_id,
+       b.block_type,
+       to_char(b.start_date, 'YYYY-MM-DD') AS start_date,
+       to_char(b.end_date, 'YYYY-MM-DD') AS end_date,
+       GREATEST(0, (b.end_date - b.start_date))::int AS duration_days,
+       GREATEST(0, (b.end_date - b.start_date))::int AS total_days,
+       ((b.end_date - b.start_date) > 1) AS is_multi_day,
+       GREATEST(0, (LEAST(b.end_date, $3::date) - GREATEST(b.start_date, $2::date)))::int AS period_nights,
+       b.reason,
+       b.status,
+       b.created_by,
+       b.created_at,
+       b.released_by,
+       b.released_at,
+       r.room_number,
+       COALESCE(rt.name, 'Standard Room') AS room_type_name,
+       rt.code AS room_type_code
+     FROM room_operational_blocks b
+     JOIN rooms r ON r.id = b.room_id
+     LEFT JOIN room_types rt ON rt.id = b.room_type_id
+     WHERE b.property_id = $1
+       AND b.status IN ('ACTIVE', 'RELEASED')
+       AND (
+         (b.start_date < $3::date AND b.end_date > $2::date)
+         OR (b.end_date - b.start_date) > 1
+       )
+     ORDER BY
+       CASE WHEN b.status = 'ACTIVE' THEN 0 ELSE 1 END ASC,
+       CASE WHEN (b.end_date - b.start_date) > 1 THEN 0 ELSE 1 END ASC,
+       b.start_date DESC,
+       b.id DESC`,
+    [propertyId, startDate, endDate]
+  );
+
   return {
     property_id: propertyId,
     start_date: startDate,
@@ -794,6 +854,7 @@ export async function calculateOccupancy(
     totals,
     financials,
     daily,
-    ...(roomTypesResult !== undefined ? { room_types: roomTypesResult } : {})
+    ...(roomTypesResult !== undefined ? { room_types: roomTypesResult } : {}),
+    oo_blocks_history: ooBlocksRes.rows
   };
 }

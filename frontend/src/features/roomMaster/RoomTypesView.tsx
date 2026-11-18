@@ -255,7 +255,7 @@ export default function RoomTypesView({
       {deleteTarget && (
         <ConfirmDeleteModal
           title={`Hapus Tipe Kamar ${deleteTarget.code}?`}
-          description="Penghapusan permanen hanya dapat dilakukan jika tipe kamar belum memiliki riwayat."
+          description="Penghapusan permanen akan menghapus tipe kamar ini beserta seluruh kamar fisik, riwayat reservasi, kalender, dan datanya di laporan."
           onConfirm={async () => {
             if (propertyId !== null) {
               await roomMasterApi.deleteRoomType(deleteTarget.id, propertyId);

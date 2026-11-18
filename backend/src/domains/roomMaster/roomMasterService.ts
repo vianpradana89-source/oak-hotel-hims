@@ -589,3 +589,264 @@ export async function writeRoomMasterAudit(
     [entry.action, entry.entity, String(entry.recordId), JSON.stringify(entry.newValue), entry.propertyId]
   );
 }
+
+async function deleteForeignKeyDependents(
+  client: PoolClient,
+  targetTable: string,
+  targetIds: Array<number | string>,
+  depth = 0
+): Promise<void> {
+  if (!targetIds || targetIds.length === 0 || depth > 5) return;
+
+  // Clear self-referential foreign keys first if present on targetTable
+  const selfFkRes = await client.query(
+    `SELECT att.attname AS col_name
+     FROM pg_constraint con
+     JOIN pg_class cl ON cl.oid = con.conrelid
+     JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+     JOIN unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) ON TRUE
+     JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = ck.attnum
+     WHERE con.contype = 'f'
+       AND ns.nspname = 'public'
+       AND cl.relname = $1
+       AND con.conrelid = con.confrelid`,
+    [targetTable]
+  );
+  for (const row of selfFkRes.rows) {
+    const col = row.col_name;
+    await client.query(
+      `UPDATE "${targetTable}" SET "${col}" = NULL WHERE "${col}"::text = ANY($1::text[])`,
+      [targetIds.map(String)]
+    );
+  }
+
+  const fkRes = await client.query(
+    `SELECT DISTINCT
+       cl.relname AS child_table,
+       att.attname AS child_column,
+       EXISTS (
+         SELECT 1 FROM pg_attribute id_att
+         WHERE id_att.attrelid = cl.oid AND id_att.attname = 'id' AND NOT id_att.attisdropped
+       ) AS has_id_col
+     FROM pg_constraint con
+     JOIN pg_class cl ON cl.oid = con.conrelid
+     JOIN pg_namespace ns ON ns.oid = cl.relnamespace
+     JOIN pg_class pcl ON pcl.oid = con.confrelid
+     JOIN unnest(con.conkey) WITH ORDINALITY AS ck(attnum, ord) ON TRUE
+     JOIN unnest(con.confkey) WITH ORDINALITY AS fk(attnum, ord) ON fk.ord = ck.ord
+     JOIN pg_attribute att ON att.attrelid = con.conrelid AND att.attnum = ck.attnum
+     JOIN pg_attribute patt ON patt.attrelid = con.confrelid AND patt.attnum = fk.attnum
+     WHERE con.contype = 'f'
+       AND ns.nspname = 'public'
+       AND pcl.relname = $1
+       AND patt.attname = 'id'
+       AND cl.relname <> $1`,
+    [targetTable]
+  );
+
+  const stringIds = targetIds.map(String);
+  for (const fk of fkRes.rows) {
+    const childTable = String(fk.child_table);
+    const childColumn = String(fk.child_column);
+    if (fk.has_id_col) {
+      const childIdsRes = await client.query(
+        `SELECT id FROM "${childTable}" WHERE "${childColumn}"::text = ANY($1::text[])`,
+        [stringIds]
+      );
+      const childIds = childIdsRes.rows.map((r: any) => r.id).filter((v: any) => v !== null && v !== undefined);
+      if (childIds.length > 0) {
+        await deleteForeignKeyDependents(client, childTable, childIds, depth + 1);
+      }
+    }
+    await client.query(
+      `DELETE FROM "${childTable}" WHERE "${childColumn}"::text = ANY($1::text[])`,
+      [stringIds]
+    );
+  }
+}
+
+export async function forceCascadeDeleteRoomMasterData(
+  client: PoolClient,
+  options: {
+    propertyId: number;
+    roomTypeId?: number;
+    roomId?: number;
+  }
+): Promise<void> {
+  const { propertyId, roomTypeId, roomId } = options;
+
+  const targetTypeIds: number[] = roomTypeId ? [roomTypeId] : [];
+  let targetRoomIds: number[] = [];
+  let targetRoomNumbers: string[] = [];
+  let donorTypeIdForRoom: number | null = null;
+
+  if (roomId) {
+    const rmRes = await client.query(
+      'SELECT id, room_number, room_type_id FROM rooms WHERE id = $1',
+      [roomId]
+    );
+    if ((rmRes.rowCount ?? 0) > 0) {
+      targetRoomIds.push(Number(rmRes.rows[0].id));
+      if (rmRes.rows[0].room_number) {
+        targetRoomNumbers.push(String(rmRes.rows[0].room_number));
+      }
+      if (rmRes.rows[0].room_type_id != null) {
+        donorTypeIdForRoom = Number(rmRes.rows[0].room_type_id);
+      }
+    }
+  }
+
+  if (targetTypeIds.length > 0) {
+    const rmsRes = await client.query(
+      'SELECT id, room_number FROM rooms WHERE room_type_id = ANY($1::int[])',
+      [targetTypeIds]
+    );
+    for (const r of rmsRes.rows) {
+      const rid = Number(r.id);
+      if (!targetRoomIds.includes(rid)) targetRoomIds.push(rid);
+      if (r.room_number) targetRoomNumbers.push(String(r.room_number));
+    }
+  }
+
+  // 1. Collect all reservations referencing targetRoomIds or targetTypeIds
+  const resConds: string[] = [];
+  const resParams: any[] = [];
+  if (targetRoomIds.length > 0) {
+    resParams.push(targetRoomIds);
+    resConds.push(`room_id = ANY($${resParams.length}::int[])`);
+  }
+  if (targetTypeIds.length > 0) {
+    resParams.push(targetTypeIds);
+    resConds.push(`booked_room_type_id_snapshot = ANY($${resParams.length}::int[])`);
+  }
+
+  let targetReservationIds: number[] = [];
+  let affectedBookingIds: number[] = [];
+  if (resConds.length > 0) {
+    const resRows = await client.query(
+      `SELECT id, booking_id FROM reservations WHERE ${resConds.join(' OR ')}`,
+      resParams
+    );
+    targetReservationIds = resRows.rows.map((r: any) => Number(r.id));
+    affectedBookingIds = Array.from(
+      new Set(
+        resRows.rows
+          .map((r: any) => (r.booking_id != null ? Number(r.booking_id) : null))
+          .filter((v: number | null): v is number => v !== null && v > 0)
+      )
+    );
+  }
+
+  // 2. Delete transactions linked to targetReservationIds so reports have zero residual history
+  if (targetReservationIds.length > 0) {
+    const txRes = await client.query(
+      `SELECT id FROM transactions WHERE reservation_id = ANY($1::int[])`,
+      [targetReservationIds]
+    );
+    const txIds = txRes.rows.map((r: any) => Number(r.id));
+    if (txIds.length > 0) {
+      await deleteForeignKeyDependents(client, 'transactions', txIds);
+      await client.query(`DELETE FROM transactions WHERE id = ANY($1::int[])`, [txIds]);
+    }
+
+    await deleteForeignKeyDependents(client, 'reservations', targetReservationIds);
+    await client.query(`DELETE FROM reservations WHERE id = ANY($1::int[])`, [targetReservationIds]);
+  }
+
+  // 3. Delete bookings that now have 0 remaining reservations (and their transactions)
+  if (affectedBookingIds.length > 0) {
+    const orphanBookingsRes = await client.query(
+      `SELECT b.id
+       FROM bookings b
+       WHERE b.id = ANY($1::bigint[])
+         AND NOT EXISTS (SELECT 1 FROM reservations r WHERE r.booking_id = b.id)`,
+      [affectedBookingIds]
+    );
+    const orphanBookingIds = orphanBookingsRes.rows.map((r: any) => Number(r.id));
+    if (orphanBookingIds.length > 0) {
+      const bTxRes = await client.query(
+        `SELECT id FROM transactions WHERE booking_id = ANY($1::bigint[])`,
+        [orphanBookingIds]
+      );
+      const bTxIds = bTxRes.rows.map((r: any) => Number(r.id));
+      if (bTxIds.length > 0) {
+        await deleteForeignKeyDependents(client, 'transactions', bTxIds);
+        await client.query(`DELETE FROM transactions WHERE id = ANY($1::int[])`, [bTxIds]);
+      }
+
+      await deleteForeignKeyDependents(client, 'bookings', orphanBookingIds);
+      await client.query(`DELETE FROM bookings WHERE id = ANY($1::bigint[])`, [orphanBookingIds]);
+    }
+  }
+
+  // 4. Clean up housekeeping & maintenance tasks by room_number / room_id
+  if (targetRoomNumbers.length > 0 || targetRoomIds.length > 0) {
+    const hkRes = await client.query(
+      `SELECT id FROM housekeeping_tasks
+       WHERE property_id = $1
+         AND (
+           (room_id IS NOT NULL AND room_id = ANY($2::int[]))
+           OR (room_number IS NOT NULL AND room_number = ANY($3::text[]))
+         )`,
+      [propertyId, targetRoomIds, targetRoomNumbers]
+    );
+    const hkIds = hkRes.rows.map((r: any) => Number(r.id));
+    if (hkIds.length > 0) {
+      await deleteForeignKeyDependents(client, 'housekeeping_tasks', hkIds);
+      await client.query(`DELETE FROM housekeeping_tasks WHERE id = ANY($1::int[])`, [hkIds]);
+    }
+
+    if (targetRoomNumbers.length > 0) {
+      const mtRes = await client.query(
+        `SELECT id FROM maintenance_tasks WHERE property_id = $1 AND room_number = ANY($2::text[])`,
+        [propertyId, targetRoomNumbers]
+      );
+      const mtIds = mtRes.rows.map((r: any) => Number(r.id));
+      if (mtIds.length > 0) {
+        await deleteForeignKeyDependents(client, 'maintenance_tasks', mtIds);
+        await client.query(`DELETE FROM maintenance_tasks WHERE id = ANY($1::int[])`, [mtIds]);
+      }
+    }
+  }
+
+  // 5. Delete physical rooms & their FK dependents
+  if (targetRoomIds.length > 0) {
+    await deleteForeignKeyDependents(client, 'rooms', targetRoomIds);
+    await client.query(`DELETE FROM rooms WHERE id = ANY($1::int[])`, [targetRoomIds]);
+  }
+
+  // 6. Delete room types & their FK dependents (availability_dates, availability_locks, rate_plans, etc.)
+  if (targetTypeIds.length > 0) {
+    await client.query(`DELETE FROM availability_locks WHERE room_type_id = ANY($1::int[])`, [targetTypeIds]);
+    await client.query(`DELETE FROM availability_dates WHERE room_type_id = ANY($1::int[])`, [targetTypeIds]);
+    await deleteForeignKeyDependents(client, 'room_types', targetTypeIds);
+    await client.query(`DELETE FROM room_types WHERE id = ANY($1::int[])`, [targetTypeIds]);
+  } else if (donorTypeIdForRoom !== null) {
+    // Reconcile reserved_qty and total_rooms for donorTypeIdForRoom so inventory drift stays 0
+    await client.query(
+      `UPDATE availability_dates ad
+       SET reserved_qty = COALESCE((
+         SELECT COUNT(*)::int
+         FROM reservations r
+         JOIN bookings b ON b.id = r.booking_id
+         LEFT JOIN rooms rm ON rm.id = r.room_id
+         WHERE b.property_id = $2
+           AND COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) = $1
+           AND r.status IN ('BOOKED', 'CHECKED_IN')
+           AND COALESCE(b.booking_status, '') != 'CANCELLED'
+           AND r.check_in::date <= ad.date::date
+           AND r.check_out::date > ad.date::date
+       ), 0)
+       WHERE ad.room_type_id = $1`,
+      [donorTypeIdForRoom, propertyId]
+    );
+    const capacity = await getActivePhysicalCapacity(client, donorTypeIdForRoom);
+    await client.query(
+      `UPDATE availability_dates
+       SET total_rooms = GREATEST($2, reserved_qty)
+       WHERE room_type_id = $1
+         AND (date AT TIME ZONE 'Asia/Jakarta')::date >= (NOW() AT TIME ZONE 'Asia/Jakarta')::date`,
+      [donorTypeIdForRoom, capacity]
+    );
+  }
+}

@@ -5,6 +5,7 @@ import {
   assertRoomTypeCodeAvailable,
   assertRoomTypeBelongsToProperty,
   countActivePhysicalRooms,
+  forceCascadeDeleteRoomMasterData,
   getFutureReservedPeak,
   getFutureReservedPeaks,
   httpError,
@@ -347,44 +348,52 @@ export function createRoomTypesRouter(pool: Pool) {
         throw httpError(404, 'NOT_FOUND', `room type ${typeId} not found`);
       }
       const current = currentResult.rows[0];
+      const forceDelete = String(req.query.force || '').toLowerCase() === 'true';
 
-      const roomRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM rooms WHERE room_type_id = $1',
-        [typeId]
-      );
-      if (Number(roomRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_TYPE_HAS_ROOMS',
-          `room type ${current.code} still has ${roomRefs.rows[0].c} physical room(s); deactivate or move them first`);
+      if (forceDelete) {
+        await forceCascadeDeleteRoomMasterData(client, {
+          propertyId,
+          roomTypeId: typeId
+        });
+      } else {
+        const roomRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM rooms WHERE room_type_id = $1',
+          [typeId]
+        );
+        if (Number(roomRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_TYPE_HAS_ROOMS',
+            `room type ${current.code} still has ${roomRefs.rows[0].c} physical room(s); deactivate or move them first`);
+        }
+
+        const ledgerRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM availability_dates WHERE room_type_id = $1',
+          [typeId]
+        );
+        if (Number(ledgerRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
+            `room type ${current.code} has ${ledgerRefs.rows[0].c} availability ledger row(s); permanent deletion is rejected`);
+        }
+
+        const lockRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM availability_locks WHERE room_type_id = $1',
+          [typeId]
+        );
+        if (Number(lockRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
+            `room type ${current.code} still has booking lock references; permanent deletion is rejected`);
+        }
+
+        const snapshotRefs = await client.query(
+          'SELECT COUNT(*)::int AS c FROM reservations WHERE booked_room_type_id_snapshot = $1',
+          [typeId]
+        );
+        if (Number(snapshotRefs.rows[0].c) > 0) {
+          throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
+            `room type ${current.code} is referenced by ${snapshotRefs.rows[0].c} reservation snapshot(s); permanent deletion is rejected`);
+        }
+
+        await client.query('DELETE FROM room_types WHERE id = $1', [typeId]);
       }
-
-      const ledgerRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM availability_dates WHERE room_type_id = $1',
-        [typeId]
-      );
-      if (Number(ledgerRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
-          `room type ${current.code} has ${ledgerRefs.rows[0].c} availability ledger row(s); permanent deletion is rejected`);
-      }
-
-      const lockRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM availability_locks WHERE room_type_id = $1',
-        [typeId]
-      );
-      if (Number(lockRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
-          `room type ${current.code} still has booking lock references; permanent deletion is rejected`);
-      }
-
-      const snapshotRefs = await client.query(
-        'SELECT COUNT(*)::int AS c FROM reservations WHERE booked_room_type_id_snapshot = $1',
-        [typeId]
-      );
-      if (Number(snapshotRefs.rows[0].c) > 0) {
-        throw httpError(409, 'ROOM_TYPE_HAS_HISTORY',
-          `room type ${current.code} is referenced by ${snapshotRefs.rows[0].c} reservation snapshot(s); permanent deletion is rejected`);
-      }
-
-      await client.query('DELETE FROM room_types WHERE id = $1', [typeId]);
 
       await writeRoomMasterAudit(client, {
         action: 'DELETE',
