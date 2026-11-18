@@ -395,7 +395,14 @@ export async function getEmployees(
            EXISTS(
              SELECT 1 FROM employee_face_enrollments fe
              WHERE fe.employee_id = e.id AND fe.property_id = e.property_id AND fe.status = 'ACTIVE'
-           ) AS has_face_photo
+           ) AS has_face_photo,
+           COALESCE((
+             SELECT SUM(cu.amount)
+             FROM pos_complimentary_usages cu
+             WHERE cu.employee_id = e.id
+               AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
+               AND cu.status = 'ACTIVE'
+           ), 0)::numeric AS complimentary_quota_used
     FROM hr_employees e
     LEFT JOIN hr_departments d ON d.id = e.department_id
     LEFT JOIN hr_positions p ON p.id = e.position_id
@@ -456,6 +463,14 @@ export async function getEmployees(
     account_status: row.account_status || null,
     user_is_active: row.user_id ? row.user_is_active !== false : null,
     has_face_photo: row.has_face_photo === true,
+    complimentary_quota_enabled: row.complimentary_quota_enabled === true,
+    complimentary_quota_limit: Number(row.complimentary_quota_limit || 0),
+    complimentary_pin: row.complimentary_pin || null,
+    complimentary_quota_used: Number(row.complimentary_quota_used || 0),
+    complimentary_quota_remaining: Math.max(
+      0,
+      Number(row.complimentary_quota_limit || 0) - Number(row.complimentary_quota_used || 0)
+    ),
     created_at: row.created_at,
     updated_at: row.updated_at
   }));
@@ -691,9 +706,10 @@ export async function createEmployeeAccount(
     `INSERT INTO hr_employees (
       property_id, employee_code, full_name, position, department,
       department_id, position_id,
-      role, username, email, phone, hire_date, monthly_salary, status, is_active
+      role, username, email, phone, hire_date, monthly_salary, status, is_active,
+      complimentary_quota_enabled, complimentary_quota_limit, complimentary_pin
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, TRUE, $15, $16, $17)
     RETURNING *`,
     [
       propertyId,
@@ -709,7 +725,10 @@ export async function createEmployeeAccount(
       payload.phone || null,
       normalizedHireDate,
       payload.monthly_salary || 0,
-      payload.status || 'ACTIVE'
+      payload.status || 'ACTIVE',
+      Boolean(payload.complimentary_quota_enabled),
+      Number(payload.complimentary_quota_limit || 0),
+      payload.complimentary_pin ? payload.complimentary_pin.trim() : null
     ]
   );
 
@@ -957,6 +976,16 @@ export async function updateEmployeeAccount(
   const status = payload.status !== undefined ? payload.status : current.status;
   const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : (current.is_active !== false);
 
+  const complimentaryQuotaEnabled = payload.complimentary_quota_enabled !== undefined
+    ? Boolean(payload.complimentary_quota_enabled)
+    : (current.complimentary_quota_enabled === true);
+  const complimentaryQuotaLimit = payload.complimentary_quota_limit !== undefined
+    ? Number(payload.complimentary_quota_limit || 0)
+    : Number(current.complimentary_quota_limit || 0);
+  const complimentaryPin = payload.complimentary_pin !== undefined
+    ? (payload.complimentary_pin ? payload.complimentary_pin.trim() : null)
+    : (current.complimentary_pin || null);
+
   // Strictly preserve employee_code! Do not allow modification.
   const res = await client.query(
     `UPDATE hr_employees
@@ -964,14 +993,20 @@ export async function updateEmployeeAccount(
          username = $5, email = $6, phone = $7, hire_date = $8,
          monthly_salary = $9, status = $10, is_active = $11,
          department_id = $12, position_id = $13,
+         complimentary_quota_enabled = $14,
+         complimentary_quota_limit = $15,
+         complimentary_pin = $16,
          updated_at = NOW()
-     WHERE id = $14 AND property_id = $15
+     WHERE id = $17 AND property_id = $18
      RETURNING *`,
     [
       fullName, targetPosition, targetDepartment, targetRole,
       username, email, phone, hireDate,
       monthlySalary, status, isActive,
       targetDepartmentId, targetPositionId,
+      complimentaryQuotaEnabled,
+      complimentaryQuotaLimit,
+      complimentaryPin,
       employeeId, propertyId
     ]
   );
@@ -4375,4 +4410,55 @@ export async function resetEmployeeFaceEnrollment(
       ? 'Enrollmen wajah berhasil direset. Karyawan perlu mendaftarkan ulang foto wajah.'
       : 'Tidak ada enrollmen wajah aktif yang perlu direset.'
   };
+}
+
+export async function getComplimentaryEligibleEmployees(
+  client: PoolClient,
+  propertyId: number
+): Promise<Array<{
+  id: number;
+  full_name: string;
+  department: string | null;
+  role: string | null;
+  complimentary_quota_enabled: boolean;
+  complimentary_quota_limit: number;
+  complimentary_quota_used: number;
+  complimentary_quota_remaining: number;
+  has_pin: boolean;
+}>> {
+  const sql = `
+    SELECT e.id, e.full_name, e.department, e.role,
+           e.complimentary_quota_enabled,
+           COALESCE(e.complimentary_quota_limit, 0)::numeric AS complimentary_quota_limit,
+           e.complimentary_pin,
+           COALESCE((
+             SELECT SUM(cu.amount)
+             FROM pos_complimentary_usages cu
+             WHERE cu.employee_id = e.id
+               AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
+               AND cu.status = 'ACTIVE'
+           ), 0)::numeric AS complimentary_quota_used
+    FROM hr_employees e
+    WHERE e.property_id = $1
+      AND COALESCE(e.is_active, TRUE) = TRUE
+      AND e.status = 'ACTIVE'
+      AND e.complimentary_quota_enabled = TRUE
+    ORDER BY e.full_name ASC
+  `;
+  const res = await client.query(sql, [propertyId]);
+  return res.rows.map((row: any) => {
+    const limit = Number(row.complimentary_quota_limit || 0);
+    const used = Number(row.complimentary_quota_used || 0);
+    return {
+      id: Number(row.id),
+      full_name: row.full_name,
+      department: row.department || null,
+      role: row.role || null,
+      complimentary_quota_enabled: true,
+      complimentary_quota_limit: limit,
+      complimentary_quota_used: used,
+      complimentary_quota_remaining: Math.max(0, limit - used),
+      has_pin: Boolean(row.complimentary_pin && row.complimentary_pin.trim().length > 0),
+    };
+  });
 }

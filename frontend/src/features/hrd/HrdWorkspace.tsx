@@ -41,6 +41,11 @@ interface HrEmployee {
   account_status?: string | null;
   user_is_active?: boolean | null;
   has_face_photo?: boolean;
+  complimentary_quota_enabled?: boolean;
+  complimentary_quota_limit?: number;
+  complimentary_pin?: string | null;
+  complimentary_quota_used?: number;
+  complimentary_quota_remaining?: number;
   created_at?: string;
   updated_at?: string;
 }
@@ -153,7 +158,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     access_type: 'PMS_STAFF' as 'PMS_STAFF' | 'MANAGER' | 'MOBILE_ONLY' | 'ADMIN',
     hire_date: getTodayCalendarDate(),
     create_login_account: true,
-    is_active: true
+    is_active: true,
+    complimentary_quota_enabled: false,
+    complimentary_quota_limit: 0,
+    complimentary_pin: ''
   });
 
   // One-time credential modal state
@@ -306,7 +314,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       access_type: 'PMS_STAFF',
       hire_date: getTodayCalendarDate(),
       create_login_account: true,
-      is_active: true
+      is_active: true,
+      complimentary_quota_enabled: false,
+      complimentary_quota_limit: 0,
+      complimentary_pin: ''
     });
     setEditingEmployee(null);
     setShowAddModal(true);
@@ -333,7 +344,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       access_type: (emp.access_type as any) || 'PMS_STAFF',
       hire_date: toCalendarDateInput(emp.hire_date),
       create_login_account: false,
-      is_active: emp.is_active !== false
+      is_active: emp.is_active !== false,
+      complimentary_quota_enabled: !!emp.complimentary_quota_enabled,
+      complimentary_quota_limit: Number(emp.complimentary_quota_limit || 0),
+      complimentary_pin: emp.complimentary_pin || ''
     });
     setEditingEmployee(emp);
     setShowAddModal(true);
@@ -366,7 +380,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             role: selectedRole?.name || formPayload.role,
             access_type: formPayload.access_type,
             hire_date: safeHireDate,
-            is_active: formPayload.is_active
+            is_active: formPayload.is_active,
+            complimentary_quota_enabled: formPayload.complimentary_quota_enabled,
+            complimentary_quota_limit: Number(formPayload.complimentary_quota_limit) || 0,
+            complimentary_pin: formPayload.complimentary_pin || null
           })
         });
         const data = await res.json();
@@ -391,7 +408,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             role: selectedRole?.name || formPayload.role,
             access_type: formPayload.access_type,
             hire_date: safeHireDate,
-            create_login_account: formPayload.create_login_account
+            create_login_account: formPayload.create_login_account,
+            complimentary_quota_enabled: formPayload.complimentary_quota_enabled,
+            complimentary_quota_limit: Number(formPayload.complimentary_quota_limit) || 0,
+            complimentary_pin: formPayload.complimentary_pin || null
           })
         });
         const data = await res.json();
@@ -1126,7 +1146,20 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                             </span>
                           </td>
                           <td className="py-3 px-3 text-slate-600 font-medium break-words">
-                            {emp.department || 'Front Office'}
+                            <div>{emp.department || 'Front Office'}</div>
+                            {emp.complimentary_quota_enabled && (
+                              <div className="mt-1">
+                                <span
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200"
+                                  title={`Batas: Rp ${Number(emp.complimentary_quota_limit || 0).toLocaleString('id-ID')} | Terpakai: Rp ${Number(emp.complimentary_quota_used || 0).toLocaleString('id-ID')}`}
+                                >
+                                  <span>🎁 Kuota:</span>
+                                  <span className="font-bold">
+                                    Rp {Number(emp.complimentary_quota_remaining ?? emp.complimentary_quota_limit ?? 0).toLocaleString('id-ID')}
+                                  </span>
+                                </span>
+                              </div>
+                            )}
                           </td>
                           <td className="py-3 px-3 text-center">
                             {getAccountStatusBadge(emp)}
@@ -1468,6 +1501,73 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                   )}
                 </div>
               )}
+
+              {/* Otorisasi Kuota Komplimentari POS */}
+              <div className="p-3 bg-amber-50/70 border border-amber-200 rounded-xl space-y-2.5">
+                <label className="flex items-center gap-2 cursor-pointer font-bold text-amber-900">
+                  <input
+                    type="checkbox"
+                    checked={formPayload.complimentary_quota_enabled}
+                    onChange={(e) => setFormPayload(p => ({ ...p, complimentary_quota_enabled: e.target.checked }))}
+                    className="rounded border-amber-300 text-amber-800 focus:ring-amber-500"
+                  />
+                  <span>🎁 Kuota Komplimentari POS (F&B / Resto)</span>
+                </label>
+                <p className="text-[11px] text-amber-800/80 pl-6 leading-relaxed">
+                  Izinkan karyawan memberikan otorisasi pesanan komplimentari (100% Free) di kasir POS dengan batas kuota nominal bulanan. Kuota akan otomatis reset setiap tanggal 1 awal bulan.
+                </p>
+
+                {formPayload.complimentary_quota_enabled && (
+                  <div className="space-y-2 pl-6 pt-1 border-t border-amber-200/60">
+                    <div>
+                      <label className="block text-[11px] text-amber-900 font-bold mb-1">
+                        Batas Kuota Bulanan (Rp):
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="50000"
+                        value={formPayload.complimentary_quota_limit}
+                        onChange={(e) => setFormPayload(p => ({ ...p, complimentary_quota_limit: Number(e.target.value) }))}
+                        placeholder="Contoh: 500000 atau 1000000"
+                        className="w-full p-2 rounded-lg border border-amber-300 bg-white text-slate-900 text-xs font-semibold focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] text-amber-900 font-bold mb-1">
+                        PIN Otorisasi Kasir (4–6 Angka):
+                      </label>
+                      <input
+                        type="password"
+                        maxLength={6}
+                        value={formPayload.complimentary_pin}
+                        onChange={(e) => setFormPayload(p => ({ ...p, complimentary_pin: e.target.value }))}
+                        placeholder="Contoh: 123456"
+                        className="w-full p-2 rounded-lg border border-amber-300 bg-white text-slate-900 text-xs tracking-widest font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
+                      />
+                      <p className="text-[10px] text-amber-700 mt-0.5">
+                        PIN ini harus dimasukkan kasir saat pesanan dibebankan ke kuota karyawan ini.
+                      </p>
+                    </div>
+
+                    {editingEmployee && (
+                      <div className="p-2 rounded bg-amber-100/70 border border-amber-300 text-[11px] text-amber-900 space-y-0.5 font-medium">
+                        <div className="flex justify-between">
+                          <span>Terpakai Bulan Ini:</span>
+                          <strong>Rp {Number(editingEmployee.complimentary_quota_used || 0).toLocaleString('id-ID')}</strong>
+                        </div>
+                        <div className="flex justify-between">
+                          <span>Sisa Kuota Bulan Ini:</span>
+                          <strong className={Number(editingEmployee.complimentary_quota_remaining || 0) <= 0 ? 'text-red-700' : 'text-emerald-800'}>
+                            Rp {Number(editingEmployee.complimentary_quota_remaining ?? formPayload.complimentary_quota_limit).toLocaleString('id-ID')}
+                          </strong>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
 
               <div className="pt-3 border-t border-slate-200 flex gap-2">
                 <button

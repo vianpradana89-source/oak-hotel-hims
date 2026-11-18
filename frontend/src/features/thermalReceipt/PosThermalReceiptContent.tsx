@@ -204,11 +204,26 @@ export default function PosThermalReceiptContent({
 
       {/* 6. PEMBAYARAN */}
       <div className="thermal-section">
-        <Row label="Metode" value={settlement.payment_method} />
-        <Row label="Nominal" value={formatHotelCurrency(settlement.amount)} bold mono />
+        <Row label="Metode" value={settlement.payment_method === 'COMPLIMENTARY' ? 'COMPLIMENTARY (FREE)' : settlement.payment_method} bold />
 
-        {isCash ? (
+        {settlement.payment_method === 'COMPLIMENTARY' ? (
           <>
+            <Row label="Total Tagihan" value={formatHotelCurrency(settlement.amount)} mono />
+            <Row label="Potongan Komplimen" value={`- ${formatHotelCurrency(settlement.amount)}`} mono />
+            <Row label="Total Bayar" value="Rp 0" bold mono />
+            {settlement.payment_reference && (
+              <Row label="Keterangan" value={settlement.payment_reference} />
+            )}
+            {settlement.verified_by && (
+              <Row label="Otorisator" value={settlement.verified_by} />
+            )}
+            {settlement.verified_at && (
+              <Row label="Waktu Otorisasi" value={formatHotelDateTimeIndonesian(settlement.verified_at)} />
+            )}
+          </>
+        ) : isCash ? (
+          <>
+            <Row label="Nominal" value={formatHotelCurrency(settlement.amount)} bold mono />
             {settlement.cash_received && (
               <Row label="Uang Diterima" value={formatHotelCurrency(settlement.cash_received)} mono />
             )}
@@ -218,6 +233,7 @@ export default function PosThermalReceiptContent({
           </>
         ) : (
           <>
+            <Row label="Nominal" value={formatHotelCurrency(settlement.amount)} bold mono />
             {settlement.payment_reference && (
               <Row label="Referensi" value={settlement.payment_reference} mono />
             )}
@@ -232,7 +248,9 @@ export default function PosThermalReceiptContent({
       </div>
 
       {/* Status badge */}
-      <div className="thermal-status">PAID</div>
+      <div className="thermal-status">
+        {settlement.payment_method === 'COMPLIMENTARY' ? 'COMPLIMENTARY' : 'PAID'}
+      </div>
 
       {/* 7. FOOTER */}
       <div className="thermal-footer">

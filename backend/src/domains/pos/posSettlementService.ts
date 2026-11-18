@@ -85,7 +85,7 @@ function isPosOrderUniqueViolation(err: unknown): boolean {
 // =============================================================================
 
 /** Payment methods supported by POS settlement. */
-export const POS_SUPPORTED_METHODS = ['CASH', 'QRIS', 'TRANSFER', 'DEBIT'] as const;
+export const POS_SUPPORTED_METHODS = ['CASH', 'QRIS', 'TRANSFER', 'DEBIT', 'COMPLIMENTARY'] as const;
 export type PosPaymentMethod = (typeof POS_SUPPORTED_METHODS)[number];
 
 /**
@@ -103,6 +103,10 @@ export interface PosMethodSpecificInput {
   cashReceived?: number | string | null;
   /** Reference code (QRIS VA / transfer ref / EDC slip). Optional. */
   paymentReference?: string | null;
+  complimentaryEmployeeId?: number | null;
+  complimentaryPin?: string | null;
+  complimentaryCategory?: string | null;
+  complimentaryGuestNameOrNote?: string | null;
 }
 
 export interface PayPosOrderCashInput {
@@ -226,6 +230,9 @@ function computeMethodFingerprint(
     if (cashReceived != null) {
       payload.cash_received = cashReceived;
     }
+  } else if (paymentMethod === 'COMPLIMENTARY') {
+    if (methodInput.complimentaryEmployeeId != null) payload.complimentary_employee_id = methodInput.complimentaryEmployeeId;
+    if (methodInput.complimentaryCategory != null) payload.complimentary_category = methodInput.complimentaryCategory;
   } else {
     const ref = (methodInput.paymentReference ?? '').trim();
     if (ref) {
@@ -265,7 +272,7 @@ async function validateMethodConfig(
   propertyId: number,
   paymentMethod: string
 ): Promise<void> {
-  if (paymentMethod === 'CASH') return;
+  if (paymentMethod === 'CASH' || paymentMethod === 'COMPLIMENTARY') return;
 
   const cfgRes = await client.query(
     `SELECT qris_enabled, qris_merchant_id, qris_image_path,
@@ -775,6 +782,93 @@ export async function payPosOrder(
     // â”€â”€ Validasi konfigurasi metode non-CASH per properti â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     await validateMethodConfig(poolClient, propertyId, paymentMethod);
 
+    let complimentaryStaffName = '';
+    if (paymentMethod === 'COMPLIMENTARY') {
+      const empId = Number(methodInput.complimentaryEmployeeId);
+      if (!Number.isInteger(empId) || empId <= 0) {
+        throw new PosSettlementError(
+          422,
+          'COMPLIMENTARY_EMPLOYEE_REQUIRED',
+          'Pilih karyawan yang bertanggung jawab atas kuota pemakaian komplimentari'
+        );
+      }
+      const empQ = await poolClient.query(
+        `SELECT id, full_name, complimentary_quota_enabled, complimentary_quota_limit, complimentary_pin
+         FROM hr_employees
+         WHERE id = $1 AND property_id = $2
+         LIMIT 1`,
+        [empId, propertyId]
+      );
+      if ((empQ.rowCount ?? 0) === 0) {
+        throw new PosSettlementError(404, 'EMPLOYEE_NOT_FOUND', 'Karyawan yang dipilih tidak ditemukan');
+      }
+      const emp = empQ.rows[0];
+      complimentaryStaffName = emp.full_name;
+      if (!emp.complimentary_quota_enabled) {
+        throw new PosSettlementError(
+          422,
+          'COMPLIMENTARY_QUOTA_DISABLED',
+          `Karyawan ${emp.full_name} belum diaktifkan kuota komplimentarinya`
+        );
+      }
+
+      if (emp.complimentary_pin && String(emp.complimentary_pin).trim() !== '') {
+        const inputPin = String(methodInput.complimentaryPin ?? '').trim();
+        if (!inputPin) {
+          throw new PosSettlementError(
+            401,
+            'COMPLIMENTARY_PIN_REQUIRED',
+            'PIN otorisasi karyawan wajib diisi untuk menggunakan kuota komplimentari'
+          );
+        }
+        if (inputPin !== String(emp.complimentary_pin).trim()) {
+          throw new PosSettlementError(
+            401,
+            'COMPLIMENTARY_PIN_INVALID',
+            'PIN otorisasi karyawan salah. Transaksi diblokir.'
+          );
+        }
+      }
+
+      const usageQ = await poolClient.query(
+        `SELECT COALESCE(SUM(amount), 0)::numeric AS used_amount
+         FROM pos_complimentary_usages
+         WHERE employee_id = $1
+           AND usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
+           AND status = 'ACTIVE'`,
+        [empId]
+      );
+      const usedAmount = Number(usageQ.rows[0]?.used_amount || 0);
+      const limitAmount = Number(emp.complimentary_quota_limit || 0);
+      const remainingQuota = Math.max(0, limitAmount - usedAmount);
+
+      if (orderAmount > remainingQuota) {
+        throw new PosSettlementError(
+          422,
+          'COMPLIMENTARY_QUOTA_EXCEEDED',
+          `Sisa kuota komplimentari karyawan ${emp.full_name} tidak mencukupi (Sisa: Rp ${remainingQuota.toLocaleString('id-ID')}, Tagihan: Rp ${orderAmount.toLocaleString('id-ID')}). Transaksi diblokir.`
+        );
+      }
+
+      await poolClient.query(
+        `INSERT INTO pos_complimentary_usages (
+           property_id, employee_id, pos_order_id, amount,
+           category, guest_name_or_note, usage_month, status, created_at
+         ) VALUES (
+           $1, $2, $3, $4,
+           $5, $6, to_char(CURRENT_DATE, 'YYYY-MM'), 'ACTIVE', CURRENT_TIMESTAMP
+         )`,
+        [
+          propertyId,
+          empId,
+          orderId,
+          orderAmount,
+          methodInput.complimentaryCategory || 'Operasional',
+          methodInput.complimentaryGuestNameOrNote || null,
+        ]
+      );
+    }
+
     // 1) UPDATE order â†’ PAID
     await poolClient.query(
       `UPDATE pos_orders SET status = 'PAID', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
@@ -841,6 +935,8 @@ export async function payPosOrder(
     const paymentReference =
       paymentMethod === 'CASH'
         ? null
+        : paymentMethod === 'COMPLIMENTARY'
+          ? `Komplimentari: ${complimentaryStaffName}${methodInput.complimentaryCategory ? ` (${methodInput.complimentaryCategory})` : ''}${methodInput.complimentaryGuestNameOrNote ? ` - ${methodInput.complimentaryGuestNameOrNote}` : ''}`
         : (methodInput.paymentReference ?? '').trim() || null;
 
     let insRow: {

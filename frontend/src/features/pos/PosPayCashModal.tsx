@@ -85,6 +85,17 @@ function isOrderContextValid(ctx: PosPayCashOrderContext): boolean {
 
 type Phase = 'confirming' | 'pending' | 'success' | 'ambiguous' | 'failed';
 
+interface ComplimentaryEligibleEmployee {
+  id: number;
+  full_name: string;
+  employee_code: string;
+  department: string;
+  complimentary_quota_limit: number;
+  complimentary_quota_used: number;
+  complimentary_quota_remaining: number;
+  has_pin: boolean;
+}
+
 export default function PosPayCashModal({
   order,
   authFetch,
@@ -121,6 +132,14 @@ export default function PosPayCashModal({
   const [selectedLocationId, setSelectedLocationId] = useState<string>('');
   const [stockLocOpen, setStockLocOpen] = useState(false);
   const [stockLocLoading, setStockLocLoading] = useState(false);
+
+  // Complimentary Quota state
+  const [complimentaryEmployees, setComplimentaryEmployees] = useState<ComplimentaryEligibleEmployee[]>([]);
+  const [complimentaryLoading, setComplimentaryLoading] = useState(false);
+  const [selectedCompEmployeeId, setSelectedCompEmployeeId] = useState<string>('');
+  const [compPin, setCompPin] = useState('');
+  const [compCategory, setCompCategory] = useState('Tamu VIP');
+  const [compGuestOrNote, setCompGuestOrNote] = useState('');
   const activeConfig = config?.property_id === order.propertyId ? config : null;
   const activeQrisUrl = qrisImage?.propertyId === order.propertyId ? qrisImage.url : null;
   const qrisImageLoaded = !!activeQrisUrl && qrisLoadedUrl === activeQrisUrl;
@@ -195,6 +214,30 @@ export default function PosPayCashModal({
       }
     })();
     return () => {cancelled = true; controller.abort(); if (blobUrl) URL.revokeObjectURL(blobUrl);};
+  }, [authFetch, order.propertyId, reloadConfig]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const propertyId = order.propertyId;
+    if (!propertyId) return;
+    setComplimentaryLoading(true);
+    authFetch(`/api/pos/complimentary-quotas?property_id=${propertyId}`)
+      .then(res => res.json())
+      .then(json => {
+        if (!cancelled && json?.status === 'SUCCESS' && Array.isArray(json.data)) {
+          setComplimentaryEmployees(json.data);
+          if (json.data.length > 0) {
+            setSelectedCompEmployeeId(prev => prev || String(json.data[0].id));
+          }
+        }
+      })
+      .catch(err => {
+        console.error('Failed to load complimentary quotas:', err);
+      })
+      .finally(() => {
+        if (!cancelled) setComplimentaryLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [authFetch, order.propertyId, reloadConfig]);
 
   // ── Payment flow ──────────────────────────────────────────────────────────
@@ -304,9 +347,15 @@ export default function PosPayCashModal({
       // Pengajuan baru (atau context berubah tanpa unresolved): buat key baru.
       key = generateKey();
       try {
-        const created = createPaySnapshot({orderId, propertyId, key, amount: order.totalAmount,
+        const created = createPaySnapshot({
+          orderId, propertyId, key, amount: order.totalAmount,
           method, cashInput, reference, config: activeConfig, qrisImageLoaded, verified,
-          locationId: selectedLocationId ? Number(selectedLocationId) : undefined});
+          locationId: selectedLocationId ? Number(selectedLocationId) : undefined,
+          complimentaryEmployeeId: method === 'COMPLIMENTARY' && selectedCompEmployeeId ? Number(selectedCompEmployeeId) : undefined,
+          complimentaryPin: method === 'COMPLIMENTARY' && compPin ? compPin.trim() : undefined,
+          complimentaryCategory: method === 'COMPLIMENTARY' ? compCategory : undefined,
+          complimentaryGuestNameOrNote: method === 'COMPLIMENTARY' && compGuestOrNote ? compGuestOrNote.trim() : undefined,
+        });
         snapshotRef.current = created;
         bodyJson = created.bodyJson;
       } catch (err) {
@@ -507,6 +556,7 @@ export default function PosPayCashModal({
     onRequestPending,
     onUnresolvedChange,
     method, cashInput, reference, activeConfig, qrisImageLoaded, verified, selectedLocationId, loadStockLocations,
+    selectedCompEmployeeId, compPin, compCategory, compGuestOrNote
   ]);
 
   // Konfirmasi (tombol): sinkron sebelum await.
@@ -578,9 +628,19 @@ export default function PosPayCashModal({
   const isAmbiguous = phase === 'ambiguous';
   const editable = (phase === 'confirming' || phase === 'failed') && !alreadyPaid;
   const cashReceived = parseCashInput(cashInput);
-  const ready = method === 'CASH' ? cashReceived !== null && cashReceived >= totalValue
-    : isMethodAvailable(method, activeConfig) && verified && reference.trim().length <= 100
-      && (method !== 'QRIS' || qrisImageLoaded);
+
+  const selectedEmp = complimentaryEmployees.find(e => String(e.id) === selectedCompEmployeeId);
+  const compQuotaRemaining = selectedEmp ? selectedEmp.complimentary_quota_remaining : 0;
+  const compQuotaSufficient = selectedEmp ? compQuotaRemaining >= totalValue : false;
+  const compPinFilled = selectedEmp?.has_pin ? compPin.trim().length >= 4 : true;
+  const compReady = method === 'COMPLIMENTARY' && !!selectedEmp && compQuotaSufficient && compPinFilled && verified;
+
+  const ready = method === 'CASH'
+    ? cashReceived !== null && cashReceived >= totalValue
+    : method === 'COMPLIMENTARY'
+      ? compReady
+      : isMethodAvailable(method, activeConfig) && verified && reference.trim().length <= 100
+        && (method !== 'QRIS' || qrisImageLoaded);
   const canConfirm = canEditPos && contextValid && editable && ready;
   const canRetry = canEditPos && isAmbiguous && !isPending;
 
@@ -666,22 +726,28 @@ export default function PosPayCashModal({
 
             {/* Nominal — readonly */}
             <div className="flex items-center justify-between border-t border-stone-100 pt-2">
-              <span className="text-stone-500 font-medium">Nominal</span>
-              <span className="text-sm font-black text-stone-900">
+              <span className="text-stone-500 font-medium">Nominal Tagihan</span>
+              <span className={`text-sm font-black ${method === 'COMPLIMENTARY' ? 'line-through text-stone-400' : 'text-stone-900'}`}>
                 {formatIDR(totalValue)}
               </span>
             </div>
+            {method === 'COMPLIMENTARY' && (
+              <div className="flex items-center justify-between text-emerald-800 font-bold text-xs pt-1">
+                <span>Total Bayar (Komplimentari):</span>
+                <span className="px-2 py-0.5 rounded bg-emerald-100 border border-emerald-300 font-black">Rp 0 (100% Free)</span>
+              </div>
+            )}
           </div>
 
           {phase !== 'success' && (
             <div className="space-y-3">
-              <div className="grid grid-cols-4 gap-2" role="group" aria-label="Metode pembayaran">
+              <div className="grid grid-cols-5 gap-1.5" role="group" aria-label="Metode pembayaran">
                 {POS_PAYMENT_METHODS.map((choice) => (
                   <button key={choice} type="button" aria-pressed={method === choice}
                     disabled={!editable || !canEditPos || !isMethodAvailable(choice, activeConfig)}
                     onClick={() => {if (pendingRef.current || unresolvedRef.current) return; setMethod(choice); setVerified(false); setFailMessage(null);}}
-                    className={`px-2 py-2 text-xs font-bold rounded-lg border disabled:opacity-40 disabled:cursor-not-allowed ${method === choice ? 'bg-emerald-100 border-emerald-500 text-emerald-900' : 'border-stone-200 text-stone-700'}`}>
-                    {choice === 'TRANSFER' ? 'Transfer' : choice === 'DEBIT' ? 'Debit' : choice}
+                    className={`px-1.5 py-2 text-[11px] font-bold rounded-lg border text-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed ${method === choice ? 'bg-emerald-100 border-emerald-500 text-emerald-900 shadow-xs' : 'border-stone-200 text-stone-700 hover:bg-stone-50'}`}>
+                    {choice === 'TRANSFER' ? 'Transfer' : choice === 'DEBIT' ? 'Debit' : choice === 'COMPLIMENTARY' ? '🎁 Complim.' : choice}
                   </button>
                 ))}
               </div>
@@ -762,6 +828,139 @@ export default function PosPayCashModal({
                   <div className="flex justify-between text-xs"><span>Kembalian</span>
                     <strong>{cashReceived !== null && cashReceived >= totalValue ? formatIDR(cashReceived - totalValue) : '—'}</strong></div>
                   {cashReceived === null || cashReceived < totalValue ? <p className="text-xs text-red-700">Uang diterima harus sama atau lebih besar dari tagihan.</p> : null}
+                </div>
+              ) : method === 'COMPLIMENTARY' ? (
+                <div className="space-y-3 rounded-xl border border-amber-200 bg-amber-50/40 p-3.5">
+                  <div className="flex items-center justify-between pb-2 border-b border-amber-200/60">
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-base">🎁</span>
+                      <span className="text-xs font-bold text-amber-900 uppercase tracking-wide">Otorisasi Komplimentari (100% Free)</span>
+                    </div>
+                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 border border-amber-300">
+                      Tagihan Rp 0
+                    </span>
+                  </div>
+
+                  {complimentaryEmployees.length === 0 ? (
+                    <div className="rounded-lg bg-red-50 border border-red-200 p-3 text-xs text-red-700">
+                      {complimentaryLoading
+                        ? 'Memuat data otorisasi kuota karyawan…'
+                        : 'Belum ada karyawan dengan kuota komplimentari aktif. Aktifkan kuota karyawan di menu HRD.'}
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 mb-1">
+                          Karyawan Penanggung Jawab / Otorisator <span className="text-red-500">*</span>
+                        </label>
+                        <select
+                          value={selectedCompEmployeeId}
+                          disabled={!editable || !canEditPos}
+                          onChange={e => {
+                            setSelectedCompEmployeeId(e.target.value);
+                            setVerified(false);
+                            setFailMessage(null);
+                          }}
+                          className="w-full text-xs rounded-lg border border-stone-300 bg-white px-2.5 py-2 font-medium text-stone-800 focus:border-amber-500 focus:ring-1 focus:ring-amber-500"
+                        >
+                          {complimentaryEmployees.map(emp => (
+                            <option key={emp.id} value={emp.id}>
+                              {emp.full_name} ({emp.department}) — Sisa: Rp {Math.max(0, emp.complimentary_quota_remaining).toLocaleString('id-ID')}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      {selectedEmp && (
+                        <div className={`p-2.5 rounded-lg border text-xs space-y-1 ${compQuotaSufficient ? 'bg-white border-emerald-200' : 'bg-red-50 border-red-300 text-red-900'}`}>
+                          <div className="flex justify-between items-center text-[11px]">
+                            <span className="text-stone-500">Batas Kuota Bulanan:</span>
+                            <span className="font-semibold text-stone-700">Rp {selectedEmp.complimentary_quota_limit.toLocaleString('id-ID')}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-[11px]">
+                            <span className="text-stone-500">Terpakai Bulan Ini:</span>
+                            <span className="font-semibold text-stone-700">Rp {selectedEmp.complimentary_quota_used.toLocaleString('id-ID')}</span>
+                          </div>
+                          <div className="flex justify-between items-center text-xs pt-1 border-t border-stone-100 font-bold">
+                            <span>Sisa Kuota:</span>
+                            <span className={compQuotaSufficient ? 'text-emerald-700' : 'text-red-700 font-black'}>
+                              Rp {selectedEmp.complimentary_quota_remaining.toLocaleString('id-ID')}
+                            </span>
+                          </div>
+
+                          {!compQuotaSufficient && (
+                            <div className="mt-2 p-2 rounded bg-red-100 border border-red-300 text-red-800 font-semibold text-[11px] flex items-center gap-1.5">
+                              <span>⛔</span>
+                              <span>Sisa kuota tidak mencukupi untuk tagihan {formatIDR(totalValue)}. Transaksi DIBLOKIR.</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      {selectedEmp?.has_pin && (
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">
+                            PIN Otorisasi Karyawan (4–6 Angka) <span className="text-red-500">*</span>
+                          </label>
+                          <input
+                            type="password"
+                            maxLength={8}
+                            value={compPin}
+                            disabled={!editable || !canEditPos}
+                            onChange={e => {
+                              setCompPin(e.target.value);
+                              setVerified(false);
+                              setFailMessage(null);
+                            }}
+                            placeholder="Masukkan PIN otorisasi…"
+                            className="w-full text-xs rounded-lg border border-stone-300 bg-white px-2.5 py-2 tracking-widest font-mono text-stone-800 focus:border-amber-500"
+                          />
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">Kategori</label>
+                          <select
+                            value={compCategory}
+                            disabled={!editable || !canEditPos}
+                            onChange={e => setCompCategory(e.target.value)}
+                            className="w-full text-xs rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-stone-800"
+                          >
+                            <option value="Tamu VIP">Tamu VIP</option>
+                            <option value="Direksi / Owner">Direksi / Owner</option>
+                            <option value="Operasional / Internal">Operasional / Internal</option>
+                            <option value="Relasi / Promosi">Relasi / Promosi</option>
+                            <option value="Komplain Layanan">Komplain Layanan</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-stone-700 mb-1">Nama Tamu / Catatan</label>
+                          <input
+                            type="text"
+                            maxLength={100}
+                            value={compGuestOrNote}
+                            disabled={!editable || !canEditPos}
+                            onChange={e => setCompGuestOrNote(e.target.value)}
+                            placeholder="Contoh: Tamu Bpk Vian..."
+                            className="w-full text-xs rounded-lg border border-stone-300 bg-white px-2 py-1.5 text-stone-800"
+                          />
+                        </div>
+                      </div>
+
+                      <label className="flex items-start gap-2 text-xs text-stone-700 pt-1 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={verified}
+                          disabled={!editable || !canEditPos || !compQuotaSufficient || (selectedEmp?.has_pin && compPin.length < 4)}
+                          onChange={e => {
+                            if (!pendingRef.current && !unresolvedRef.current) setVerified(e.target.checked);
+                          }}
+                        />
+                        <span>Saya mengonfirmasi bahwa pesanan ini diselesaikan sebagai <strong>Komplimentari (100% Free / Rp 0)</strong> dengan pemotongan kuota resmi karyawan bersangkutan.</span>
+                      </label>
+                    </>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-3 rounded-xl border border-stone-200 p-3">

@@ -141,6 +141,11 @@ export interface HrEmployee {
   user_id?: number | null;
   account_status?: string | null;
   user_is_active?: boolean | null;
+  complimentary_quota_enabled?: boolean;
+  complimentary_quota_limit?: number;
+  complimentary_pin?: string | null;
+  complimentary_quota_used?: number;
+  complimentary_quota_remaining?: number;
   created_at: string;
   updated_at: string;
 }
@@ -174,6 +179,9 @@ export interface CreateEmployeePayload {
   monthly_salary?: number;
   status?: string;
   create_login_account?: boolean;
+  complimentary_quota_enabled?: boolean;
+  complimentary_quota_limit?: number;
+  complimentary_pin?: string | null;
 }
 
 export type DiagnosisState =
@@ -274,6 +282,9 @@ export interface UpdateEmployeePayload {
   monthly_salary?: number;
   status?: string;
   is_active?: boolean;
+  complimentary_quota_enabled?: boolean;
+  complimentary_quota_limit?: number;
+  complimentary_pin?: string | null;
 }
 
 export interface RoleCategoryDef {

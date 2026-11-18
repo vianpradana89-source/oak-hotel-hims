@@ -7077,5 +7077,35 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
       ('folios', 'export', 'folios.export', 'Hak akses EXPORT pada modul folios', TRUE),
       ('reservations', 'export', 'reservations.export', 'Hak akses EXPORT pada modul reservations', TRUE)
     ON CONFLICT (key) DO NOTHING;
+
+    -- Migration: pos_complimentary_quota_v1
+    -- Support monthly employee complimentary quota and audit usage ledger
+    ALTER TABLE hr_employees
+      ADD COLUMN IF NOT EXISTS complimentary_quota_enabled BOOLEAN DEFAULT FALSE,
+      ADD COLUMN IF NOT EXISTS complimentary_quota_limit DECIMAL(12,2) DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS complimentary_pin VARCHAR(50) DEFAULT NULL;
+
+    CREATE TABLE IF NOT EXISTS pos_complimentary_usages (
+      id SERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL REFERENCES properties(id),
+      employee_id INTEGER NOT NULL REFERENCES hr_employees(id),
+      pos_order_id INTEGER NOT NULL REFERENCES pos_orders(id),
+      amount DECIMAL(12,2) NOT NULL,
+      category VARCHAR(50) NOT NULL,
+      guest_name_or_note TEXT,
+      usage_month VARCHAR(7) NOT NULL,
+      status VARCHAR(30) DEFAULT 'ACTIVE',
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_pos_comp_usages_prop_emp_month
+      ON pos_complimentary_usages (property_id, employee_id, usage_month);
+
+    CREATE INDEX IF NOT EXISTS idx_pos_comp_usages_order
+      ON pos_complimentary_usages (pos_order_id);
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_complimentary_quota_v1')
+    ON CONFLICT (version) DO NOTHING;
   `);
 }

@@ -273,7 +273,10 @@ export function createHrdRouter(pool: Pool): Router {
           : undefined,
         monthly_salary: req.body.monthly_salary !== undefined ? Number(req.body.monthly_salary) : undefined,
         status: req.body.status,
-        is_active: req.body.is_active !== undefined ? Boolean(req.body.is_active) : undefined
+        is_active: req.body.is_active !== undefined ? Boolean(req.body.is_active) : undefined,
+        complimentary_quota_enabled: req.body.complimentary_quota_enabled !== undefined ? Boolean(req.body.complimentary_quota_enabled) : undefined,
+        complimentary_quota_limit: req.body.complimentary_quota_limit !== undefined ? Number(req.body.complimentary_quota_limit) : undefined,
+        complimentary_pin: req.body.complimentary_pin !== undefined ? String(req.body.complimentary_pin) : undefined
       };
 
       const actor = {

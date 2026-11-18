@@ -36,7 +36,7 @@ import {
 import { reconcileCanonicalAvailability } from './domains/inventory/canonicalReconciliation';
 import { addHotelDays, enumerateHotelDates, hotelDateFromInstant, hotelDateKey, normalizeHotelDate } from './utils/hotelDate';
 import { DayUseIntervalError, validateDayUseInterval } from './utils/dayUseInterval';
-import { payPosOrderCash, payPosOrder, PosSettlementError, POS_SUPPORTED_METHODS } from './domains/pos/posSettlementService';
+import { payPosOrderCash, payPosOrder, PosSettlementError, POS_SUPPORTED_METHODS, PosMethodSpecificInput } from './domains/pos/posSettlementService';
 import { postPosOrderToRoomFolio, PosRoomChargeError } from './domains/pos/posRoomChargeService';
 import { resolvePropertyTimezone } from './utils/propertyTimezone';
 import {
@@ -82,6 +82,7 @@ import { createHousekeepingRouter } from './domains/housekeeping/housekeepingRou
 import { ensureDirtyRoomCleaningTask, ensureCheckoutRoomCleaningTask, getPropertyHousekeepingSettings } from './domains/housekeeping/housekeepingService';
 import { createAttendanceRouter } from './domains/attendance/attendanceRouter';
 import { createHrdRouter } from './domains/hrd/hrdRouter';
+import { getComplimentaryEligibleEmployees } from './domains/hrd/hrdService';
 import { createEmployeeMobileRouter } from './domains/employeeMobile/employeeMobileRouter';
 import { createScheduleRouter } from './domains/schedule/scheduleRouter';
 import { createFeatureRouter } from './domains/features/featureRouter';
@@ -6902,6 +6903,43 @@ app.post('/api/pos/orders', createPosOrderCreateHandler({
 // computeCashSettlementFingerprint memakai path '/api/pos/orders/pay/cash'
 // sebagai bagian hashing (bukan path HTTP publik).
 // ─────────────────────────���───────────────────────────────────────────────
+app.get('/api/pos/complimentary-quotas', async (req, res) => {
+  const propertyIdRaw = req.query.property_id || req.query.propertyId;
+  if (!propertyIdRaw) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'property_id is required' });
+  }
+  const propertyId = Number(propertyIdRaw);
+  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+    return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'invalid property_id' });
+  }
+  try {
+    await assertPropertyScope(req, propertyId);
+  } catch (scopeErr: any) {
+    const sc = scopeErr?.statusCode ?? 403;
+    return res.status(sc).json({
+      status: 'ERROR',
+      code: scopeErr?.code || 'PROPERTY_SCOPE_REQUIRED',
+      message: scopeErr?.message || 'Tidak memiliki akses ke properti ini'
+    });
+  }
+
+  let client: import('pg').PoolClient;
+  try {
+    client = await pool.connect();
+  } catch (connectErr: any) {
+    return res.status(500).json({ status: 'ERROR', message: 'Database connection error' });
+  }
+  try {
+    const employees = await getComplimentaryEligibleEmployees(client, propertyId);
+    res.json({ status: 'SUCCESS', data: employees });
+  } catch (err: any) {
+    console.error('POS complimentary quotas error', err?.message || err);
+    res.status(500).json({ status: 'ERROR', message: 'Internal server error' });
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/pos/orders/:id/pay', async (req, res) => {
   const { property_id: propertyIdRaw, payment_method: paymentMethodRaw } = req.body;
 
@@ -6942,13 +6980,25 @@ app.post('/api/pos/orders/:id/pay', async (req, res) => {
   }
 
   // Method-specific inputs from body.
-  const methodInput: { cashReceived?: number | string | null; paymentReference?: string | null } = {};
+  const methodInput: PosMethodSpecificInput = {};
   if (req.body.cash_received != null) {
     methodInput.cashReceived = req.body.cash_received;
   }
   if (req.body.payment_reference != null) {
     const ref = String(req.body.payment_reference).trim();
     methodInput.paymentReference = ref || null;
+  }
+  if (req.body.complimentary_employee_id != null) {
+    methodInput.complimentaryEmployeeId = Number(req.body.complimentary_employee_id);
+  }
+  if (req.body.complimentary_pin != null) {
+    methodInput.complimentaryPin = String(req.body.complimentary_pin).trim();
+  }
+  if (req.body.complimentary_category != null) {
+    methodInput.complimentaryCategory = String(req.body.complimentary_category).trim();
+  }
+  if (req.body.complimentary_guest_name_or_note != null) {
+    methodInput.complimentaryGuestNameOrNote = String(req.body.complimentary_guest_name_or_note).trim();
   }
 
   let parsedLocationId: number | undefined = undefined;

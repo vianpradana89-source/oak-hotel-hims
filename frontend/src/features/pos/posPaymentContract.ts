@@ -1,4 +1,4 @@
-export const POS_PAYMENT_METHODS = ['CASH', 'QRIS', 'TRANSFER', 'DEBIT'] as const;
+export const POS_PAYMENT_METHODS = ['CASH', 'QRIS', 'TRANSFER', 'DEBIT', 'COMPLIMENTARY'] as const;
 export type PosPaymentMethod = typeof POS_PAYMENT_METHODS[number];
 
 export interface PosPaymentConfig {
@@ -84,7 +84,7 @@ export function readPosPaymentConfig(value: unknown, propertyId: number): PosPay
   return v as unknown as PosPaymentConfig;
 }
 export function isMethodAvailable(method: PosPaymentMethod, config: PosPaymentConfig | null): boolean {
-  if (method === 'CASH') return true;
+  if (method === 'CASH' || method === 'COMPLIMENTARY') return true;
   if (!config) return false;
   if (method === 'QRIS') return config.qris_enabled && config.qris_image_available;
   if (method === 'TRANSFER') return config.transfer_enabled && text(config.bank_account_number);
@@ -95,6 +95,10 @@ export function createPaySnapshot(input: {
   method: PosPaymentMethod; cashInput: string; reference: string;
   config: PosPaymentConfig | null; qrisImageLoaded: boolean; verified: boolean;
   locationId?: number | null;
+  complimentaryEmployeeId?: number | null;
+  complimentaryPin?: string | null;
+  complimentaryCategory?: string | null;
+  complimentaryGuestNameOrNote?: string | null;
 }): PaySnapshot {
   const amount = String(input.amount);
   const minor = cents(amount);
@@ -115,6 +119,22 @@ export function createPaySnapshot(input: {
     const tendered = cents(cashReceived);
     if (tendered === null || tendered < minor) throw new Error('Uang diterima harus sama atau lebih besar dari tagihan.');
     body.cash_received = cashReceived;
+  } else if (input.method === 'COMPLIMENTARY') {
+    if (!input.complimentaryEmployeeId || !integerId(input.complimentaryEmployeeId)) {
+      throw new Error('Pilih karyawan yang memberikan otorisasi kuota komplimentari.');
+    }
+    if (!input.verified) {
+      throw new Error('Konfirmasikan otorisasi transaksi komplimentari ini.');
+    }
+    body.complimentary_employee_id = input.complimentaryEmployeeId;
+    if (input.complimentaryPin) {
+      body.complimentary_pin = input.complimentaryPin.trim();
+    }
+    body.complimentary_category = input.complimentaryCategory?.trim() || 'Tamu VIP';
+    if (input.complimentaryGuestNameOrNote) {
+      body.complimentary_guest_name_or_note = input.complimentaryGuestNameOrNote.trim();
+    }
+    paymentReference = `COMPLIMENTARY: ${body.complimentary_category}`;
   } else {
     if (input.method === 'QRIS' && !input.qrisImageLoaded) throw new Error('Gambar QRIS resmi belum berhasil ditampilkan.');
     if (!input.verified) throw new Error('Konfirmasikan bahwa pembayaran telah diterima dan diperiksa.');
@@ -141,6 +161,8 @@ export function validatePayResponse(httpStatus: number, json: PayResponseShape |
     const tendered = cents(s.cash_received), requested = cents(snap.cashReceived), change = cents(s.change_due);
     if (tendered === null || requested === null || change === null || tendered !== requested || change !== tendered - amount) return false;
     if (s.payment_reference !== null || s.verified_by !== null || s.verified_at !== null) return false;
+  } else if (snap.paymentMethod === 'COMPLIMENTARY') {
+    if (!text(s.verified_by) || !text(s.verified_at)) return false;
   } else {
     if (s.cash_received !== null || s.change_due !== null || s.payment_reference !== snap.paymentReference) return false;
     if (!text(s.verified_by) || !text(s.verified_at) || !Number.isFinite(Date.parse(s.verified_at))) return false;
