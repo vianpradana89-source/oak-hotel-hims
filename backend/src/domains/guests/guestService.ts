@@ -13,12 +13,30 @@ import type {
   GuestRole,
   GuestUpdateInput,
   GuestWithStats,
+  LoyaltyCalculationPeriod,
+  LoyaltyTierCode,
   MatchClassification,
+  PropertyLoyaltySettings,
+  PropertyLoyaltyTierConfig,
   ReservationGuest,
   ReservationGuestCreateInput,
   ReservationGuestUpdateInput,
   VipStatus
 } from './guestTypes';
+
+export const DEFAULT_TIERS_CONFIG: PropertyLoyaltyTierConfig[] = [
+  { code: 'BRONZE', name: 'Bronze', min_spend: 0, discount_pct: 0 },
+  { code: 'SILVER', name: 'Silver', min_spend: 500000, discount_pct: 2 },
+  { code: 'GOLD', name: 'Gold', min_spend: 2500000, discount_pct: 5 },
+  { code: 'PLATINUM', name: 'Platinum', min_spend: 5000000, discount_pct: 25 },
+];
+
+export const DEFAULT_WA_BIRTHDAY_MESSAGE =
+  'Selamat ulang tahun {nama}! 🎉 Ada hadiah spesial dari {toko} untuk Anda.';
+export const DEFAULT_WA_FOLLOWUP_MESSAGE =
+  'Halo {nama}, apa kabar? Kami dari {toko} merindukan kunjungan Anda sejak {terakhir}. Dapatkan promo spesial untuk kunjungan berikutnya!';
+export const DEFAULT_WA_DATABASE_MESSAGE =
+  'Halo {nama}, terima kasih telah menjadi pelanggan setia {toko}. Hubungi kami untuk reservasi kamar atau promo terbaru!';
 
 let crmTablesEnsured = false;
 export async function ensureGuestCrmTables(pool: Pool | PoolClient): Promise<void> {
@@ -37,8 +55,261 @@ export async function ensureGuestCrmTables(pool: Pool | PoolClient): Promise<voi
     );
     CREATE INDEX IF NOT EXISTS idx_guest_loyalty_ledger_prop_guest
       ON guest_loyalty_ledger(property_id, guest_id);
+
+    CREATE TABLE IF NOT EXISTS property_loyalty_settings (
+      property_id INTEGER PRIMARY KEY,
+      points_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+      spend_per_point NUMERIC(14,2) NOT NULL DEFAULT 10000,
+      points_earned_per_unit INTEGER NOT NULL DEFAULT 1,
+      points_per_visit INTEGER NOT NULL DEFAULT 1,
+      point_value_idr NUMERIC(14,2) NOT NULL DEFAULT 350,
+      min_redeem_points INTEGER NOT NULL DEFAULT 50,
+      point_expiry_months INTEGER NOT NULL DEFAULT 12,
+      silver_point_threshold INTEGER NOT NULL DEFAULT 1000,
+      gold_point_threshold INTEGER NOT NULL DEFAULT 2000,
+      platinum_point_threshold INTEGER NOT NULL DEFAULT 5000,
+      tier_calculation_period VARCHAR(30) NOT NULL DEFAULT 'CUMULATIVE',
+      tiers_config JSONB NOT NULL DEFAULT '[]'::jsonb,
+      wa_birthday_message TEXT NOT NULL DEFAULT 'Selamat ulang tahun {nama}! 🎉 Ada hadiah spesial dari {toko} untuk Anda.',
+      wa_followup_message TEXT NOT NULL DEFAULT 'Halo {nama}, apa kabar? Kami dari {toko} merindukan kunjungan Anda sejak {terakhir}. Dapatkan promo spesial untuk kunjungan berikutnya!',
+      wa_database_message TEXT NOT NULL DEFAULT 'Halo {nama}, terima kasih telah menjadi pelanggan setia {toko}. Hubungi kami untuk reservasi kamar atau promo terbaru!',
+      followup_threshold_days INTEGER NOT NULL DEFAULT 90,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
   `);
   crmTablesEnsured = true;
+}
+
+export async function getPropertyLoyaltySettings(
+  pool: Pool | PoolClient,
+  propertyId: number
+): Promise<PropertyLoyaltySettings> {
+  await ensureGuestCrmTables(pool);
+  const res = await pool.query(
+    `SELECT * FROM property_loyalty_settings WHERE property_id = $1`,
+    [propertyId]
+  );
+  if ((res.rowCount ?? 0) === 0) {
+    return {
+      property_id: propertyId,
+      points_enabled: true,
+      spend_per_point: 10000,
+      points_earned_per_unit: 1,
+      points_per_visit: 1,
+      point_value_idr: 350,
+      min_redeem_points: 50,
+      point_expiry_months: 12,
+      silver_point_threshold: 1000,
+      gold_point_threshold: 2000,
+      platinum_point_threshold: 5000,
+      tier_calculation_period: 'CUMULATIVE',
+      tiers_config: DEFAULT_TIERS_CONFIG,
+      wa_birthday_message: DEFAULT_WA_BIRTHDAY_MESSAGE,
+      wa_followup_message: DEFAULT_WA_FOLLOWUP_MESSAGE,
+      wa_database_message: DEFAULT_WA_DATABASE_MESSAGE,
+      followup_threshold_days: 90,
+    };
+  }
+  const row = res.rows[0];
+  const parsedTiers = Array.isArray(row.tiers_config) && row.tiers_config.length > 0
+    ? row.tiers_config
+    : DEFAULT_TIERS_CONFIG;
+  return {
+    property_id: Number(row.property_id),
+    points_enabled: Boolean(row.points_enabled),
+    spend_per_point: Math.max(1, Number(row.spend_per_point || 10000)),
+    points_earned_per_unit: Math.max(0, Number(row.points_earned_per_unit ?? 1)),
+    points_per_visit: Math.max(0, Number(row.points_per_visit ?? 1)),
+    point_value_idr: Math.max(1, Number(row.point_value_idr || 350)),
+    min_redeem_points: Math.max(1, Number(row.min_redeem_points || 50)),
+    point_expiry_months: Math.max(1, Number(row.point_expiry_months || 12)),
+    silver_point_threshold: Math.max(0, Number(row.silver_point_threshold ?? 1000)),
+    gold_point_threshold: Math.max(0, Number(row.gold_point_threshold ?? 2000)),
+    platinum_point_threshold: Math.max(0, Number(row.platinum_point_threshold ?? 5000)),
+    tier_calculation_period: (['CUMULATIVE', 'MONTHLY', 'QUARTERLY', 'YEARLY'].includes(row.tier_calculation_period)
+      ? row.tier_calculation_period
+      : 'CUMULATIVE') as LoyaltyCalculationPeriod,
+    tiers_config: parsedTiers,
+    wa_birthday_message: String(row.wa_birthday_message || DEFAULT_WA_BIRTHDAY_MESSAGE),
+    wa_followup_message: String(row.wa_followup_message || DEFAULT_WA_FOLLOWUP_MESSAGE),
+    wa_database_message: String(row.wa_database_message || DEFAULT_WA_DATABASE_MESSAGE),
+    followup_threshold_days: Math.max(1, Number(row.followup_threshold_days || 90)),
+    updated_at: row.updated_at,
+  };
+}
+
+export async function updatePropertyLoyaltySettings(
+  pool: Pool,
+  propertyId: number,
+  input: Partial<PropertyLoyaltySettings>,
+  correlationId?: string,
+  actorUserId?: number | null
+): Promise<PropertyLoyaltySettings> {
+  await assertPropertyExists(pool, propertyId);
+  const current = await getPropertyLoyaltySettings(pool, propertyId);
+
+  const next: PropertyLoyaltySettings = {
+    property_id: propertyId,
+    points_enabled: input.points_enabled !== undefined ? Boolean(input.points_enabled) : current.points_enabled,
+    spend_per_point: input.spend_per_point !== undefined ? Math.max(1, Number(input.spend_per_point)) : current.spend_per_point,
+    points_earned_per_unit: input.points_earned_per_unit !== undefined ? Math.max(0, Math.round(Number(input.points_earned_per_unit))) : current.points_earned_per_unit,
+    points_per_visit: input.points_per_visit !== undefined ? Math.max(0, Math.round(Number(input.points_per_visit))) : current.points_per_visit,
+    point_value_idr: input.point_value_idr !== undefined ? Math.max(1, Number(input.point_value_idr)) : current.point_value_idr,
+    min_redeem_points: input.min_redeem_points !== undefined ? Math.max(1, Math.round(Number(input.min_redeem_points))) : current.min_redeem_points,
+    point_expiry_months: input.point_expiry_months !== undefined ? Math.max(1, Math.round(Number(input.point_expiry_months))) : current.point_expiry_months,
+    silver_point_threshold: input.silver_point_threshold !== undefined ? Math.max(0, Math.round(Number(input.silver_point_threshold))) : current.silver_point_threshold,
+    gold_point_threshold: input.gold_point_threshold !== undefined ? Math.max(0, Math.round(Number(input.gold_point_threshold))) : current.gold_point_threshold,
+    platinum_point_threshold: input.platinum_point_threshold !== undefined ? Math.max(0, Math.round(Number(input.platinum_point_threshold))) : current.platinum_point_threshold,
+    tier_calculation_period: (input.tier_calculation_period && ['CUMULATIVE', 'MONTHLY', 'QUARTERLY', 'YEARLY'].includes(input.tier_calculation_period)
+      ? input.tier_calculation_period
+      : current.tier_calculation_period) as LoyaltyCalculationPeriod,
+    tiers_config: Array.isArray(input.tiers_config) && input.tiers_config.length > 0
+      ? input.tiers_config.map((t) => ({
+          code: (['BRONZE', 'SILVER', 'GOLD', 'PLATINUM'].includes(String(t.code).toUpperCase()) ? String(t.code).toUpperCase() : 'BRONZE') as LoyaltyTierCode,
+          name: String(t.name || t.code || 'Bronze').trim(),
+          min_spend: Math.max(0, Number(t.min_spend || 0)),
+          discount_pct: Math.max(0, Math.min(100, Number(t.discount_pct || 0))),
+        }))
+      : current.tiers_config,
+    wa_birthday_message: input.wa_birthday_message !== undefined ? String(input.wa_birthday_message) : current.wa_birthday_message,
+    wa_followup_message: input.wa_followup_message !== undefined ? String(input.wa_followup_message) : current.wa_followup_message,
+    wa_database_message: input.wa_database_message !== undefined ? String(input.wa_database_message) : current.wa_database_message,
+    followup_threshold_days: input.followup_threshold_days !== undefined ? Math.max(1, Math.round(Number(input.followup_threshold_days))) : current.followup_threshold_days,
+  };
+
+  await pool.query(
+    `INSERT INTO property_loyalty_settings (
+       property_id, points_enabled, spend_per_point, points_earned_per_unit, points_per_visit,
+       point_value_idr, min_redeem_points, point_expiry_months,
+       silver_point_threshold, gold_point_threshold, platinum_point_threshold,
+       tier_calculation_period, tiers_config,
+       wa_birthday_message, wa_followup_message, wa_database_message, followup_threshold_days, updated_at
+     ) VALUES (
+       $1, $2, $3, $4, $5,
+       $6, $7, $8,
+       $9, $10, $11,
+       $12, $13::jsonb,
+       $14, $15, $16, $17, CURRENT_TIMESTAMP
+     )
+     ON CONFLICT (property_id) DO UPDATE SET
+       points_enabled = EXCLUDED.points_enabled,
+       spend_per_point = EXCLUDED.spend_per_point,
+       points_earned_per_unit = EXCLUDED.points_earned_per_unit,
+       points_per_visit = EXCLUDED.points_per_visit,
+       point_value_idr = EXCLUDED.point_value_idr,
+       min_redeem_points = EXCLUDED.min_redeem_points,
+       point_expiry_months = EXCLUDED.point_expiry_months,
+       silver_point_threshold = EXCLUDED.silver_point_threshold,
+       gold_point_threshold = EXCLUDED.gold_point_threshold,
+       platinum_point_threshold = EXCLUDED.platinum_point_threshold,
+       tier_calculation_period = EXCLUDED.tier_calculation_period,
+       tiers_config = EXCLUDED.tiers_config,
+       wa_birthday_message = EXCLUDED.wa_birthday_message,
+       wa_followup_message = EXCLUDED.wa_followup_message,
+       wa_database_message = EXCLUDED.wa_database_message,
+       followup_threshold_days = EXCLUDED.followup_threshold_days,
+       updated_at = CURRENT_TIMESTAMP`,
+    [
+      propertyId,
+      next.points_enabled,
+      next.spend_per_point,
+      next.points_earned_per_unit,
+      next.points_per_visit,
+      next.point_value_idr,
+      next.min_redeem_points,
+      next.point_expiry_months,
+      next.silver_point_threshold,
+      next.gold_point_threshold,
+      next.platinum_point_threshold,
+      next.tier_calculation_period,
+      JSON.stringify(next.tiers_config),
+      next.wa_birthday_message,
+      next.wa_followup_message,
+      next.wa_database_message,
+      next.followup_threshold_days,
+    ]
+  );
+
+  await writeGuestAudit(pool, {
+    action: 'GUEST_LOYALTY',
+    entity: 'GUEST',
+    recordId: propertyId,
+    newValue: next,
+    propertyId,
+    correlationId,
+    actorUserId,
+  });
+
+  return getPropertyLoyaltySettings(pool, propertyId);
+}
+
+export function evaluateGuestLoyaltyMetrics(
+  totalSpend: number,
+  paidVisits: number,
+  bonusPoints: number,
+  redeemedPoints: number,
+  vipStatus: VipStatus,
+  settings: PropertyLoyaltySettings
+): {
+  earned_points: number;
+  loyalty_points: number;
+  point_value_idr: number;
+  loyalty_tier: LoyaltyTierCode;
+  loyalty_tier_name: string;
+  tier_discount_pct: number;
+} {
+  const spendPerPoint = Math.max(1, Number(settings.spend_per_point || 10000));
+  const pointsPerUnit = Math.max(0, Number(settings.points_earned_per_unit ?? 1));
+  const pointsPerVisit = Math.max(0, Number(settings.points_per_visit ?? 1));
+
+  const earnedPoints = settings.points_enabled
+    ? Math.floor(totalSpend / spendPerPoint) * pointsPerUnit + paidVisits * pointsPerVisit
+    : 0;
+  const totalCumulativePoints = earnedPoints + bonusPoints;
+  const loyaltyPoints = Math.max(0, earnedPoints + bonusPoints - redeemedPoints);
+  const pointValueIdr = Math.round(loyaltyPoints * Number(settings.point_value_idr || 350));
+
+  const tiers = Array.isArray(settings.tiers_config) && settings.tiers_config.length > 0
+    ? settings.tiers_config
+    : DEFAULT_TIERS_CONFIG;
+  const tierMap = new Map<LoyaltyTierCode, PropertyLoyaltyTierConfig>();
+  for (const t of tiers) {
+    tierMap.set(t.code, t);
+  }
+
+  const bronzeCfg = tierMap.get('BRONZE') || { code: 'BRONZE', name: 'Bronze', min_spend: 0, discount_pct: 0 };
+  const silverCfg = tierMap.get('SILVER') || { code: 'SILVER', name: 'Silver', min_spend: 500000, discount_pct: 2 };
+  const goldCfg = tierMap.get('GOLD') || { code: 'GOLD', name: 'Gold', min_spend: 2500000, discount_pct: 5 };
+  const platCfg = tierMap.get('PLATINUM') || { code: 'PLATINUM', name: 'Platinum', min_spend: 5000000, discount_pct: 25 };
+
+  let chosenTier: PropertyLoyaltyTierConfig = bronzeCfg;
+  if (
+    vipStatus === 'VVIP' ||
+    (platCfg.min_spend > 0 && totalSpend >= platCfg.min_spend) ||
+    (settings.platinum_point_threshold > 0 && totalCumulativePoints >= settings.platinum_point_threshold)
+  ) {
+    chosenTier = platCfg;
+  } else if (
+    vipStatus === 'VIP' ||
+    (goldCfg.min_spend > 0 && totalSpend >= goldCfg.min_spend) ||
+    (settings.gold_point_threshold > 0 && totalCumulativePoints >= settings.gold_point_threshold)
+  ) {
+    chosenTier = goldCfg;
+  } else if (
+    (silverCfg.min_spend > 0 && totalSpend >= silverCfg.min_spend) ||
+    (settings.silver_point_threshold > 0 && totalCumulativePoints >= settings.silver_point_threshold)
+  ) {
+    chosenTier = silverCfg;
+  }
+
+  return {
+    earned_points: earnedPoints,
+    loyalty_points: loyaltyPoints,
+    point_value_idr: pointValueIdr,
+    loyalty_tier: chosenTier.code,
+    loyalty_tier_name: chosenTier.name,
+    tier_discount_pct: Number(chosenTier.discount_pct || 0),
+  };
 }
 
 export function httpError(statusCode: number, code: string, message: string): Error & { statusCode: number; code: string } {
@@ -306,6 +577,8 @@ export async function searchGuests(
   );
   const total = countRes.rows[0]?.total || 0;
 
+  const loyaltySettings = await getPropertyLoyaltySettings(pool, propertyId);
+
   params.push(safeLimit);
   const limitParam = `$${params.length}`;
   params.push(safeOffset);
@@ -316,46 +589,30 @@ export async function searchGuests(
        g.*,
        COALESCE(g.guest_code, 'GST-' || LPAD(g.id::text, 5, '0')) AS guest_code,
        COALESCE(stats.visit_count, 0)::int AS visit_count,
+       COALESCE(stats.paid_visit_count, 0)::int AS paid_visit_count,
        COALESCE(stats.room_nights, 0)::int AS room_nights,
        stats.first_stay,
        stats.last_stay,
        (COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0))::numeric(14,2) AS total_spend,
-       (
-         FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
-         + (COALESCE(stats.paid_room_nights, 0)::int * 10)
-       ) AS earned_points,
        COALESCE(loy.bonus_points, 0)::int AS bonus_points,
-       COALESCE(loy.redeemed_points, 0)::int AS redeemed_points,
-       GREATEST(
-         0,
-         FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
-         + (COALESCE(stats.paid_room_nights, 0)::int * 10)
-         + COALESCE(loy.bonus_points, 0)::int
-         - COALESCE(loy.redeemed_points, 0)::int
-       )::int AS loyalty_points,
-       CASE
-         WHEN g.vip_status = 'VVIP'
-           OR COALESCE(stats.room_nights, 0) >= 15
-           OR (
-             FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
-             + (COALESCE(stats.paid_room_nights, 0)::int * 10)
-             + COALESCE(loy.bonus_points, 0)::int
-           ) >= 1500
-         THEN 'PLATINUM'
-         WHEN g.vip_status = 'VIP'
-           OR COALESCE(stats.room_nights, 0) >= 5
-           OR (
-             FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
-             + (COALESCE(stats.paid_room_nights, 0)::int * 10)
-             + COALESCE(loy.bonus_points, 0)::int
-           ) >= 500
-         THEN 'GOLD'
-         ELSE 'SILVER'
-       END AS loyalty_tier
+       COALESCE(loy.redeemed_points, 0)::int AS redeemed_points
      FROM guests g
      LEFT JOIN LATERAL (
        SELECT
          COUNT(DISTINCT r.id)::int AS visit_count,
+         COUNT(
+           DISTINCT CASE
+             WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+               AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+               AND COALESCE(r.discount_percent, 0) < 100
+               AND COALESCE(r.total_price, 0) > 0
+               AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+               AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+               AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+             THEN r.id
+             ELSE NULL
+           END
+         )::int AS paid_visit_count,
          COALESCE(SUM(GREATEST(1, r.check_out::date - r.check_in::date)), 0)::int AS room_nights,
          TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
          TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay,
@@ -452,14 +709,32 @@ export async function searchGuests(
   );
 
   return {
-    guests: res.rows.map((r) => ({
-      ...r,
-      total_spend: Number(r.total_spend || 0),
-      earned_points: Number(r.earned_points || 0),
-      bonus_points: Number(r.bonus_points || 0),
-      redeemed_points: Number(r.redeemed_points || 0),
-      loyalty_points: Number(r.loyalty_points || 0),
-    })),
+    guests: res.rows.map((r) => {
+      const totalSpend = Number(r.total_spend || 0);
+      const paidVisits = Number(r.paid_visit_count || 0);
+      const bonusPoints = Number(r.bonus_points || 0);
+      const redeemedPoints = Number(r.redeemed_points || 0);
+      const metrics = evaluateGuestLoyaltyMetrics(
+        totalSpend,
+        paidVisits,
+        bonusPoints,
+        redeemedPoints,
+        r.vip_status || 'STANDARD',
+        loyaltySettings
+      );
+      return {
+        ...r,
+        total_spend: totalSpend,
+        earned_points: metrics.earned_points,
+        bonus_points: bonusPoints,
+        redeemed_points: redeemedPoints,
+        loyalty_points: metrics.loyalty_points,
+        point_value_idr: metrics.point_value_idr,
+        loyalty_tier: metrics.loyalty_tier,
+        loyalty_tier_name: metrics.loyalty_tier_name,
+        tier_discount_pct: metrics.tier_discount_pct,
+      };
+    }),
     total
   };
 }
@@ -754,10 +1029,10 @@ export async function getCrmSummary(
        gls.total_spend
      FROM guest_last_stay gls
      JOIN guests g ON gls.guest_id = g.id
-     WHERE ($2::date - gls.last_stay) >= 30
+     WHERE ($2::date - gls.last_stay) >= 1
        AND (g.is_archived IS NULL OR g.is_archived = FALSE)
-     ORDER BY gls.last_stay DESC
-     LIMIT 50`,
+     ORDER BY gls.last_stay ASC, gls.total_spend DESC
+     LIMIT 300`,
     [propertyId, hotelDate]
   );
 
@@ -1487,6 +1762,10 @@ export async function getGuestById(
 
   const stats = statsRes.rows[0] || { visit_count: 0, room_nights: 0, first_stay: null, last_stay: null };
 
+  // Compute loyalty metrics for this guest
+  const { guests: matchedGuests } = await searchGuests(pool, propertyId, guest.full_name, 100, 0, undefined, true);
+  const enriched = matchedGuests.find((g) => Number(g.id) === Number(guestId));
+
   return {
     ...guest,
     guest_code: guest.guest_code || `GST-${String(guest.id).padStart(5, '0')}`,
@@ -1494,8 +1773,208 @@ export async function getGuestById(
     room_nights: stats.room_nights,
     first_stay: stats.first_stay,
     last_stay: stats.last_stay,
+    total_spend: enriched?.total_spend ?? 0,
+    earned_points: enriched?.earned_points ?? 0,
+    bonus_points: enriched?.bonus_points ?? 0,
+    redeemed_points: enriched?.redeemed_points ?? 0,
+    loyalty_points: enriched?.loyalty_points ?? 0,
+    point_value_idr: enriched?.point_value_idr ?? 0,
+    loyalty_tier: enriched?.loyalty_tier ?? 'BRONZE',
+    loyalty_tier_name: enriched?.loyalty_tier_name ?? 'Bronze',
+    tier_discount_pct: enriched?.tier_discount_pct ?? 0,
     stays: staysRes.rows
   };
+}
+
+export async function redeemPointsForReservation(
+  pool: Pool,
+  input: {
+    property_id: number;
+    reservation_id: number;
+    guest_id: number;
+    points_to_redeem: number;
+    created_by?: string | null;
+  },
+  correlationId?: string,
+  actorUserId?: number | null
+): Promise<{
+  ledger_entry: GuestLoyaltyLedgerEntry;
+  redeemed_points: number;
+  discount_amount_idr: number;
+  new_total_price: number;
+  new_remaining_balance: number;
+}> {
+  const propertyId = parsePropertyId(input.property_id, 'property_id');
+  const reservationId = Number(input.reservation_id);
+  const guestId = Number(input.guest_id);
+  const pointsToRedeem = Math.round(Number(input.points_to_redeem || 0));
+
+  if (!Number.isInteger(reservationId) || reservationId <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'reservation_id wajib valid');
+  }
+  if (!Number.isInteger(guestId) || guestId <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'guest_id wajib valid');
+  }
+  if (!Number.isInteger(pointsToRedeem) || pointsToRedeem <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Jumlah poin yang ditukar harus lebih dari 0');
+  }
+
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+  const settings = await getPropertyLoyaltySettings(pool, propertyId);
+  if (!settings.points_enabled) {
+    throw httpError(400, 'LOYALTY_DISABLED', 'Program Poin sedang dinonaktifkan untuk properti ini.');
+  }
+  if (pointsToRedeem < settings.min_redeem_points) {
+    throw httpError(
+      400,
+      'MIN_REDEEM_NOT_MET',
+      `Minimal penukaran adalah ${settings.min_redeem_points} poin.`
+    );
+  }
+
+  const guestDetail = await getGuestById(pool, guestId, propertyId);
+  const availablePoints = Number(guestDetail.loyalty_points || 0);
+  if (pointsToRedeem > availablePoints) {
+    throw httpError(
+      400,
+      'INSUFFICIENT_POINTS',
+      `Saldo poin tamu (${availablePoints} poin) tidak mencukupi untuk penukaran ${pointsToRedeem} poin.`
+    );
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const resvLock = await client.query(
+      `SELECT r.*, b.bid, b.property_id AS booking_property_id
+       FROM reservations r
+       JOIN bookings b ON b.id = r.booking_id
+       WHERE r.id = $1
+       FOR UPDATE`,
+      [reservationId]
+    );
+    if ((resvLock.rowCount ?? 0) === 0) {
+      throw httpError(404, 'RESERVATION_NOT_FOUND', 'Reservasi tidak ditemukan');
+    }
+    const resv = resvLock.rows[0];
+    if (Number(resv.booking_property_id) !== propertyId) {
+      throw httpError(403, 'PROPERTY_MISMATCH', 'Reservasi bukan milik properti ini');
+    }
+
+    const currentTotal = Math.max(0, Number(resv.total_price || 0));
+    const amountPaid = Math.max(0, Number(resv.amount_paid || 0));
+    const currentRemaining = Math.max(0, Number(resv.remaining_balance ?? (currentTotal - amountPaid)));
+
+    const rawDiscountIdr = Math.round(pointsToRedeem * Number(settings.point_value_idr || 350));
+    const maxCuttable = currentRemaining > 0 ? currentRemaining : currentTotal;
+    if (maxCuttable <= 0) {
+      throw httpError(400, 'NOTHING_TO_DISCOUNT', 'Tagihan reservasi sudah Rp 0.');
+    }
+    const effectiveDiscountIdr = Math.min(rawDiscountIdr, maxCuttable);
+    const newTotalPrice = Math.max(0, currentTotal - effectiveDiscountIdr);
+    const newRemainingBalance = Math.max(0, newTotalPrice - amountPaid);
+    const newPaymentStatus =
+      newRemainingBalance <= 0 && (amountPaid > 0 || newTotalPrice === 0)
+        ? 'PAID'
+        : resv.payment_status;
+
+    const noteTag = `[Redeem ${pointsToRedeem} Poin = -Rp ${effectiveDiscountIdr.toLocaleString('id-ID')}]`;
+    const updatedSpecialRequests = resv.special_requests
+      ? `${resv.special_requests} ${noteTag}`
+      : noteTag;
+
+    await client.query(
+      `UPDATE reservations
+       SET total_price = $1,
+           remaining_balance = $2,
+           payment_status = $3,
+           special_requests = $4,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $5`,
+      [newTotalPrice, newRemainingBalance, newPaymentStatus, updatedSpecialRequests, reservationId]
+    );
+
+    // Also sync bookings.total_amount and transactions if present
+    await client.query(
+      `UPDATE bookings
+       SET total_amount = GREATEST(0, COALESCE(total_amount, 0) - $1),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $2`,
+      [effectiveDiscountIdr, resv.booking_id]
+    );
+
+    await client.query(
+      `UPDATE transactions
+       SET discount_amount = COALESCE(discount_amount, 0) + $1,
+           net_amount = GREATEST(0, COALESCE(net_amount, 0) - $1),
+           updated_at = CURRENT_TIMESTAMP
+       WHERE property_id = $2
+         AND (reservation_id = $3 OR (reservation_id IS NULL AND booking_id = $4))
+         AND transaction_type = 'SALE'
+         AND deleted_at IS NULL`,
+      [effectiveDiscountIdr, propertyId, reservationId, resv.booking_id]
+    );
+
+    const ledgerRes = await client.query(
+      `INSERT INTO guest_loyalty_ledger (
+         property_id, guest_id, entry_type, points, description, reference_no, created_by
+       ) VALUES ($1, $2, 'REDEEM', $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        propertyId,
+        guestId,
+        -Math.abs(pointsToRedeem),
+        `Potong Tagihan Reservasi ${resv.bid || '#' + reservationId} (-Rp ${effectiveDiscountIdr.toLocaleString('id-ID')})`,
+        resv.bid || `RESV-${reservationId}`,
+        input.created_by || 'Front Office',
+      ]
+    );
+
+    const ledgerRow = ledgerRes.rows[0];
+    await writeGuestAudit(client, {
+      action: 'GUEST_LOYALTY',
+      entity: 'GUEST',
+      recordId: guestId,
+      newValue: {
+        action: 'REDEEM_FOR_RESERVATION',
+        reservation_id: reservationId,
+        bid: resv.bid,
+        points_redeemed: pointsToRedeem,
+        discount_amount_idr: effectiveDiscountIdr,
+        new_total_price: newTotalPrice,
+        new_remaining_balance: newRemainingBalance,
+      },
+      propertyId,
+      correlationId,
+      actorUserId,
+    });
+
+    await client.query('COMMIT');
+    return {
+      ledger_entry: {
+        id: Number(ledgerRow.id),
+        property_id: Number(ledgerRow.property_id),
+        guest_id: Number(ledgerRow.guest_id),
+        entry_type: ledgerRow.entry_type,
+        points: Number(ledgerRow.points),
+        description: ledgerRow.description,
+        reference_no: ledgerRow.reference_no,
+        created_by: ledgerRow.created_by,
+        created_at: ledgerRow.created_at,
+      },
+      redeemed_points: pointsToRedeem,
+      discount_amount_idr: effectiveDiscountIdr,
+      new_total_price: newTotalPrice,
+      new_remaining_balance: newRemainingBalance,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 export async function createGuest(

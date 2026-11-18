@@ -529,6 +529,59 @@ export async function updateTemplate(
   }
 }
 
+// ─── Delete template ─────────────────────────────────────────────────────────
+
+export async function deleteTemplate(
+  pool: Pool,
+  templateId: number,
+  propertyId: number,
+  actor: ActorSnapshot,
+  correlationId: string
+): Promise<{ id: number; deleted: true }> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await assertPropertyExists(client, propertyId);
+
+    const lockRes = await client.query(
+      'SELECT * FROM guest_communication_templates WHERE id=$1 AND property_id=$2 FOR UPDATE',
+      [templateId, propertyId]
+    );
+    if ((lockRes.rowCount ?? 0) === 0) {
+      throw httpError(404, 'TEMPLATE_NOT_FOUND', `Template ${templateId} not found`);
+    }
+    const existing = lockRes.rows[0];
+
+    // Safely allow null template_id on historical logs so deleting a template never breaks history
+    await client.query(`
+      ALTER TABLE guest_communication_logs ALTER COLUMN template_id DROP NOT NULL;
+    `).catch(() => {});
+
+    await client.query(
+      `UPDATE guest_communication_logs SET template_id = NULL WHERE template_id = $1 AND property_id = $2`,
+      [templateId, propertyId]
+    ).catch(() => {});
+
+    await client.query(
+      `DELETE FROM guest_communication_templates WHERE id = $1 AND property_id = $2`,
+      [templateId, propertyId]
+    );
+
+    await insertAudit(
+      client, 'GUEST_CRM', 'GUEST_COMM_TEMPLATE_DELETE', 'GUEST_COMMUNICATION_TEMPLATE',
+      templateId, propertyId, { deleted: true }, existing, actor, correlationId
+    );
+
+    await client.query('COMMIT');
+    return { id: templateId, deleted: true };
+  } catch (err: any) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ─── Prepare WhatsApp communication ──────────────────────────────────────────
 
 export async function prepareWhatsAppCommunication(

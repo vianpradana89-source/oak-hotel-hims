@@ -147,6 +147,19 @@ export function updateGuestCommunicationTemplate(
   );
 }
 
+export function deleteGuestCommunicationTemplate(
+  propertyId: number,
+  templateId: number
+): Promise<{ id: number; deleted: true }> {
+  return request(
+    `/api/guests/communication-templates/${templateId}?property_id=${propertyId}`,
+    {
+      method: 'DELETE',
+    },
+    'Template komunikasi tamu gagal dihapus.'
+  );
+}
+
 export interface PrepareWhatsAppInput {
   guest_id: number;
   reservation_id: number | null;

@@ -39,6 +39,8 @@ import type {
   PaymentEvidenceType
 } from './features/transactions/paymentEvidenceTypes.ts';
 import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
+import { GuestCommunicationPanel } from './features/guests/GuestCommunicationPanel.tsx';
+import { MessageSquareText, X as LucideX } from 'lucide-react';
 import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
 import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorkspace.tsx';
 import DocumentCenter from './features/documents/DocumentCenter.tsx';
@@ -452,6 +454,8 @@ function AppContent() {
     setPosModalEditOrderId(null);
     setShowPosModal(true);
   };
+
+  const [isCommTemplatesModalOpen, setIsCommTemplatesModalOpen] = useState(false);
 
   // Buka POS dari reservation detail (scoped ke property_id + reservation_id).
   // propId adalah properti reservasi tersebut; TIDAK mengabaikan sebagai _propId.
@@ -4124,8 +4128,18 @@ function AppContent() {
                   <div className="text-xs uppercase tracking-[0.24em] text-blue-600 font-semibold">Operasional kalender</div>
                   <h3 className="text-lg font-semibold text-gray-900">Ringkasan booking hari ini</h3>
                 </div>
-                <div className="text-xs text-gray-500">
-                  {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
+                <div className="flex flex-col items-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setIsCommTemplatesModalOpen(true)}
+                    className="p-2 rounded-xl bg-white hover:bg-stone-50 border border-stone-200 text-[#1E392A] shadow-2xs transition-colors flex items-center justify-center cursor-pointer"
+                    title="Template & Komunikasi Tamu (WhatsApp)"
+                  >
+                    <MessageSquareText className="w-4 h-4" />
+                  </button>
+                  <div className="text-xs text-gray-500">
+                    {calendarSearchQuery ? `Hasil pencarian: ${calendarSummary.totalReservations}` : `Total kamar: ${calendarSummary.totalRooms}`}
+                  </div>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
@@ -4151,6 +4165,40 @@ function AppContent() {
                 ))}
               </div>
             </div>
+
+            {isCommTemplatesModalOpen && (
+              <div
+                className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-xs p-4"
+                onClick={() => setIsCommTemplatesModalOpen(false)}
+              >
+                <div
+                  className="bg-white rounded-3xl shadow-2xl border border-stone-200 w-full max-w-4xl max-h-[88vh] flex flex-col overflow-hidden"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="px-6 py-4 bg-[#1E392A] text-white flex items-center justify-between">
+                    <div className="flex items-center gap-2.5">
+                      <MessageSquareText className="w-5 h-5 text-emerald-300" />
+                      <div>
+                        <h3 className="text-sm font-bold">Template & Komunikasi Tamu (WhatsApp)</h3>
+                        <p className="text-[11px] text-stone-300">
+                          Kelola template pesan operasional menginap, ulang tahun, dan promosi properti.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsCommTemplatesModalOpen(false)}
+                      className="p-1.5 rounded-lg text-stone-300 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    >
+                      <LucideX className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="p-6 overflow-y-auto flex-1 bg-stone-50/40">
+                    <GuestCommunicationPanel propertyId={propertyId} />
+                  </div>
+                </div>
+              </div>
+            )}
 
             <div className="bg-white p-4 rounded-xl shadow-xs border border-slate-200/90">
               <div className="flex flex-col gap-3 mb-4 lg:flex-row lg:justify-between lg:items-center">

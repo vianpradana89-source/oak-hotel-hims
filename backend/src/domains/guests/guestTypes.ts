@@ -203,6 +203,37 @@ export interface ReservationGuestUpdateInput {
   identity_verified?: boolean;
 }
 
+export type LoyaltyTierCode = 'BRONZE' | 'SILVER' | 'GOLD' | 'PLATINUM';
+export type LoyaltyCalculationPeriod = 'CUMULATIVE' | 'MONTHLY' | 'QUARTERLY' | 'YEARLY';
+
+export interface PropertyLoyaltyTierConfig {
+  code: LoyaltyTierCode;
+  name: string;
+  min_spend: number;
+  discount_pct: number;
+}
+
+export interface PropertyLoyaltySettings {
+  property_id: number;
+  points_enabled: boolean;
+  spend_per_point: number;
+  points_earned_per_unit: number;
+  points_per_visit: number;
+  point_value_idr: number;
+  min_redeem_points: number;
+  point_expiry_months: number;
+  silver_point_threshold: number;
+  gold_point_threshold: number;
+  platinum_point_threshold: number;
+  tier_calculation_period: LoyaltyCalculationPeriod;
+  tiers_config: PropertyLoyaltyTierConfig[];
+  wa_birthday_message: string;
+  wa_followup_message: string;
+  wa_database_message: string;
+  followup_threshold_days: number;
+  updated_at?: string;
+}
+
 export interface GuestStayStatistics {
   visit_count: number;
   room_nights: number;
@@ -213,7 +244,10 @@ export interface GuestStayStatistics {
   bonus_points?: number;
   redeemed_points?: number;
   loyalty_points?: number;
-  loyalty_tier?: 'SILVER' | 'GOLD' | 'PLATINUM';
+  point_value_idr?: number;
+  loyalty_tier?: LoyaltyTierCode;
+  loyalty_tier_name?: string;
+  tier_discount_pct?: number;
 }
 
 export interface GuestWithStats extends Guest, GuestStayStatistics {}

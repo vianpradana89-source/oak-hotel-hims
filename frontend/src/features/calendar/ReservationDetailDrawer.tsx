@@ -431,6 +431,9 @@ export default function ReservationDetailDrawer({
     const [guestCrmError, setGuestCrmError] = useState<{ httpStatus: number; message: string } | null>(null);
     const guestCrmRetryKeyRef = useRef(0);
     const [guestCrmRetryCount, setGuestCrmRetryCount] = useState(0);
+    const [redeemingPoints, setRedeemingPoints] = useState(false);
+    const [redeemPointsDraft, setRedeemPointsDraft] = useState<string>('');
+    const [redeemFeedback, setRedeemFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
     // ---- Activity Log (Riwayat) state — delegated to useAuditLog hook ----
     // The hook owns entries, hasMore, cursor, loading, error, loadMoreError,
@@ -2160,33 +2163,132 @@ export default function ReservationDetailDrawer({
                   </button>
                 </div>
               ) : guestCrmStatus === 'success' && guestCrmData ? (
-                <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
-                  <div className="flex justify-between gap-2">
-                    <span className="text-stone-500">Kunjungan</span>
-                    <span className="font-semibold text-stone-900 text-right">
-                      {Number(guestCrmData.visit_count || 0)} kali
-                    </span>
-                  </div>
-                  <div className="flex justify-between gap-2">
-                    <span className="text-stone-500">Total Malam</span>
-                    <span className="font-semibold text-stone-900 text-right">
-                      {Number(guestCrmData.room_nights || 0)}
-                    </span>
-                  </div>
-                  {guestCrmData.first_stay && (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
                     <div className="flex justify-between gap-2">
-                      <span className="text-stone-500">Kunjungan Pertama</span>
-                      <span className="font-mono text-stone-700 text-right">
-                        {new Date(guestCrmData.first_stay).toLocaleDateString('id-ID')}
+                      <span className="text-stone-500">Kunjungan</span>
+                      <span className="font-semibold text-stone-900 text-right">
+                        {Number(guestCrmData.visit_count || 0)} kali
                       </span>
                     </div>
-                  )}
-                  {guestCrmData.last_stay && (
                     <div className="flex justify-between gap-2">
-                      <span className="text-stone-500">Kunjungan Terakhir</span>
-                      <span className="font-mono text-stone-700 text-right">
-                        {new Date(guestCrmData.last_stay).toLocaleDateString('id-ID')}
+                      <span className="text-stone-500">Total Malam</span>
+                      <span className="font-semibold text-stone-900 text-right">
+                        {Number(guestCrmData.room_nights || 0)}
                       </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-stone-500">Tier Loyalitas</span>
+                      <span className="font-bold text-[#1E392A] text-right">
+                        {guestCrmData.loyalty_tier_name || guestCrmData.loyalty_tier || 'Bronze'}
+                        {Number(guestCrmData.tier_discount_pct || 0) > 0 ? ` (${guestCrmData.tier_discount_pct}%)` : ''}
+                      </span>
+                    </div>
+                    <div className="flex justify-between gap-2">
+                      <span className="text-stone-500">Saldo Poin</span>
+                      <span className="font-bold text-emerald-700 text-right">
+                        {Number(guestCrmData.loyalty_points || 0).toLocaleString('id-ID')} Poin
+                      </span>
+                    </div>
+                    {guestCrmData.first_stay && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-stone-500">Kunjungan Pertama</span>
+                        <span className="font-mono text-stone-700 text-right">
+                          {new Date(guestCrmData.first_stay).toLocaleDateString('id-ID')}
+                        </span>
+                      </div>
+                    )}
+                    {guestCrmData.last_stay && (
+                      <div className="flex justify-between gap-2">
+                        <span className="text-stone-500">Kunjungan Terakhir</span>
+                        <span className="font-mono text-stone-700 text-right">
+                          {new Date(guestCrmData.last_stay).toLocaleDateString('id-ID')}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Loyalty Point Redemption Box inside Reservation Detail */}
+                  {Number(guestCrmData.loyalty_points || 0) > 0 && !isCancelled && !isCheckedOut && (
+                    <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-bold text-[#1E392A]">
+                          Gunakan Poin (Potong Tagihan)
+                        </span>
+                        <span className="text-[10px] font-semibold text-emerald-800">
+                          Nilai Tukar: Rp {Math.round(Number(guestCrmData.point_value_idr || 0)).toLocaleString('id-ID')}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <input
+                          type="number"
+                          min={1}
+                          max={Number(guestCrmData.loyalty_points || 0)}
+                          value={redeemPointsDraft || String(guestCrmData.loyalty_points || '')}
+                          onChange={(e) => setRedeemPointsDraft(e.target.value)}
+                          placeholder="Jml poin"
+                          className="w-24 px-2.5 py-1 text-xs font-semibold bg-white border border-emerald-300 rounded-lg focus:outline-hidden"
+                        />
+                        <button
+                          type="button"
+                          disabled={redeemingPoints}
+                          onClick={async () => {
+                            const targetReservationId = Number(detailData?.id || reservation?.id);
+                            const pts = Math.round(Number(redeemPointsDraft || guestCrmData.loyalty_points || 0));
+                            if (!targetReservationId || !primaryGuestId || !activePropId || pts <= 0) return;
+                            setRedeemingPoints(true);
+                            setRedeemFeedback(null);
+                            try {
+                              const res = await safeFetchJson<{ status?: string; data?: any; message?: string }>(
+                                '/api/guests/redeem-reservation-points',
+                                {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    property_id: activePropId,
+                                    reservation_id: targetReservationId,
+                                    guest_id: primaryGuestId,
+                                    points_to_redeem: pts,
+                                  }),
+                                },
+                                'Gagal menukarkan poin loyalitas',
+                                authFetch
+                              );
+                              if (!res.ok) {
+                                setRedeemFeedback({
+                                  type: 'error',
+                                  text: res.errorMessage || 'Gagal menukarkan poin.',
+                                });
+                                return;
+                              }
+                              const cutIdr = Number(res.data?.data?.discount_amount_idr || 0);
+                              setRedeemFeedback({
+                                type: 'success',
+                                text: `Berhasil menukar ${pts} poin (-Rp ${cutIdr.toLocaleString('id-ID')}).`,
+                              });
+                              setRedeemPointsDraft('');
+                              setGuestCrmRetryCount((c) => c + 1);
+                              await loadFullReservation(targetReservationId);
+                              await loadFolio(targetReservationId);
+                              onRefresh();
+                            } finally {
+                              setRedeemingPoints(false);
+                            }
+                          }}
+                          className="flex-1 px-3 py-1 bg-[#1E392A] hover:bg-[#162a1f] text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                        >
+                          {redeemingPoints ? 'Memproses...' : 'Potong Tagihan'}
+                        </button>
+                      </div>
+                      {redeemFeedback && (
+                        <p
+                          className={`text-[11px] font-medium ${
+                            redeemFeedback.type === 'success' ? 'text-emerald-800' : 'text-rose-700'
+                          }`}
+                        >
+                          {redeemFeedback.text}
+                        </p>
+                      )}
                     </div>
                   )}
                 </div>

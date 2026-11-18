@@ -11,16 +11,19 @@ import {
   getCrmSummary,
   getDuplicateCandidates,
   getGuestById,
+  getPropertyLoyaltySettings,
   httpError,
   listLoyaltyLedger,
   listReservationGuests,
   matchGuest,
   mergeGuests,
   parsePropertyId,
+  redeemPointsForReservation,
   restoreGuest,
   searchGuests,
   syncGuestLoyaltyVipTiers,
   updateGuest,
+  updatePropertyLoyaltySettings,
   updateReservationGuest
 } from './guestService';
 import { omitIdentityStorageKey } from '../identity/identityDocumentStorageService';
@@ -191,6 +194,67 @@ export function createGuestsRouter(pool: Pool) {
       return res.status(201).json({
         status: 'SUCCESS',
         data: entry
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // GET /api/guests/loyalty-settings?property_id=X
+  router.get('/loyalty-settings', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      const settings = await getPropertyLoyaltySettings(pool, propertyId);
+      return res.json({
+        status: 'SUCCESS',
+        data: settings
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // PUT /api/guests/loyalty-settings
+  router.put('/loyalty-settings', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id ?? req.query?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const settings = await updatePropertyLoyaltySettings(pool, propertyId, req.body || {}, correlationId, actorUserId);
+      return res.json({
+        status: 'SUCCESS',
+        data: settings
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/redeem-reservation-points
+  router.post('/redeem-reservation-points', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const result = await redeemPointsForReservation(
+        pool,
+        {
+          property_id: propertyId,
+          reservation_id: Number(req.body?.reservation_id),
+          guest_id: Number(req.body?.guest_id),
+          points_to_redeem: Number(req.body?.points_to_redeem),
+          created_by: req.user?.full_name || req.user?.username || req.body?.created_by || 'Front Office'
+        },
+        correlationId,
+        actorUserId
+      );
+      return res.json({
+        status: 'SUCCESS',
+        data: result
       });
     } catch (err: any) {
       return handleRouterError(err, res);

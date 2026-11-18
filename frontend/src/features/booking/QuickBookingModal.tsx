@@ -186,6 +186,7 @@ export default function QuickBookingModal({
   const [globalDiscountType, setGlobalDiscountType] = useState<'NOMINAL' | 'PERCENT'>('NOMINAL');
   const [globalDiscountValue, setGlobalDiscountValue] = useState<number>(0);
   const [globalDiscountReason, setGlobalDiscountReason] = useState('');
+  const [redeemPointsApplied, setRedeemPointsApplied] = useState<number>(0);
   const [paymentResponsibility, setPaymentResponsibility] = useState<'HOTEL_COLLECT' | 'OTA_COLLECT'>('HOTEL_COLLECT');
 
   // --- Payment-intent guard: distinguishes "default 0" from "user intentionally chose 0" ---
@@ -582,6 +583,7 @@ export default function QuickBookingModal({
     setGlobalDiscountType('NOMINAL');
     setGlobalDiscountValue(0);
     setGlobalDiscountReason('');
+    setRedeemPointsApplied(0);
     setSubmitting(false);
     setErrorMsg(null);
     setChargeWarningMap({});
@@ -1420,6 +1422,19 @@ export default function QuickBookingModal({
       completedRef.current = true;
       attemptRef.current = null;
       setRequestLocked(false);
+      if (redeemPointsApplied > 0 && selectedCrmGuest?.id) {
+        authenticatedFetch('/api/guests/loyalty-ledger', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            guest_id: selectedCrmGuest.id,
+            entry_type: 'REDEEM',
+            points: redeemPointsApplied,
+            description: `Potongan Poin pada Reservasi Baru (${selectedCrmGuest.full_name})`,
+          }),
+        }).catch(() => {});
+      }
       // A refresh callback failure must never make the create request retryable.
       try { onBookingSuccess(); } catch (error) { console.error('Booking saved; refresh failed', error); }
       onClose();
@@ -1868,6 +1883,63 @@ export default function QuickBookingModal({
                       onClearGuest={handleClearGuest}
                       selectedGuest={selectedCrmGuest}
                     />
+                    {selectedCrmGuest && (
+                      <div className="mt-2.5 p-3 rounded-xl bg-emerald-50/70 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#1E392A] text-white uppercase">
+                            {selectedCrmGuest.loyalty_tier_name || selectedCrmGuest.loyalty_tier || 'Bronze'}
+                          </span>
+                          <span className="font-semibold text-stone-800">
+                            Saldo Poin: <strong className="text-[#1E392A]">{(selectedCrmGuest.loyalty_points || 0).toLocaleString('id-ID')} Poin</strong>
+                          </span>
+                          {(selectedCrmGuest.point_value_idr || 0) > 0 && (
+                            <span className="text-[11px] text-stone-600">
+                              (Nilai tukar: Rp {Math.round(selectedCrmGuest.point_value_idr || 0).toLocaleString('id-ID')})
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {Number(selectedCrmGuest.tier_discount_pct || 0) > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setRedeemPointsApplied(0);
+                                setGlobalDiscountType('PERCENT');
+                                setGlobalDiscountValue(Number(selectedCrmGuest.tier_discount_pct || 0));
+                                setGlobalDiscountReason(
+                                  `Diskon Member Tier ${selectedCrmGuest.loyalty_tier_name || selectedCrmGuest.loyalty_tier} (${selectedCrmGuest.tier_discount_pct}%)`
+                                );
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-900 font-semibold text-[11px] transition-colors cursor-pointer"
+                            >
+                              Pakai Diskon Tier ({selectedCrmGuest.tier_discount_pct}%)
+                            </button>
+                          )}
+                          {Number(selectedCrmGuest.loyalty_points || 0) > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const pts = Number(selectedCrmGuest.loyalty_points || 0);
+                                const unitVal = pts > 0 && selectedCrmGuest.point_value_idr
+                                  ? Math.round(Number(selectedCrmGuest.point_value_idr) / pts)
+                                  : 350;
+                                const maxCut = Math.min(grossBookingTotal, Math.round(pts * unitVal));
+                                const usedPts = unitVal > 0 ? Math.min(pts, Math.ceil(maxCut / unitVal)) : pts;
+                                setRedeemPointsApplied(usedPts);
+                                setGlobalDiscountType('NOMINAL');
+                                setGlobalDiscountValue(maxCut);
+                                setGlobalDiscountReason(`Redeem ${usedPts} Poin Loyalitas (-Rp ${maxCut.toLocaleString('id-ID')})`);
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#1E392A] hover:bg-[#162a1f] text-white font-semibold text-[11px] transition-colors cursor-pointer"
+                            >
+                              {redeemPointsApplied > 0
+                                ? `Poin Dipakai (${redeemPointsApplied} Poin)`
+                                : `Gunakan Poin (Potong Rp ${Math.round(selectedCrmGuest.point_value_idr || (selectedCrmGuest.loyalty_points || 0) * 350).toLocaleString('id-ID')})`}
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    )}
                   </div>
                   )}
 

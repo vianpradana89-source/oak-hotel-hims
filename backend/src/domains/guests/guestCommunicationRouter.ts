@@ -8,6 +8,7 @@ import {
   getTemplate,
   createTemplate,
   updateTemplate,
+  deleteTemplate,
   prepareWhatsAppCommunication,
   markWhatsAppOpened,
   getCommunicationHistory,
@@ -213,6 +214,21 @@ export function createGuestCommunicationRouter(pool: Pool) {
       };
       const template = await updateTemplate(pool, templateId, property_id, input, actor, corrId);
       return res.json({ success: true, data: template });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  // DELETE /communication-templates/:templateId
+  router.delete('/communication-templates/:templateId', requireAuth, async (req: any, res: Response) => {
+    try {
+      const property_id = await propertyIdFor(req, pool);
+      const templateId = positiveInt(req.params.templateId, 'templateId');
+      const actor = actorFor(req);
+      const corrId = correlationId(req);
+
+      const result = await deleteTemplate(pool, templateId, property_id, actor, corrId);
+      return res.json({ success: true, data: result });
     } catch (error) {
       return sendError(res, error);
     }
