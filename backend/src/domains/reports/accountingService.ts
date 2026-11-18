@@ -1103,9 +1103,10 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          COALESCE(UPPER(r.status), '') NOT IN ('CANCELLED', 'NO_SHOW', 'VOID', 'VOIDED')
          AND COALESCE(UPPER(r.stay_status), '') NOT IN ('CANCELLED', 'NO_SHOW')
          AND COALESCE(r.discount_percent, 0) < 100
-         AND COALESCE(r.final_price, r.total_price, 0) > 0
-         AND UPPER(COALESCE(r.payment_method, '')) NOT LIKE '%COMP%'
+         AND COALESCE(r.total_price, 0) > 0
          AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+         AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%FREE%'
+         AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%VOUCHER%'
          AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
          AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
          AND NOT EXISTS (
