@@ -179,9 +179,9 @@ export const LaporanTabMetodeBayar: React.FC<LaporanTabMetodeBayarProps> = ({
           hint="Agregat lintas tipe transaksi: Booking Kamar, POS, Pemasukan, Pembelian, Pengeluaran"
         />
         <div className="mt-2 bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
-          <div className="overflow-x-auto">
+          <div className="overflow-auto max-h-[calc(100vh-270px)]">
             <table className="min-w-full text-xs divide-y divide-slate-200">
-              <thead className="bg-slate-50 text-slate-600 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-200">
+              <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold uppercase tracking-wider text-[11px] border-b border-slate-200 shadow-2xs">
                 <tr>
                   <th className="py-2.5 px-3.5 text-left">Metode Bayar</th>
                   <th className="py-2.5 px-3.5 text-right">Booking Kamar</th>

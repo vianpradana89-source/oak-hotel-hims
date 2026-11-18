@@ -598,9 +598,9 @@ export const SubViewSumberTransaksi: React.FC<{
         <div className="px-4 py-3 border-b border-slate-200 text-xs font-bold text-slate-800">
           Detail Transaksi
         </div>
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[calc(100vh-280px)]">
           <table className="min-w-full text-xs divide-y divide-slate-200">
-            <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
               <tr>
                 <th className="py-2.5 px-3.5 text-left">BID</th>
                 <th className="py-2.5 px-3.5 text-left">Tanggal</th>
@@ -907,9 +907,9 @@ export const SubViewRekapItem: React.FC<{
       {/* Rincian Penjualan Kamar */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
         <div className="text-xs font-bold text-slate-800">Rincian Penjualan Kamar</div>
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[calc(100vh-280px)]">
           <table className="min-w-full text-xs divide-y divide-slate-200">
-            <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
               <tr>
                 <th className="py-2.5 px-3.5 text-left">Kamar</th>
                 <th className="py-2.5 px-3.5 text-center">Jumlah</th>
@@ -944,9 +944,9 @@ export const SubViewRekapItem: React.FC<{
       {/* Rincian Penjualan Produk */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
         <div className="text-xs font-bold text-slate-800">Rincian Penjualan Produk</div>
-        <div className="overflow-x-auto">
+        <div className="overflow-auto max-h-[calc(100vh-280px)]">
           <table className="min-w-full text-xs divide-y divide-slate-200">
-            <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
               <tr>
                 <th className="py-2.5 px-3.5 text-left">Produk</th>
                 <th className="py-2.5 px-3.5 text-center">Qty</th>
@@ -1245,9 +1245,9 @@ export const SubViewTipePelanggan: React.FC<{
       )}
 
       {innerTab === 'ringkasan' && (
-        <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-hidden">
+        <div className="bg-white border border-slate-200 rounded-xl shadow-xs overflow-auto max-h-[480px]">
           <table className="min-w-full text-xs divide-y divide-slate-200">
-            <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
               <tr>
                 <th className="py-2.5 px-3.5 text-left">Tipe Pelanggan</th>
                 <th className="py-2.5 px-3.5 text-center">Pelanggan Aktif</th>
@@ -1455,9 +1455,9 @@ export const SubViewLaporanPpn: React.FC<{ data: AnalyticsHubData }> = ({ data }
             Tidak ada transaksi dengan PPN pada periode ini.
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-auto max-h-[calc(100vh-280px)]">
             <table className="min-w-full text-xs divide-y divide-slate-200">
-              <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+              <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
                 <tr>
                   <th className="py-2.5 px-3.5 text-left">No. Booking</th>
                   <th className="py-2.5 px-3.5 text-left">Tanggal</th>
@@ -1849,9 +1849,9 @@ export const SubViewOvernightVsDayUse: React.FC<{
             <div className="text-xs font-bold text-slate-800 mb-2">
               Rekapitulasi Overnight vs Day Use per Tipe Kamar
             </div>
-            <div className="overflow-x-auto border border-slate-200 rounded-xl">
+            <div className="overflow-auto max-h-[480px] border border-slate-200 rounded-xl">
               <table className="min-w-full text-xs divide-y divide-slate-200">
-                <thead className="bg-slate-50 text-slate-600 font-semibold text-[11px]">
+                <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
                   <tr>
                     <th className="py-2.5 px-3.5 text-left">Tipe Kamar</th>
                     <th className="py-2.5 px-3.5 text-right">Resv Overnight</th>

@@ -54,7 +54,8 @@ export type AkuntansiSubView =
   | 'aset'
   | 'list_bank'
   | 'daftar_akun'
-  | 'data_ppn';
+  | 'data_ppn'
+  | 'data_service_charge';
 
 export const AKUNTANSI_SUBVIEW_OPTIONS: {
   value: AkuntansiSubView;
@@ -72,6 +73,7 @@ export const AKUNTANSI_SUBVIEW_OPTIONS: {
   { value: 'list_bank', label: 'List Bank', icon: <IconCreditCard className="w-3.5 h-3.5" /> },
   { value: 'daftar_akun', label: 'Daftar Akun', icon: <IconBuilding2 className="w-3.5 h-3.5" /> },
   { value: 'data_ppn', label: 'Data PPN', icon: <IconBadgePercent className="w-3.5 h-3.5" /> },
+  { value: 'data_service_charge', label: 'Data Service Charge', icon: <IconBadgePercent className="w-3.5 h-3.5" /> },
 ];
 
 export interface LaporanTabAkuntansiProps {
@@ -123,6 +125,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const [piutangSearch, setPiutangSearch] = useState('');
   const [coaSearch, setCoaSearch] = useState('');
   const [ppnSourceFilter, setPpnSourceFilter] = useState<'ALL' | 'KAMAR' | 'POS' | 'PEMBELIAN'>('ALL');
+  const [serviceSourceFilter, setServiceSourceFilter] = useState<'ALL' | 'KAMAR' | 'POS'>('ALL');
 
   // Modals
   const [coaModalItem, setCoaModalItem] = useState<CoaAccountItem | null | undefined>(undefined);
@@ -218,6 +221,13 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     if (ppnSourceFilter === 'ALL') return rows;
     return rows.filter((r) => r.source === ppnSourceFilter);
   }, [subledger, ppnSourceFilter]);
+
+  // Filtered Service Charge rows
+  const filteredServiceChargeRows = useMemo(() => {
+    const rows = subledger?.service_charge_summary?.rows || [];
+    if (serviceSourceFilter === 'ALL') return rows;
+    return rows.filter((r) => r.source === serviceSourceFilter);
+  }, [subledger, serviceSourceFilter]);
 
   if (loading && !analytics && !financials) {
     return <LoadingState label="Memuat data akuntansi OAK HIMS..." />;
@@ -574,18 +584,18 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
 
           {/* Journal Table */}
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-3 font-semibold w-12">#</th>
-                    <th className="py-3 px-3 font-semibold">BID / No. Ref</th>
-                    <th className="py-3 px-3 font-semibold">Tanggal</th>
-                    <th className="py-3 px-3 font-semibold">Keterangan</th>
-                    <th className="py-3 px-3 font-semibold">Metode Bayar</th>
-                    <th className="py-3 px-3 font-semibold text-right">Uang Masuk</th>
-                    <th className="py-3 px-3 font-semibold text-right">Uang Keluar</th>
-                    <th className="py-3 px-3 font-semibold text-right">Saldo</th>
+                    <th className="py-3 px-3 font-semibold w-12 bg-[#123524]">#</th>
+                    <th className="py-3 px-3 font-semibold bg-[#123524]">BID / No. Ref</th>
+                    <th className="py-3 px-3 font-semibold bg-[#123524]">Tanggal</th>
+                    <th className="py-3 px-3 font-semibold bg-[#123524]">Keterangan</th>
+                    <th className="py-3 px-3 font-semibold bg-[#123524]">Metode Bayar</th>
+                    <th className="py-3 px-3 font-semibold text-right bg-[#123524]">Uang Masuk</th>
+                    <th className="py-3 px-3 font-semibold text-right bg-[#123524]">Uang Keluar</th>
+                    <th className="py-3 px-3 font-semibold text-right bg-[#123524]">Saldo</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -701,18 +711,18 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold">Supplier</th>
-                    <th className="py-3 px-4 font-semibold">Transaksi</th>
-                    <th className="py-3 px-4 font-semibold text-right">Total</th>
-                    <th className="py-3 px-4 font-semibold text-right">Sudah Bayar</th>
-                    <th className="py-3 px-4 font-semibold text-right">Sisa</th>
-                    <th className="py-3 px-4 font-semibold">Jatuh Tempo</th>
-                    <th className="py-3 px-4 font-semibold text-center">Status</th>
-                    <th className="py-3 px-4 font-semibold text-center">Aksi</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Jatuh Tempo</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Status</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -868,18 +878,18 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold">Pelanggan</th>
-                    <th className="py-3 px-4 font-semibold">Transaksi</th>
-                    <th className="py-3 px-4 font-semibold text-right">Total</th>
-                    <th className="py-3 px-4 font-semibold text-right">Sudah Terima</th>
-                    <th className="py-3 px-4 font-semibold text-right">Sisa</th>
-                    <th className="py-3 px-4 font-semibold">Jatuh Tempo</th>
-                    <th className="py-3 px-4 font-semibold text-center">Status</th>
-                    <th className="py-3 px-4 font-semibold text-center">Aksi</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Pelanggan</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Terima</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Jatuh Tempo</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Status</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1063,19 +1073,19 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 </p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
+              <div className="overflow-auto max-h-[calc(100vh-270px)]">
                 <table className="w-full text-xs">
-                  <thead>
+                  <thead className="sticky top-0 z-20">
                     <tr className="bg-[#123524] text-white text-left">
-                      <th className="py-3 px-4 font-semibold">Kode Aset</th>
-                      <th className="py-3 px-4 font-semibold">Kategori</th>
-                      <th className="py-3 px-4 font-semibold">Nama Barang</th>
-                      <th className="py-3 px-4 font-semibold">Lokasi Penyimpanan</th>
-                      <th className="py-3 px-4 font-semibold text-right">Harga Beli</th>
-                      <th className="py-3 px-4 font-semibold text-right">Nilai Saat Ini</th>
-                      <th className="py-3 px-4 font-semibold text-center">Depresiasi</th>
-                      <th className="py-3 px-4 font-semibold">Catatan</th>
-                      <th className="py-3 px-4 font-semibold text-center">Aksi</th>
+                      <th className="py-3 px-4 font-semibold bg-[#123524]">Kode Aset</th>
+                      <th className="py-3 px-4 font-semibold bg-[#123524]">Kategori</th>
+                      <th className="py-3 px-4 font-semibold bg-[#123524]">Nama Barang</th>
+                      <th className="py-3 px-4 font-semibold bg-[#123524]">Lokasi Penyimpanan</th>
+                      <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Harga Beli</th>
+                      <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Nilai Saat Ini</th>
+                      <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Depresiasi</th>
+                      <th className="py-3 px-4 font-semibold bg-[#123524]">Catatan</th>
+                      <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
@@ -1159,16 +1169,16 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold">Nama Bank</th>
-                    <th className="py-3 px-4 font-semibold">No. Rekening</th>
-                    <th className="py-3 px-4 font-semibold">Atas Nama</th>
-                    <th className="py-3 px-4 font-semibold text-right">Saldo</th>
-                    <th className="py-3 px-4 font-semibold text-center">Sumber</th>
-                    <th className="py-3 px-4 font-semibold text-center">Aksi</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Nama Bank</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">No. Rekening</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Atas Nama</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Saldo</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Sumber</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1295,16 +1305,16 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold">Nomor Akun</th>
-                    <th className="py-3 px-4 font-semibold">Nama Akun</th>
-                    <th className="py-3 px-4 font-semibold text-center">Klasifikasi</th>
-                    <th className="py-3 px-4 font-semibold text-right">Saldo Awal</th>
-                    <th className="py-3 px-4 font-semibold text-right">Saldo Akhir (Live HIMS)</th>
-                    <th className="py-3 px-4 font-semibold text-center">Aksi</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Nomor Akun</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Nama Akun</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Klasifikasi</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Saldo Awal</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Saldo Akhir (Live HIMS)</th>
+                    <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1423,17 +1433,17 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-x-auto">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
               <table className="w-full text-xs">
-                <thead>
+                <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold">Tanggal</th>
-                    <th className="py-3 px-4 font-semibold">No. Referensi / BID</th>
-                    <th className="py-3 px-4 font-semibold">Sumber</th>
-                    <th className="py-3 px-4 font-semibold">Pelanggan / Supplier</th>
-                    <th className="py-3 px-4 font-semibold text-right">DPP</th>
-                    <th className="py-3 px-4 font-semibold text-right">PPN</th>
-                    <th className="py-3 px-4 font-semibold text-right">Total Nilai</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Tanggal</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">No. Referensi / BID</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Sumber</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Pelanggan / Supplier</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">DPP</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">PPN</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total Nilai</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1457,6 +1467,124 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                         <td className="py-3 px-4 text-right text-slate-600">{formatIdr(row.dpp_amount)}</td>
                         <td className="py-3 px-4 text-right font-bold text-emerald-700">
                           {formatIdr(row.ppn_amount)}
+                        </td>
+                        <td className="py-3 px-4 text-right font-extrabold text-slate-900">
+                          {formatIdr(row.total_amount)}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          12. SUB-VIEW: DATA SERVICE CHARGE (Rekap Service Charge Kamar & POS)
+         ===================================================================== */}
+      {subView === 'data_service_charge' && (
+        <div className="space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-extrabold text-slate-900">
+                Data Service Charge (
+                {subledger?.service_charge_summary?.service_percentage ??
+                  analytics?.pricing_settings?.service_charge_percent ??
+                  0}
+                %)
+              </h2>
+              <p className="text-xs text-slate-500">
+                Rekapitulasi Service Charge dari transaksi Kamar, Folio Stay Charges, dan Resto/POS.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-xs font-semibold text-slate-500">Service Charge Kamar</div>
+              <div className="text-xl font-extrabold text-emerald-800 mt-1">
+                {formatIdr(subledger?.service_charge_summary?.room_service_total || 0)}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-xs font-semibold text-slate-500">Service Charge POS / Resto</div>
+              <div className="text-xl font-extrabold text-emerald-700 mt-1">
+                {formatIdr(subledger?.service_charge_summary?.pos_service_total || 0)}
+              </div>
+            </div>
+            <div className="bg-white border border-slate-200 rounded-xl p-4">
+              <div className="text-xs font-semibold text-slate-500">Jumlah Transaksi</div>
+              <div className="text-xl font-extrabold text-slate-900 mt-1">
+                {formatNumber(filteredServiceChargeRows.length)}
+              </div>
+            </div>
+            <div className="bg-[#FDFBF7] border border-[#E6C786] rounded-xl p-4">
+              <div className="text-xs font-semibold text-[#123524]">Total Service Charge Terkumpul</div>
+              <div className="text-xl font-extrabold text-[#123524] mt-1">
+                {formatIdr(subledger?.service_charge_summary?.total_service_charge || 0)}
+              </div>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-xl border border-slate-200 p-3 flex flex-wrap items-center gap-1.5">
+            {(
+              [
+                { key: 'ALL', label: 'Semua Sumber' },
+                { key: 'KAMAR', label: 'Kamar' },
+                { key: 'POS', label: 'POS / Resto' },
+              ] as const
+            ).map((f) => (
+              <button
+                key={f.key}
+                onClick={() => setServiceSourceFilter(f.key)}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition cursor-pointer ${
+                  serviceSourceFilter === f.key
+                    ? 'bg-[#123524] text-[#E6C786]'
+                    : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
+            <div className="overflow-auto max-h-[calc(100vh-270px)]">
+              <table className="w-full text-xs">
+                <thead className="sticky top-0 z-20">
+                  <tr className="bg-[#123524] text-white text-left">
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Tanggal</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">No. Referensi / BID</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Sumber</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Tamu / Pelanggan</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">DPP / Subtotal</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Service Charge</th>
+                    <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total Nilai</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {filteredServiceChargeRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-10 text-center text-slate-400">
+                        Tidak ada baris Service Charge tercatat pada filter/periode ini.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredServiceChargeRows.map((row) => (
+                      <tr key={row.id} className="hover:bg-emerald-50/30 transition">
+                        <td className="py-3 px-4 text-slate-600">{formatMediumDateId(row.tx_date)}</td>
+                        <td className="py-3 px-4 font-bold text-slate-800">{row.ref_no}</td>
+                        <td className="py-3 px-4">
+                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-bold">
+                            {row.source}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4 font-medium text-slate-800">{row.party_name}</td>
+                        <td className="py-3 px-4 text-right text-slate-600">{formatIdr(row.dpp_amount)}</td>
+                        <td className="py-3 px-4 text-right font-bold text-emerald-700">
+                          {formatIdr(row.service_amount)}
                         </td>
                         <td className="py-3 px-4 text-right font-extrabold text-slate-900">
                           {formatIdr(row.total_amount)}

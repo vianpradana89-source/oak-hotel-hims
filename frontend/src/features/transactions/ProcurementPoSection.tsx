@@ -819,9 +819,9 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       )}
 
       {/* PO Table */}
-      <div className="overflow-x-auto">
+      <div className="overflow-auto max-h-[calc(100vh-260px)]">
         <table className="w-full text-left text-xs text-slate-700" style={{ tableLayout: 'auto' }}>
-          <thead className="bg-slate-50/90 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200">
+          <thead className="sticky top-0 z-20 bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px] border-b border-slate-200 shadow-2xs">
             <tr>
               <th className="py-2.5 px-4">No. PO &amp; Tanggal</th>
               <th className="py-2.5 px-3">Supplier (Master Rekanan)</th>

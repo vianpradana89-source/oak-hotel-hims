@@ -416,7 +416,7 @@ export interface AccountingSubledgerData {
     tx_count: number;
     rows: GeneralJournalRow[];
   };
-  ppn_summary: {
+    ppn_summary: {
     tax_percentage: number;
     room_tax_total: number;
     pos_tax_total: number;
@@ -430,6 +430,22 @@ export interface AccountingSubledgerData {
       party_name: string;
       dpp_amount: number;
       ppn_amount: number;
+      total_amount: number;
+    }>;
+  };
+  service_charge_summary?: {
+    service_percentage: number;
+    room_service_total: number;
+    pos_service_total: number;
+    total_service_charge: number;
+    rows: Array<{
+      id: string;
+      tx_date: string;
+      ref_no: string;
+      source: 'KAMAR' | 'POS';
+      party_name: string;
+      dpp_amount: number;
+      service_amount: number;
       total_amount: number;
     }>;
   };

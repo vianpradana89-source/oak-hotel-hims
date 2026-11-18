@@ -917,8 +917,16 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     };
   });
 
-  // 9. PPN Summary (Rekap Pajak PPN)
-  const taxPct = Number(ctx.pricingSettings?.tax_percentage || 11);
+  // 9. PPN Summary (Rekap Pajak PPN) & Service Charge Summary
+  const taxPct = Number(
+    ctx.pricingSettings?.tax_percentage ?? ctx.pricingSettings?.tax_percent ?? 11
+  );
+  const servicePct = Number(
+    ctx.pricingSettings?.service_charge_percentage ??
+      ctx.pricingSettings?.service_charge_percent ??
+      0
+  );
+
   const ppnRows: Array<{
     id: string;
     tx_date: string;
@@ -930,45 +938,187 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     total_amount: number;
   }> = [];
 
+  const serviceChargeRows: Array<{
+    id: string;
+    tx_date: string;
+    ref_no: string;
+    source: 'KAMAR' | 'POS';
+    party_name: string;
+    dpp_amount: number;
+    service_amount: number;
+    total_amount: number;
+  }> = [];
+
   let roomTaxTotal = 0;
   let posTaxTotal = 0;
   const purchaseTaxTotal = 0;
+
+  let roomServiceTotal = 0;
+  let posServiceTotal = 0;
 
   for (const r of ctx.roomSales || []) {
     if (r.is_complimentary) continue;
     const total = Math.round(Number(r.total_price) || 0);
     const taxAmt = Math.round(Number(r.tax_amount) || 0);
-    if (taxAmt <= 0) continue;
-    roomTaxTotal += taxAmt;
-    ppnRows.push({
-      id: `PPN-RM-${r.reservation_id}`,
-      tx_date: String(r.tx_date || r.check_in || '').slice(0, 10),
-      ref_no: String(r.booking_code || `RES-${r.reservation_id}`),
-      source: 'KAMAR',
-      party_name: String(r.guest_name || '-'),
-      dpp_amount: Math.max(0, total - taxAmt),
-      ppn_amount: taxAmt,
-      total_amount: total,
-    });
+    const svcAmt = Math.round(Number(r.service_amount) || 0);
+    const txDate = String(r.tx_date || r.check_in || '').slice(0, 10);
+    const refNo = String(r.booking_code || `RES-${r.reservation_id}`);
+    const partyName = String(r.guest_name || '-');
+
+    if (taxAmt > 0) {
+      roomTaxTotal += taxAmt;
+      ppnRows.push({
+        id: `PPN-RM-${r.reservation_id}`,
+        tx_date: txDate,
+        ref_no: refNo,
+        source: 'KAMAR',
+        party_name: partyName,
+        dpp_amount: Math.max(0, total - taxAmt - svcAmt),
+        ppn_amount: taxAmt,
+        total_amount: total,
+      });
+    }
+
+    if (svcAmt > 0) {
+      roomServiceTotal += svcAmt;
+      serviceChargeRows.push({
+        id: `SVC-RM-${r.reservation_id}`,
+        tx_date: txDate,
+        ref_no: refNo,
+        source: 'KAMAR',
+        party_name: partyName,
+        dpp_amount: Math.max(0, total - taxAmt - svcAmt),
+        service_amount: svcAmt,
+        total_amount: total,
+      });
+    }
   }
+
+  const posOrderMap = new Map<
+    string,
+    {
+      id: string;
+      tx_date: string;
+      ref_no: string;
+      party_name: string;
+      total_amount: number;
+      tax_amount: number;
+      service_amount: number;
+    }
+  >();
 
   for (const p of ctx.posItemSales || []) {
     if (p.is_complimentary) continue;
-    const total = Math.round(Number(p.line_total) || 0);
+    const key = String(p.order_id ?? p.transaction_id ?? p.order_item_id);
+    const lineTotal = Math.round(Number(p.line_total) || 0);
     const taxAmt = Math.round(Number(p.tax_amount) || 0);
-    if (taxAmt <= 0) continue;
-    posTaxTotal += taxAmt;
-    ppnRows.push({
-      id: `PPN-POS-${p.order_item_id}`,
-      tx_date: String(p.tx_date || '').slice(0, 10),
-      ref_no: String(p.booking_or_order_no || `POS-${p.order_id}`),
-      source: 'POS',
-      party_name: String(p.customer_name || 'Walk-In'),
-      dpp_amount: Math.max(0, total - taxAmt),
-      ppn_amount: taxAmt,
-      total_amount: total,
+    const svcAmt = Math.round(Number(p.service_amount) || 0);
+    const existing = posOrderMap.get(key);
+    if (!existing) {
+      posOrderMap.set(key, {
+        id: key,
+        tx_date: String(p.tx_date || '').slice(0, 10),
+        ref_no: String(p.booking_or_order_no || `POS-${p.order_id}`),
+        party_name: String(p.customer_name || 'Walk-In'),
+        total_amount: lineTotal,
+        tax_amount: taxAmt,
+        service_amount: svcAmt,
+      });
+    } else {
+      existing.total_amount += lineTotal;
+      if (taxAmt > existing.tax_amount) existing.tax_amount = taxAmt;
+      if (svcAmt > existing.service_amount) existing.service_amount = svcAmt;
+    }
+  }
+
+  for (const posOrd of posOrderMap.values()) {
+    const dpp = Math.max(0, posOrd.total_amount);
+    const grandTotal = dpp + posOrd.service_amount + posOrd.tax_amount;
+    if (posOrd.tax_amount > 0) {
+      posTaxTotal += posOrd.tax_amount;
+      ppnRows.push({
+        id: `PPN-POS-${posOrd.id}`,
+        tx_date: posOrd.tx_date,
+        ref_no: posOrd.ref_no,
+        source: 'POS',
+        party_name: posOrd.party_name,
+        dpp_amount: dpp,
+        ppn_amount: posOrd.tax_amount,
+        total_amount: grandTotal,
+      });
+    }
+    if (posOrd.service_amount > 0) {
+      posServiceTotal += posOrd.service_amount;
+      serviceChargeRows.push({
+        id: `SVC-POS-${posOrd.id}`,
+        tx_date: posOrd.tx_date,
+        ref_no: posOrd.ref_no,
+        source: 'POS',
+        party_name: posOrd.party_name,
+        dpp_amount: dpp,
+        service_amount: posOrd.service_amount,
+        total_amount: grandTotal,
+      });
+    }
+  }
+
+  // Also include any folio_entries or standalone transactions with service_amount > 0 not already in serviceChargeRows
+  const extraSvcRes = await pool.query(
+    `SELECT
+       t.id,
+       to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
+       COALESCE(b.bid, r.booking_number, t.transaction_no) AS ref_no,
+       CASE
+         WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+           OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
+           OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%'
+         THEN 'POS'
+         ELSE 'KAMAR'
+       END AS source,
+       COALESCE(NULLIF(BTRIM(t.guest_name_snapshot), ''), NULLIF(BTRIM(t.party_name), ''), NULLIF(BTRIM(r.guest_name), ''), 'Tamu Hotel') AS party_name,
+       COALESCE(t.amount, t.net_amount, 0)::numeric(14,2) AS gross_amount,
+       COALESCE(t.service_amount, 0)::numeric(14,2) AS service_amount,
+       COALESCE(t.net_amount, 0)::numeric(14,2) AS net_amount
+     FROM transactions t
+     LEFT JOIN reservations r ON r.id = t.reservation_id
+     LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+     WHERE t.property_id = $1
+       AND t.transaction_type IN ('SALE', 'INCOME')
+       AND t.deleted_at IS NULL
+       AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+       AND COALESCE(t.service_amount, 0) > 0
+       AND t.transaction_date >= $2::date
+       AND t.transaction_date <= $3::date
+     ORDER BY t.transaction_date DESC, t.id DESC`,
+    [ctx.propertyId, ctx.startDate, ctx.endDate]
+  );
+
+  const existingSvcRefSet = new Set(serviceChargeRows.map((s) => `${s.source}:${s.ref_no}`));
+  for (const ex of extraSvcRes.rows) {
+    const src = String(ex.source) === 'POS' ? ('POS' as const) : ('KAMAR' as const);
+    const refNo = String(ex.ref_no || `TRX-${ex.id}`);
+    if (existingSvcRefSet.has(`${src}:${refNo}`)) continue;
+    const svcAmt = Math.round(Number(ex.service_amount) || 0);
+    if (svcAmt <= 0) continue;
+    const totalAmt = Math.round(Number(ex.net_amount) || 0);
+    const dppAmt = Math.max(0, totalAmt - svcAmt);
+    existingSvcRefSet.add(`${src}:${refNo}`);
+    if (src === 'POS') posServiceTotal += svcAmt;
+    else roomServiceTotal += svcAmt;
+    serviceChargeRows.push({
+      id: `SVC-TX-${ex.id}`,
+      tx_date: String(ex.tx_date || ''),
+      ref_no: refNo,
+      source: src,
+      party_name: String(ex.party_name || '-'),
+      dpp_amount: dppAmt,
+      service_amount: svcAmt,
+      total_amount: totalAmt,
     });
   }
+
+  ppnRows.sort((a, b) => b.tx_date.localeCompare(a.tx_date));
+  serviceChargeRows.sort((a, b) => b.tx_date.localeCompare(a.tx_date));
 
   return {
     coa_accounts: coaAccounts,
@@ -1023,6 +1173,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       purchase_tax_total: purchaseTaxTotal,
       net_ppn_payable: Math.max(0, roomTaxTotal + posTaxTotal - purchaseTaxTotal),
       rows: ppnRows,
+    },
+    service_charge_summary: {
+      service_percentage: servicePct,
+      room_service_total: roomServiceTotal,
+      pos_service_total: posServiceTotal,
+      total_service_charge: roomServiceTotal + posServiceTotal,
+      rows: serviceChargeRows,
     },
     period_investor_transfers: periodInvestorTransfers,
   };

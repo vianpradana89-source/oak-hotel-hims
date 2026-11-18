@@ -1455,3 +1455,41 @@ button, input, select {
     padding-top: 12px;
   }
 }
+
+/* ============================================================================
+   GLOBAL HIMS STICKY TABLE HEADERS
+   Ensures all operational data tables across HIMS keep their top header row
+   (<thead> / <th>) fixed/still when scrolling vertically.
+   ============================================================================ */
+@media screen {
+  .hotel-main div.overflow-x-auto:has(> table),
+  .hotel-main div.overflow-auto:has(> table),
+  .hotel-main div.overflow-hidden:has(> table) {
+    max-height: calc(100vh - 235px);
+    overflow-y: auto;
+    overflow-x: auto;
+  }
+
+  .hotel-main table thead {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  .hotel-main table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+  }
+
+  /* Ensure light-header tables without an explicit dark header background stay opaque when sticky */
+  .hotel-main table thead:not([class*="bg-[#123524]"]):not([class*="bg-emerald-9"]):not([class*="bg-slate-9"]) th:not([class*="bg-"]) {
+    background-color: #f8fafc;
+  }
+
+  /* Ensure OAK dark-emerald header tables stay 100% opaque when sticky */
+  .hotel-main table thead[class*="bg-[#123524]"] th {
+    background-color: #123524;
+  }
+}
+
