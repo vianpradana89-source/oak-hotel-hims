@@ -5,6 +5,7 @@ import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyK
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
 import { getTransactions, settleTransactionPayment } from '../transactions/transactionService';
+import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 
 function parsePositiveInt(value: any): number | null {
@@ -1042,7 +1043,12 @@ export function createReportsRouter(pool: Pool): Router {
             COALESCE(
               NULLIF(r.tax_amount, 0),
               (
-                SELECT COALESCE(SUM(t.tax_amount), 0)
+                SELECT NULLIF(SUM(rnr.tax_amount), 0)
+                FROM reservation_nightly_rates rnr
+                WHERE rnr.reservation_id = r.id
+              ),
+              (
+                SELECT NULLIF(SUM(t.tax_amount), 0)
                 FROM transactions t
                 WHERE t.property_id = b.property_id
                   AND (t.reservation_id = r.id OR t.booking_id = r.booking_id)
@@ -1050,6 +1056,26 @@ export function createReportsRouter(pool: Pool): Router {
                   AND t.deleted_at IS NULL
                   AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
               ),
+              CASE
+                WHEN ${isCompReservationSql} THEN 0
+                ELSE ROUND(
+                  COALESCE(
+                    NULLIF(r.total_price, 0),
+                    (
+                      SELECT COALESCE(SUM(t.net_amount), 0)
+                      FROM transactions t
+                      WHERE t.property_id = b.property_id
+                        AND t.reservation_id = r.id
+                        AND t.transaction_type = 'SALE'
+                        AND t.deleted_at IS NULL
+                        AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                    ),
+                    0
+                  ) * COALESCE((SELECT NULLIF(pps.tax_percent, 0) FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 11)
+                  / (100.0 + COALESCE((SELECT NULLIF(pps.tax_percent, 0) FROM property_pricing_settings pps WHERE pps.property_id = b.property_id LIMIT 1), 11)),
+                  2
+                )
+              END,
               0
             )::numeric(14,2) AS full_tax_amount,
             (
@@ -2358,7 +2384,8 @@ export function createReportsRouter(pool: Pool): Router {
 
         // Find all active SALE transactions for this BID / reservation
         const txRes = await pool.query(
-          `SELECT t.id, t.property_id, t.reservation_id, t.net_amount
+          `SELECT t.id, t.property_id, t.reservation_id, t.net_amount,
+                  COALESCE(b.payment_responsibility, 'HOTEL_COLLECT') AS payment_responsibility
            FROM transactions t
            LEFT JOIN reservations r ON r.id = t.reservation_id
            LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
@@ -2377,37 +2404,91 @@ export function createReportsRouter(pool: Pool): Router {
 
         let budgetLeft = payAmount !== null && payAmount > 0 ? payAmount : Number.MAX_SAFE_INTEGER;
         let settledAny = false;
+        let lastError = '';
+        const seenReservations = new Set<number>();
 
         for (const tx of txRes.rows) {
           if (budgetLeft <= 0) break;
+          const resId = tx.reservation_id ? Number(tx.reservation_id) : 0;
+          if (resId > 0) {
+            if (seenReservations.has(resId)) continue;
+            seenReservations.add(resId);
+          }
           try {
-            // Determine remaining collectible balance on this transaction
-            const pmtRes = await pool.query(
-              `SELECT COALESCE(SUM(pt.amount), 0) AS paid
-               FROM payment_transactions pt
-               WHERE (pt.transaction_id = $1 OR ($2::int IS NOT NULL AND pt.reservation_id = $2::int))
-                 AND pt.status = 'SUCCESS'
-                 AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')`,
-              [tx.id, tx.reservation_id || null]
-            );
-            const currentPaid = Math.round(Number(pmtRes.rows[0]?.paid || 0));
-            const netAmt = Math.round(Number(tx.net_amount || 0));
-            const rem = Math.max(0, netAmt - currentPaid);
+            const propId = Number(tx.property_id || propertyId);
+            let rem = 0;
+
+            if (resId > 0) {
+              const collectible = await calculateHotelCollectibleBalance(
+                pool,
+                resId,
+                propId,
+                String(tx.payment_responsibility || 'HOTEL_COLLECT')
+              );
+              rem = Math.max(0, Math.round(Number(collectible.hotel_collectible_remaining_balance || 0)));
+            } else {
+              const pmtRes = await pool.query(
+                `SELECT COALESCE(SUM(pt.amount), 0) AS paid
+                 FROM payment_transactions pt
+                 WHERE pt.transaction_id = $1
+                   AND pt.status = 'SUCCESS'
+                   AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')`,
+                [tx.id]
+              );
+              const currentPaid = Math.round(Number(pmtRes.rows[0]?.paid || 0));
+              const netAmt = Math.round(Number(tx.net_amount || 0));
+              rem = Math.max(0, netAmt - currentPaid);
+            }
+
             if (rem <= 0) continue;
 
             const alloc = Math.min(budgetLeft, rem);
             if (alloc <= 0) continue;
 
             await settleTransactionPayment(pool, tx.id, {
-              property_id: Number(tx.property_id || propertyId),
+              property_id: propId,
               amount: alloc,
               payment_method: paymentMethod,
               notes: `PELUNASAN-PIUTANG-${bid}`,
               actor_name: 'Akuntansi',
             });
+
+            if (resId > 0) {
+              const afterCollectible = await calculateHotelCollectibleBalance(
+                pool,
+                resId,
+                propId,
+                String(tx.payment_responsibility || 'HOTEL_COLLECT')
+              );
+              const postRem = Math.max(0, Math.round(Number(afterCollectible.hotel_collectible_remaining_balance || 0)));
+              const postPaid = Math.max(0, Math.round(Number(afterCollectible.canonical_amount_paid || 0)));
+              const resPayStatus = postRem <= 0 ? 'PAID' : postPaid > 0 ? 'PARTIAL' : 'UNPAID';
+              const txPayStatus = postRem <= 0 ? 'PAID' : postPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID';
+              await pool.query(
+                `UPDATE reservations
+                 SET amount_paid = $1,
+                     remaining_balance = $2,
+                     payment_status = $3,
+                     updated_at = NOW()
+                 WHERE id = $4`,
+                [postPaid, postRem, resPayStatus, resId]
+              );
+              await pool.query(
+                `UPDATE transactions
+                 SET payment_status = $1,
+                     updated_at = NOW()
+                 WHERE reservation_id = $2
+                   AND property_id = $3
+                   AND transaction_type = 'SALE'
+                   AND deleted_at IS NULL`,
+                [txPayStatus, resId, propId]
+              );
+            }
+
             budgetLeft -= alloc;
             settledAny = true;
           } catch (innerErr: any) {
+            lastError = innerErr?.message || '';
             console.warn('Warning settling child tx in HIMS-AR:', innerErr?.message);
           }
         }
@@ -2415,7 +2496,7 @@ export function createReportsRouter(pool: Pool): Router {
         if (!settledAny) {
           return res.status(400).json({
             status: 'ERROR',
-            message: `Tagihan reservasi ${bid} sudah lunas atau tidak memiliki sisa tagihan yang dapat dibayar.`,
+            message: lastError || `Tagihan reservasi ${bid} sudah lunas atau tidak memiliki sisa tagihan yang dapat dibayar.`,
           });
         }
         return res.json({ status: 'SUCCESS' });

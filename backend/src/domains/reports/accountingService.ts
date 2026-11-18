@@ -351,12 +351,23 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          STRING_AGG(DISTINCT COALESCE(rm.room_number, '') || ' ' || COALESCE(rt.name, ''), ', ') AS room_summary,
          MIN(to_char(r.check_in::date, 'YYYY-MM-DD')) AS check_in,
          MAX(to_char(r.check_out::date, 'YYYY-MM-DD')) AS check_out,
-         SUM(COALESCE(t.net_amount, 0))::numeric(16,2) AS net_amount
+         GREATEST(
+           SUM(COALESCE(t.net_amount, 0)),
+           MAX(COALESCE(r.total_price, 0)),
+           COALESCE(MAX(pmt_sum.total_paid), 0)
+         )::numeric(16,2) AS net_amount
        FROM transactions t
        JOIN reservations r ON r.id = t.reservation_id
        LEFT JOIN bookings b ON b.id = r.booking_id
        LEFT JOIN rooms rm ON rm.id = r.room_id
        LEFT JOIN room_types rt ON rt.id = COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot)
+       LEFT JOIN LATERAL (
+         SELECT COALESCE(SUM(pt2.amount), 0) AS total_paid
+         FROM payment_transactions pt2
+         WHERE (pt2.transaction_id = t.id OR pt2.reservation_id = r.id)
+           AND pt2.status = 'SUCCESS'
+           AND pt2.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
+       ) pmt_sum ON TRUE
        WHERE t.property_id = $1
          AND t.transaction_type = 'SALE'
          AND t.deleted_at IS NULL
