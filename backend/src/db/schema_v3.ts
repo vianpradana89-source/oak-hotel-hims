@@ -7041,5 +7041,41 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
        WHERE name IS DISTINCT FROM UPPER(name);
     EXCEPTION WHEN OTHERS THEN NULL;
     END $$;
+
+    -- Migration: auth_hr3b3_extended_access_actions_v1
+    -- Expand user_permission_overrides CHECK constraint to support view, detail, create, edit, delete, export, import, approve
+    -- and register canonical permission keys for newly exposed navigation & approval modules.
+    ALTER TABLE user_permission_overrides DROP CONSTRAINT IF EXISTS chk_user_permission_override_action;
+    ALTER TABLE user_permission_overrides ADD CONSTRAINT chk_user_permission_override_action
+      CHECK (action IN ('view', 'detail', 'create', 'edit', 'delete', 'export', 'import', 'approve'));
+
+    INSERT INTO permissions (resource, action, key, description, is_system)
+    VALUES
+      ('purchase_orders', 'view', 'purchase_orders.view', 'Hak akses VIEW pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'detail', 'purchase_orders.detail', 'Hak akses DETAIL pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'create', 'purchase_orders.create', 'Hak akses CREATE pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'edit', 'purchase_orders.edit', 'Hak akses EDIT pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'delete', 'purchase_orders.delete', 'Hak akses DELETE pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'approve', 'purchase_orders.approve', 'Hak akses APPROVE pada modul purchase_orders', TRUE),
+      ('purchase_orders', 'export', 'purchase_orders.export', 'Hak akses EXPORT pada modul purchase_orders', TRUE),
+      ('goods_receipts', 'view', 'goods_receipts.view', 'Hak akses VIEW pada modul goods_receipts', TRUE),
+      ('goods_receipts', 'detail', 'goods_receipts.detail', 'Hak akses DETAIL pada modul goods_receipts', TRUE),
+      ('goods_receipts', 'create', 'goods_receipts.create', 'Hak akses CREATE pada modul goods_receipts', TRUE),
+      ('goods_receipts', 'edit', 'goods_receipts.edit', 'Hak akses EDIT pada modul goods_receipts', TRUE),
+      ('goods_receipts', 'delete', 'goods_receipts.delete', 'Hak akses DELETE pada modul goods_receipts', TRUE),
+      ('accounting', 'view', 'accounting.view', 'Hak akses VIEW pada modul accounting', TRUE),
+      ('accounting', 'detail', 'accounting.detail', 'Hak akses DETAIL pada modul accounting', TRUE),
+      ('accounting', 'create', 'accounting.create', 'Hak akses CREATE pada modul accounting', TRUE),
+      ('accounting', 'edit', 'accounting.edit', 'Hak akses EDIT pada modul accounting', TRUE),
+      ('accounting', 'delete', 'accounting.delete', 'Hak akses DELETE pada modul accounting', TRUE),
+      ('accounting', 'export', 'accounting.export', 'Hak akses EXPORT pada modul accounting', TRUE),
+      ('inventory', 'export', 'inventory.export', 'Hak akses EXPORT pada modul inventory', TRUE),
+      ('inventory', 'import', 'inventory.import', 'Hak akses IMPORT pada modul inventory', TRUE),
+      ('guests', 'export', 'guests.export', 'Hak akses EXPORT pada modul guests', TRUE),
+      ('guests', 'import', 'guests.import', 'Hak akses IMPORT pada modul guests', TRUE),
+      ('reports', 'export', 'reports.export', 'Hak akses EXPORT pada modul reports', TRUE),
+      ('folios', 'export', 'folios.export', 'Hak akses EXPORT pada modul folios', TRUE),
+      ('reservations', 'export', 'reservations.export', 'Hak akses EXPORT pada modul reservations', TRUE)
+    ON CONFLICT (key) DO NOTHING;
   `);
 }

@@ -71,10 +71,19 @@ function parseAccessGrid(raw: any): AccessGrid {
   const grid: AccessGrid = {};
   for (const resource of ACCESS_RESOURCES) {
     const requested = raw?.[resource.key];
+    const viewVal = requested?.view === true;
+    const editVal = requested?.edit === true;
+    const deleteVal = requested?.delete === true;
+
     grid[resource.key] = {
-      view: requested?.view === true,
-      edit: requested?.edit === true,
-      delete: requested?.delete === true,
+      view: viewVal,
+      detail: requested?.detail !== undefined ? requested.detail === true : viewVal,
+      create: requested?.create !== undefined ? requested.create === true : editVal,
+      edit: editVal,
+      delete: deleteVal,
+      export: requested?.export !== undefined ? requested.export === true : viewVal,
+      import: requested?.import !== undefined ? requested.import === true : editVal,
+      approve: requested?.approve !== undefined ? requested.approve === true : editVal,
     };
   }
   return grid;

@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { useAuth } from '../auth/AuthContext';
 import {
   fetchPurchaseOrders,
   fetchPurchaseOrderById,
@@ -107,6 +108,13 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [includeArchived, setIncludeArchived] = useState<boolean>(false);
   const [bannerSuccess, setBannerSuccess] = useState<string | null>(null);
+
+  const { user, hasGranularPermission, effectiveAccess } = useAuth();
+  const canApprovePo = useMemo(() => {
+    if (user?.role === 'Super Admin' || effectiveAccess?.is_platform_super_admin) return true;
+    if (effectiveAccess?.effective?.['Persetujuan PO']?.approve?.allowed === true) return true;
+    return hasGranularPermission('purchase_orders.approve');
+  }, [user, effectiveAccess, hasGranularPermission]);
 
   // Detail Drawer state
   const [selectedPo, setSelectedPo] = useState<PosPurchaseOrder | null>(null);
@@ -936,9 +944,10 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                             </button>
                             <button
                               type="button"
-                              disabled={actionBusyId === po.id}
+                              disabled={actionBusyId === po.id || !canApprovePo}
+                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                               onClick={() => void handlePoStatusAction(po, 'APPROVE')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
+                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Setujui PO
                             </button>
@@ -949,17 +958,19 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                           <>
                             <button
                               type="button"
-                              disabled={actionBusyId === po.id}
+                              disabled={actionBusyId === po.id || !canApprovePo}
+                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                               onClick={() => void handlePoStatusAction(po, 'APPROVE')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer"
+                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Setujui PO
                             </button>
                             <button
                               type="button"
-                              disabled={actionBusyId === po.id}
+                              disabled={actionBusyId === po.id || !canApprovePo}
+                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                               onClick={() => void handlePoStatusAction(po, 'REJECT')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 cursor-pointer"
+                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                             >
                               Tolak
                             </button>
@@ -1067,9 +1078,10 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                       </button>
                       <button
                         type="button"
-                        disabled={actionBusyId === selectedPo.id}
+                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
+                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                         onClick={() => void handlePoStatusAction(selectedPo, 'APPROVE')}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Setujui PO
                       </button>
@@ -1080,17 +1092,19 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                     <>
                       <button
                         type="button"
-                        disabled={actionBusyId === selectedPo.id}
+                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
+                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                         onClick={() => void handlePoStatusAction(selectedPo, 'APPROVE')}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Setujui PO
                       </button>
                       <button
                         type="button"
-                        disabled={actionBusyId === selectedPo.id}
+                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
+                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
                         onClick={() => void handlePoStatusAction(selectedPo, 'REJECT')}
-                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer"
+                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Tolak PO
                       </button>

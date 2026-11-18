@@ -2,88 +2,211 @@ import type { Pool, PoolClient } from 'pg';
 import { isPlatformSuperAdmin } from '../auth/authService';
 import { AVAILABLE_MENUS, type MenuDefinition } from './rolePermissionsService';
 
-export type AccessAction = 'view' | 'edit' | 'delete';
+export type AccessAction = 'view' | 'detail' | 'create' | 'edit' | 'delete' | 'export' | 'import' | 'approve';
 export type AccessEffect = 'ALLOW' | 'DENY';
 export type AccessSource = 'PLATFORM_SUPER_ADMIN' | 'USER_OVERRIDE' | 'ROLE_DEFAULT' | 'DEFAULT_DENY';
 
-export const ACCESS_ACTIONS: AccessAction[] = ['view', 'edit', 'delete'];
+export const ACCESS_ACTIONS: AccessAction[] = ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import', 'approve'];
 
 export const PLATFORM_SUPER_ADMIN_ROLE_NAME = 'Super Admin';
 
 /**
- * Canonical View/Edit/Delete mapping.
+ * Canonical Action mapping across all navigation resources & approvals.
  *
  * The navigation resource list is NOT redefined here: it is taken from
  * AVAILABLE_MENUS. This table only declares which already-existing atomic
- * `permissions.key` rows back each operator-facing action, so the permissions
- * table stays the single source of truth for what a grant means.
- *
- * VIEW   - read/open the resource
- * EDIT   - create/update normal operational records for the resource
- * DELETE - perform the resource's allowed delete/remove actions. This never
- *          implies platform hard-delete authority, which stays behind the
- *          canonical Platform Super Admin check.
+ * `permissions.key` rows back each operator-facing action.
  */
 const RESOURCE_PERMISSION_KEYS: Record<string, Record<AccessAction, string[]>> = {
   'Kalender': {
     view: ['reservations.view', 'rooms.view'],
-    edit: ['reservations.create', 'reservations.edit'],
+    detail: ['reservations.view', 'rooms.view'],
+    create: ['reservations.create'],
+    edit: ['reservations.edit'],
     delete: ['reservations.delete'],
-  },
-  'Transaksi': {
-    view: ['folios.view'],
-    edit: ['folios.create', 'folios.edit'],
-    delete: ['folios.delete'],
-  },
-  'Pelanggan': {
-    view: ['guests.view'],
-    edit: ['guests.create', 'guests.edit'],
-    delete: ['guests.delete'],
-  },
-  'Housekeeping': {
-    view: ['housekeeping.view'],
-    edit: ['housekeeping.create', 'housekeeping.edit'],
-    delete: ['housekeeping.delete'],
-  },
-  'HRD': {
-    view: ['hrd.employees.view', 'hrd.attendance.view'],
-    edit: ['hrd.employees.create', 'hrd.employees.edit', 'hrd.attendance.edit'],
-    delete: ['hrd.employees.delete'],
-  },
-  'POS': {
-    view: ['pos.view'],
-    edit: ['pos.create', 'pos.edit'],
-    delete: ['pos.delete'],
-  },
-  'Master Kamar': {
-    view: ['rooms.view'],
-    edit: ['rooms.create', 'rooms.edit'],
-    delete: ['rooms.delete'],
-  },
-  'Master Produk': {
-    view: ['inventory.view'],
-    edit: ['inventory.create', 'inventory.edit'],
-    delete: ['inventory.delete'],
-  },
-  'Laporan': {
-    view: ['reports.view'],
-    edit: ['reports.create', 'reports.edit'],
-    delete: ['reports.delete'],
-  },
-  'Employee Mobile': {
-    view: ['employee_mobile.view'],
-    edit: ['employee_mobile.create', 'employee_mobile.edit'],
-    delete: ['employee_mobile.delete'],
-  },
-  'Pengaturan': {
-    view: ['settings.view'],
-    edit: ['settings.create', 'settings.edit'],
-    delete: ['settings.delete'],
+    export: ['reservations.export', 'reservations.view'],
+    import: ['reservations.create'],
+    approve: ['reservations.approve'],
   },
   'Dokumen & Print': {
     view: ['documents.view'],
-    edit: ['documents.create', 'documents.edit'],
+    detail: ['documents.view'],
+    create: ['documents.create'],
+    edit: ['documents.edit'],
     delete: ['documents.delete'],
+    export: ['documents.view'],
+    import: ['documents.create'],
+    approve: ['documents.edit'],
+  },
+  'Transaksi': {
+    view: ['folios.view'],
+    detail: ['folios.view'],
+    create: ['folios.create'],
+    edit: ['folios.edit'],
+    delete: ['folios.delete'],
+    export: ['folios.export', 'folios.view'],
+    import: ['folios.create'],
+    approve: ['folios.approve'],
+  },
+  'Pelanggan': {
+    view: ['guests.view'],
+    detail: ['guests.view'],
+    create: ['guests.create'],
+    edit: ['guests.edit'],
+    delete: ['guests.delete'],
+    export: ['guests.export', 'guests.view'],
+    import: ['guests.import', 'guests.create'],
+    approve: ['guests.approve'],
+  },
+  'Housekeeping': {
+    view: ['housekeeping.view'],
+    detail: ['housekeeping.view'],
+    create: ['housekeeping.create'],
+    edit: ['housekeeping.edit'],
+    delete: ['housekeeping.delete'],
+    export: ['housekeeping.view'],
+    import: ['housekeeping.create'],
+    approve: ['housekeeping.approve'],
+  },
+  'HRD': {
+    view: ['hrd.employees.view', 'hrd.attendance.view'],
+    detail: ['hrd.employees.view'],
+    create: ['hrd.employees.create'],
+    edit: ['hrd.employees.edit', 'hrd.attendance.edit'],
+    delete: ['hrd.employees.delete'],
+    export: ['hrd.employees.view'],
+    import: ['hrd.employees.create'],
+    approve: ['hrd.employees.approve'],
+  },
+  'POS': {
+    view: ['pos.view'],
+    detail: ['pos.view'],
+    create: ['pos.create'],
+    edit: ['pos.edit'],
+    delete: ['pos.delete'],
+    export: ['pos.view'],
+    import: ['pos.create'],
+    approve: ['pos.approve'],
+  },
+  'Daftar Purchase Order': {
+    view: ['purchase_orders.view', 'pos.view'],
+    detail: ['purchase_orders.detail', 'purchase_orders.view', 'pos.view'],
+    create: ['purchase_orders.create', 'pos.create'],
+    edit: ['purchase_orders.edit', 'pos.edit'],
+    delete: ['purchase_orders.delete', 'pos.delete'],
+    export: ['purchase_orders.export', 'purchase_orders.view', 'pos.view'],
+    import: ['purchase_orders.create'],
+    approve: ['purchase_orders.approve', 'pos.approve'],
+  },
+  'Penerimaan Barang': {
+    view: ['goods_receipts.view', 'inventory.view'],
+    detail: ['goods_receipts.detail', 'goods_receipts.view', 'inventory.view'],
+    create: ['goods_receipts.create', 'inventory.create'],
+    edit: ['goods_receipts.edit', 'inventory.edit'],
+    delete: ['goods_receipts.delete', 'inventory.delete'],
+    export: ['goods_receipts.view', 'inventory.view'],
+    import: ['goods_receipts.create'],
+    approve: ['goods_receipts.create'],
+  },
+  'Produk & Inventori': {
+    view: ['inventory.view'],
+    detail: ['inventory.view'],
+    create: ['inventory.create'],
+    edit: ['inventory.edit'],
+    delete: ['inventory.delete'],
+    export: ['inventory.export', 'inventory.view'],
+    import: ['inventory.import', 'inventory.create'],
+    approve: ['inventory.edit'],
+  },
+  'Master Produk': {
+    view: ['inventory.view'],
+    detail: ['inventory.view'],
+    create: ['inventory.create'],
+    edit: ['inventory.edit'],
+    delete: ['inventory.delete'],
+    export: ['inventory.export', 'inventory.view'],
+    import: ['inventory.import', 'inventory.create'],
+    approve: ['inventory.approve'],
+  },
+  'Analisis Food Cost': {
+    view: ['inventory.view', 'reports.view'],
+    detail: ['inventory.view', 'reports.view'],
+    create: ['inventory.create'],
+    edit: ['inventory.edit'],
+    delete: ['inventory.delete'],
+    export: ['reports.export', 'reports.view', 'inventory.view'],
+    import: ['inventory.create'],
+    approve: ['inventory.edit'],
+  },
+  'Master Kamar': {
+    view: ['rooms.view'],
+    detail: ['rooms.view'],
+    create: ['rooms.create'],
+    edit: ['rooms.edit'],
+    delete: ['rooms.delete'],
+    export: ['rooms.view'],
+    import: ['rooms.create'],
+    approve: ['rooms.approve'],
+  },
+  'Akuntansi': {
+    view: ['accounting.view', 'reports.view'],
+    detail: ['accounting.detail', 'accounting.view', 'reports.view'],
+    create: ['accounting.create', 'reports.create'],
+    edit: ['accounting.edit', 'reports.edit'],
+    delete: ['accounting.delete', 'reports.delete'],
+    export: ['accounting.export', 'accounting.view', 'reports.view'],
+    import: ['accounting.create'],
+    approve: ['accounting.edit'],
+  },
+  'Laporan': {
+    view: ['reports.view'],
+    detail: ['reports.view'],
+    create: ['reports.create'],
+    edit: ['reports.edit'],
+    delete: ['reports.delete'],
+    export: ['reports.export', 'reports.view'],
+    import: ['reports.create'],
+    approve: ['reports.approve'],
+  },
+  'Employee Mobile': {
+    view: ['employee_mobile.view'],
+    detail: ['employee_mobile.view'],
+    create: ['employee_mobile.create'],
+    edit: ['employee_mobile.edit'],
+    delete: ['employee_mobile.delete'],
+    export: ['employee_mobile.view'],
+    import: ['employee_mobile.create'],
+    approve: ['employee_mobile.approve'],
+  },
+  'Pengaturan': {
+    view: ['settings.view'],
+    detail: ['settings.view'],
+    create: ['settings.create'],
+    edit: ['settings.edit'],
+    delete: ['settings.delete'],
+    export: ['settings.view'],
+    import: ['settings.create'],
+    approve: ['settings.approve'],
+  },
+  'Persetujuan PO': {
+    view: ['purchase_orders.view', 'pos.view'],
+    detail: ['purchase_orders.view', 'pos.view'],
+    create: ['purchase_orders.approve', 'pos.approve'],
+    edit: ['purchase_orders.approve', 'pos.approve'],
+    delete: ['purchase_orders.delete', 'pos.delete'],
+    export: ['purchase_orders.view'],
+    import: ['purchase_orders.create'],
+    approve: ['purchase_orders.approve', 'pos.approve'],
+  },
+  'Persetujuan Komplimentari': {
+    view: ['reservations.complimentary.view', 'reservations.view'],
+    detail: ['reservations.complimentary.view'],
+    create: ['reservations.complimentary.approve'],
+    edit: ['reservations.complimentary.approve'],
+    delete: ['reservations.complimentary.revoke'],
+    export: ['reservations.complimentary.view'],
+    import: ['reservations.complimentary.request'],
+    approve: ['reservations.complimentary.approve'],
   },
 };
 
@@ -115,7 +238,16 @@ export type EffectiveAccessGrid = Record<string, Record<AccessAction, { allowed:
 function emptyGrid(value: boolean): AccessGrid {
   const grid: AccessGrid = {};
   for (const resource of ACCESS_RESOURCES) {
-    grid[resource.key] = { view: value, edit: value, delete: value };
+    grid[resource.key] = {
+      view: value,
+      detail: value,
+      create: value,
+      edit: value,
+      delete: value,
+      export: value,
+      import: value,
+      approve: value,
+    };
   }
   return grid;
 }

@@ -82,6 +82,7 @@ async function runTests() {
       SELECT u.id, u.username, u.full_name, r.id AS role_id, r.name AS role
       FROM users u JOIN roles r ON r.id = u.role_id
       WHERE r.name = 'Super Admin' AND r.property_id IS NULL AND r.is_system_role = TRUE
+      ORDER BY u.id ASC
       LIMIT 1
     `);
     if (saRes.rows.length === 0) throw new Error('Platform Super Admin not found in DB.');

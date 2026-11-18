@@ -2,18 +2,21 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import {
   ACCESS_ACTIONS,
+  TABLE_ACTIONS,
   ACCESS_ACTION_LABELS,
-  ACCESS_SOURCE_LABELS,
+  MODULE_SUPPORTED_ACTIONS,
   buildOverrideLookup,
   getOverrideChoice,
   groupResources,
   resolveEffectiveCell,
+  toggleUserOverride,
   type AccessAction,
+  type AccessResource,
   type AccessUserSummary,
   type EffectiveAccessResponse,
   type OverrideChoice,
 } from '../auth/accessControl';
-import { OverrideStateControl } from '../hrd/hrdActionUi';
+import { BlueCircleCheck } from './BlueCircleCheck';
 
 interface UserAccessTabProps {
   propertyId: number;
@@ -137,7 +140,13 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
     }
   };
 
-  const groupedResources = useMemo(() => groupResources(detail?.resources || []), [detail]);
+  const allGrouped = useMemo(() => groupResources(detail?.resources || []), [detail]);
+  const standardGroups = useMemo(() => allGrouped.filter(g => g.group !== 'Otorisasi Khusus'), [allGrouped]);
+  const specialAuthResources: AccessResource[] = useMemo(() => {
+    const specialGroup = allGrouped.find(g => g.group === 'Otorisasi Khusus');
+    return specialGroup?.resources || [];
+  }, [allGrouped]);
+
   const selectedUser = users.find(u => u.user_id === selectedUserId) || null;
   const isSuperAdminTarget = detail?.is_platform_super_admin === true;
 
@@ -165,7 +174,7 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
           <div>
             <h3 className="font-serif font-bold text-slate-900 text-sm">Hak Akses Pengguna</h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Sesuaikan akses per pengguna di atas default role-nya.
+              Sesuaikan akses per pengguna di atas default role-nya. Klik lingkaran untuk mengizinkan atau menolak.
             </p>
           </div>
           <div className="flex items-center gap-1.5">
@@ -221,63 +230,175 @@ export const UserAccessTab: React.FC<UserAccessTabProps> = ({ propertyId }) => {
         {loadingDetail ? (
           <div className="p-8 text-center text-xs text-slate-400">Memuat hak akses pengguna...</div>
         ) : (
-          <div className="max-h-[min(32rem,62vh)] overflow-y-auto overflow-x-hidden px-3 py-2.5 space-y-3">
-            {groupedResources.map(group => (
+          <div className="max-h-[min(34rem,65vh)] overflow-y-auto overflow-x-hidden px-3 py-2.5 space-y-4">
+            {/* Standard Modules Table */}
+            {standardGroups.map(group => (
               <div key={group.group}>
                 <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1">{group.group}</div>
-                <div className="border border-slate-200 rounded-lg">
+                <div className="border border-slate-200 rounded-lg overflow-hidden">
                   <table className="w-full table-fixed text-left text-xs border-collapse">
                     <colgroup>
                       <col />
-                      <col className="w-[80px]" />
-                      <col className="w-[80px]" />
-                      <col className="w-[80px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
+                      <col className="w-[66px]" />
                     </colgroup>
                     <thead className="sticky top-0 z-10">
-                      <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200">
-                        <th className="py-1.5 px-2.5 text-left">Menu</th>
-                        {ACCESS_ACTIONS.map(action => (
-                          <th key={action} className="py-1.5 px-1 text-center">{ACCESS_ACTION_LABELS[action]}</th>
+                      <tr className="bg-slate-50 text-slate-600 font-bold border-b border-slate-200 text-[11px]">
+                        <th className="py-1.5 px-2.5 text-left">Menu / Modul</th>
+                        {TABLE_ACTIONS.map(action => (
+                          <th key={action} className="py-1.5 px-1 text-center font-bold">
+                            {ACCESS_ACTION_LABELS[action]}
+                          </th>
                         ))}
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {group.resources.map(resource => (
-                        <tr key={resource.key} className="hover:bg-slate-50/60 transition">
-                          <td className="py-1.5 px-2.5 min-w-0">
-                            <div className="font-bold text-slate-800 text-[11px] leading-tight break-words">{resource.label}</div>
-                          </td>
-                          {ACCESS_ACTIONS.map(action => {
-                            const choice = draft[`${resource.key}::${action}`] || 'INHERIT';
-                            const roleAllowed = detail?.role_access?.[resource.key]?.[action] === true;
-                            const cell = resolveEffectiveCell({
-                              isPlatformSuperAdmin: isSuperAdminTarget,
-                              roleAllowed,
-                              override: choice,
-                            });
-                            return (
-                              <td key={action} className="py-1.5 px-1 text-center align-middle">
-                                <OverrideStateControl
-                                  value={choice}
-                                  disabled={isSuperAdminTarget}
-                                  ariaLabel={`${resource.label} ${ACCESS_ACTION_LABELS[action]}`}
-                                  roleAllowed={roleAllowed}
-                                  hint={`${cell.allowed ? 'AKTIF' : 'NONAKTIF'} · ${ACCESS_SOURCE_LABELS[cell.source]}`}
-                                  onChange={next => setDraft(prev => ({
-                                    ...prev,
-                                    [`${resource.key}::${action}`]: next,
-                                  }))}
-                                />
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
+                    <tbody className="divide-y divide-slate-100 bg-white">
+                      {group.resources.map(resource => {
+                        const supportedActions = MODULE_SUPPORTED_ACTIONS[resource.key] || ['view', 'detail', 'create', 'edit', 'delete'];
+                        return (
+                          <tr key={resource.key} className="hover:bg-slate-50/70 transition">
+                            <td className="py-1.5 px-2.5 min-w-0">
+                              <div className="font-bold text-slate-800 text-[11px] leading-tight break-words">
+                                {resource.label}
+                              </div>
+                              <div className="text-[9px] text-slate-400 leading-snug break-words mt-0.5 line-clamp-1">
+                                {resource.description}
+                              </div>
+                            </td>
+                            {TABLE_ACTIONS.map(action => {
+                              const isSupported = supportedActions.includes(action);
+                              if (!isSupported) {
+                                return (
+                                  <td key={action} className="py-1.5 px-1 text-center align-middle">
+                                    <span className="text-slate-300 font-bold select-none text-xs">—</span>
+                                  </td>
+                                );
+                              }
+                              const choice = draft[`${resource.key}::${action}`] || 'INHERIT';
+                              const roleAllowed = detail?.role_access?.[resource.key]?.[action] === true;
+                              const cell = resolveEffectiveCell({
+                                isPlatformSuperAdmin: isSuperAdminTarget,
+                                roleAllowed,
+                                override: choice,
+                              });
+                              const title = isSuperAdminTarget
+                                ? 'Diizinkan (Platform Super Admin)'
+                                : choice === 'ALLOW'
+                                  ? 'Diizinkan (Override Pengguna)'
+                                  : choice === 'DENY'
+                                    ? 'Ditolak (Override Pengguna)'
+                                    : cell.allowed
+                                      ? 'Diizinkan (Sesuai Role)'
+                                      : 'Ditolak (Sesuai Role)';
+                              return (
+                                <td key={action} className="py-1.5 px-1 text-center align-middle">
+                                  <BlueCircleCheck
+                                    checked={cell.allowed}
+                                    disabled={isSuperAdminTarget}
+                                    ariaLabel={`${resource.label} ${ACCESS_ACTION_LABELS[action]}`}
+                                    title={title}
+                                    onClick={() => {
+                                      const nextChoice = toggleUserOverride(roleAllowed, choice);
+                                      setDraft(prev => {
+                                        const next = { ...prev, [`${resource.key}::${action}`]: nextChoice };
+                                        // Auto-allow view if enabling any operational action
+                                        if (action !== 'view' && (nextChoice === 'ALLOW' || (nextChoice === 'INHERIT' && roleAllowed))) {
+                                          const viewRoleAllowed = detail?.role_access?.[resource.key]?.view === true;
+                                          const currentViewChoice = prev[`${resource.key}::view`] || 'INHERIT';
+                                          const viewCell = resolveEffectiveCell({
+                                            isPlatformSuperAdmin: isSuperAdminTarget,
+                                            roleAllowed: viewRoleAllowed,
+                                            override: currentViewChoice,
+                                          });
+                                          if (!viewCell.allowed) {
+                                            next[`${resource.key}::view`] = 'ALLOW';
+                                          }
+                                        }
+                                        return next;
+                                      });
+                                    }}
+                                  />
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
               </div>
             ))}
+
+            {/* Otorisasi & Persetujuan Khusus Section */}
+            {specialAuthResources.length > 0 && (
+              <div className="pt-1">
+                <div className="text-[10px] font-bold uppercase tracking-widest text-[#1b4332] mb-1.5">
+                  OTORISASI & PERSETUJUAN KHUSUS
+                </div>
+                <div className="border border-slate-200 rounded-lg bg-slate-50/40 divide-y divide-slate-100">
+                  {specialAuthResources.map(resource => {
+                    const choice = draft[`${resource.key}::approve`] || 'INHERIT';
+                    const roleAllowed = detail?.role_access?.[resource.key]?.approve === true;
+                    const cell = resolveEffectiveCell({
+                      isPlatformSuperAdmin: isSuperAdminTarget,
+                      roleAllowed,
+                      override: choice,
+                    });
+                    const title = isSuperAdminTarget
+                      ? 'Diizinkan (Platform Super Admin)'
+                      : choice === 'ALLOW'
+                        ? 'Diizinkan (Override Pengguna)'
+                        : choice === 'DENY'
+                          ? 'Ditolak (Override Pengguna)'
+                          : cell.allowed
+                            ? 'Diizinkan (Sesuai Role)'
+                            : 'Ditolak (Sesuai Role)';
+
+                    return (
+                      <div
+                        key={resource.key}
+                        className="p-3 flex items-center justify-between gap-3 hover:bg-slate-50 transition"
+                      >
+                        <div className="min-w-0 pr-4">
+                          <div className="font-bold text-slate-800 text-xs">{resource.label}</div>
+                          <div className="text-[11px] text-slate-500 mt-0.5">{resource.description}</div>
+                        </div>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
+                            cell.allowed ? 'bg-blue-50 text-blue-700 border border-blue-200' : 'bg-slate-100 text-slate-500'
+                          }`}>
+                            {cell.allowed ? 'Diizinkan' : 'Ditolak'}
+                          </span>
+                          <BlueCircleCheck
+                            checked={cell.allowed}
+                            disabled={isSuperAdminTarget}
+                            ariaLabel={resource.label}
+                            title={title}
+                            onClick={() => {
+                              const nextChoice = toggleUserOverride(roleAllowed, choice);
+                              setDraft(prev => ({
+                                ...prev,
+                                [`${resource.key}::approve`]: nextChoice,
+                                [`${resource.key}::create`]: nextChoice,
+                                [`${resource.key}::edit`]: nextChoice,
+                                [`${resource.key}::view`]: nextChoice,
+                                [`${resource.key}::detail`]: nextChoice,
+                              }));
+                            }}
+                          />
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

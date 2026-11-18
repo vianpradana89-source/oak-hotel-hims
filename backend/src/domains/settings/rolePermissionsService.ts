@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 export interface MenuDefinition {
   key: string;
   label: string;
-  group: 'Front Office' | 'Departemen' | 'Manajemen' | 'Operasional';
+  group: 'Front Office' | 'Departemen' | 'Manajemen' | 'Operasional' | 'Otorisasi Khusus';
   description: string;
 }
 
@@ -13,6 +13,12 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
     label: 'Kalender & Kamar',
     group: 'Front Office',
     description: 'Visual Tape Chart, ketersediaan kamar harian, dan alur pergerakan tamu.'
+  },
+  {
+    key: 'Dokumen & Print',
+    label: 'Dokumen & Print',
+    group: 'Front Office',
+    description: 'Manajemen kuitansi, invoice, kwitansi, dan cetak dokumen reservasi/tamu.'
   },
   {
     key: 'Transaksi',
@@ -45,16 +51,46 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
     description: 'Pemesanan makanan & minuman, kasir restoran, dan integrasi bill-to-room.'
   },
   {
+    key: 'Daftar Purchase Order',
+    label: 'Daftar Purchase Order (PO)',
+    group: 'Manajemen',
+    description: 'Pengadaan barang, penerbitan PO ke vendor/supplier, dan otorisasi pengadaan.'
+  },
+  {
+    key: 'Penerimaan Barang',
+    label: 'Penerimaan Barang (GRN)',
+    group: 'Manajemen',
+    description: 'Penerimaan fisik barang dari supplier/vendor dan verifikasi surat jalan.'
+  },
+  {
+    key: 'Produk & Inventori',
+    label: 'Stok & Mutasi Persediaan',
+    group: 'Manajemen',
+    description: 'Pencatatan kartu stok, saldo awal, mutasi masuk/keluar, transfer gudang, dan opname.'
+  },
+  {
+    key: 'Master Produk',
+    label: 'Master Barang & Produk',
+    group: 'Manajemen',
+    description: 'Katalog item F&B, harga jual produk restoran, bahan baku, dan kategori menu.'
+  },
+  {
+    key: 'Analisis Food Cost',
+    label: 'Analisis Food Cost',
+    group: 'Manajemen',
+    description: 'Kalkulasi HPP resep F&B, target food cost ratio, dan margin keuntungan menu.'
+  },
+  {
     key: 'Master Kamar',
     label: 'Master Kamar',
     group: 'Manajemen',
     description: 'Konfigurasi 9 tipe kamar, 23 kamar fisik, kapasitas ranjang, dan harga dasar.'
   },
   {
-    key: 'Master Produk',
-    label: 'Master Produk & Menu',
+    key: 'Akuntansi',
+    label: 'Akuntansi & Keuangan',
     group: 'Manajemen',
-    description: 'Katalog item F&B, harga jual produk restoran, dan kategori menu.'
+    description: 'Jurnal umum, buku besar, neraca saldo, laba rugi, dan bagan akun (COA).'
   },
   {
     key: 'Laporan',
@@ -70,15 +106,21 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
   },
   {
     key: 'Pengaturan',
-    label: 'Pengaturan Properti',
+    label: 'Pengaturan Properti & Sistem',
     group: 'Manajemen',
     description: 'Identitas hotel, branding, konfigurasi durasi day use, dan kebijakan properti.'
   },
   {
-    key: 'Dokumen & Print',
-    label: 'Dokumen & Print',
-    group: 'Manajemen',
-    description: 'Manajemen kuitansi, invoice, kwitansi, dan cetak dokumen reservasi/tamu.'
+    key: 'Persetujuan PO',
+    label: 'Izinkan Approve PO',
+    group: 'Otorisasi Khusus',
+    description: 'Otorisasi persetujuan Purchase Order pengadaan barang dan biaya operasional.'
+  },
+  {
+    key: 'Persetujuan Komplimentari',
+    label: 'Izinkan Approve Komplimentari',
+    group: 'Otorisasi Khusus',
+    description: 'Otorisasi persetujuan pemberian kamar komplimentari / house use / diskon 100%.'
   }
 ];
 

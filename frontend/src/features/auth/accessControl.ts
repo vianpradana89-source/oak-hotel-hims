@@ -1,17 +1,90 @@
 import type { MainNavKey } from '../shell/shellTypes';
 
-export type AccessAction = 'view' | 'edit' | 'delete';
+export type AccessAction =
+  | 'view'
+  | 'detail'
+  | 'create'
+  | 'edit'
+  | 'delete'
+  | 'export'
+  | 'import'
+  | 'approve';
+
 export type AccessEffect = 'ALLOW' | 'DENY';
 export type OverrideChoice = 'INHERIT' | AccessEffect;
 export type AccessSource = 'PLATFORM_SUPER_ADMIN' | 'USER_OVERRIDE' | 'ROLE_DEFAULT' | 'DEFAULT_DENY';
 
-export const ACCESS_ACTIONS: AccessAction[] = ['view', 'edit', 'delete'];
+export const ACCESS_ACTIONS: AccessAction[] = [
+  'view',
+  'detail',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'import',
+  'approve',
+];
+
+/** Standard table action columns */
+export const TABLE_ACTIONS: AccessAction[] = [
+  'view',
+  'detail',
+  'create',
+  'edit',
+  'delete',
+  'export',
+  'import',
+];
 
 export const ACCESS_ACTION_LABELS: Record<AccessAction, string> = {
-  view: 'View',
-  edit: 'Edit',
-  delete: 'Delete',
+  view: 'Lihat',
+  detail: 'Detail',
+  create: 'Tambah',
+  edit: 'Ubah',
+  delete: 'Hapus',
+  export: 'Export',
+  import: 'Import',
+  approve: 'Approve',
 };
+
+/**
+ * Declares which actions are applicable for each menu/module.
+ * Unsupported actions will be rendered as disabled / dash (—).
+ */
+export const MODULE_SUPPORTED_ACTIONS: Record<string, AccessAction[]> = {
+  Kalender: ['view', 'detail', 'create', 'edit', 'delete'],
+  'Dokumen & Print': ['view', 'detail', 'edit', 'export'],
+  Transaksi: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  Pelanggan: ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
+  Housekeeping: ['view', 'detail', 'create', 'edit', 'delete'],
+  HRD: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  POS: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  'Daftar Purchase Order': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  'Penerimaan Barang': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  'Produk & Inventori': ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
+  'Master Produk': ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
+  'Analisis Food Cost': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  'Master Kamar': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  Akuntansi: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  Laporan: ['view', 'detail', 'export'],
+  'Employee Mobile': ['view', 'detail', 'create', 'edit'],
+  Pengaturan: ['view', 'detail', 'create', 'edit', 'delete'],
+  'Persetujuan PO': ['approve'],
+  'Persetujuan Komplimentari': ['approve'],
+};
+
+/**
+ * Toggles a user permission override between ALLOW and DENY,
+ * returning to INHERIT whenever the new state matches the role default.
+ */
+export function toggleUserOverride(roleAllowed: boolean, currentChoice: OverrideChoice): OverrideChoice {
+  const isCurrentlyAllowed = currentChoice === 'ALLOW' || (currentChoice === 'INHERIT' && roleAllowed);
+  if (isCurrentlyAllowed) {
+    return roleAllowed ? 'DENY' : 'INHERIT';
+  } else {
+    return roleAllowed ? 'INHERIT' : 'ALLOW';
+  }
+}
 
 export interface AccessResource {
   key: string;
@@ -130,6 +203,9 @@ export function getVisibleNavKeys(effective: EffectiveAccessGrid): MainNavKey[] 
 
 export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, menuKey: MainNavKey): boolean {
   if (!effective) return false;
+  if (effective[menuKey]?.view?.allowed !== undefined) {
+    return effective[menuKey].view.allowed === true;
+  }
   if (
     menuKey === 'Produk & Inventori' ||
     menuKey === 'Penerimaan Barang' ||
@@ -142,6 +218,7 @@ export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, 
   }
   if (menuKey === 'Daftar Purchase Order') {
     return (
+      effective['Daftar Purchase Order']?.view?.allowed === true ||
       effective['Transaksi']?.view?.allowed === true ||
       effective['Master Produk']?.view?.allowed === true ||
       effective['Produk & Inventori']?.view?.allowed === true
@@ -149,11 +226,12 @@ export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, 
   }
   if (menuKey === 'Akuntansi') {
     return (
+      effective['Akuntansi']?.view?.allowed === true ||
       effective['Laporan']?.view?.allowed === true ||
       effective['Transaksi']?.view?.allowed === true
     );
   }
-  return effective[menuKey]?.view?.allowed === true;
+  return false;
 }
 
 export function getDefaultNavKey(
