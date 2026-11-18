@@ -479,6 +479,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
       ? categories
       : DEFAULT_CATEGORIES.map((c, idx) => ({ id: -(idx + 1), category_name: c, is_system: true }));
 
+  const [assetCode, setAssetCode] = useState('');
   const [assetName, setAssetName] = useState('');
   const [category, setCategory] = useState(categoryList[0]?.category_name || 'Peralatan');
   const [storageLocation, setStorageLocation] = useState('');
@@ -521,19 +522,23 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   };
 
   const handleDeleteCategory = async (id: number, name: string) => {
-    if (id <= 0) return;
     setCatBusy(true);
     setError(null);
     try {
-      const res = await authenticatedFetch(`/api/reports/accounting/asset-categories/${id}`, {
-        method: 'DELETE',
-      });
+      const targetId = id > 0 ? id : 0;
+      const res = await authenticatedFetch(
+        `/api/reports/accounting/asset-categories/${targetId}?name=${encodeURIComponent(name)}`,
+        {
+          method: 'DELETE',
+        }
+      );
       const json = await res.json();
       if (!res.ok || json.status === 'ERROR') {
         throw new Error(json.message || 'Gagal menghapus kategori');
       }
       if (category === name) {
-        setCategory(categoryList[0]?.category_name || 'Peralatan');
+        const remaining = categoryList.filter((c) => c.category_name !== name);
+        setCategory(remaining[0]?.category_name || 'Peralatan');
       }
       onSaved();
     } catch (err: any) {
@@ -546,7 +551,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!assetName.trim()) {
-      setError('Nama aset wajib diisi.');
+      setError('Nama barang wajib diisi.');
       return;
     }
     setSaving(true);
@@ -559,6 +564,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           property_id: propertyId,
+          asset_code: assetCode.trim() || null,
           asset_name: assetName.trim(),
           category,
           storage_location: storageLocation.trim() || '-',
@@ -598,62 +604,18 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               {error}
             </div>
           )}
-          <div>
-            <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Aset *</label>
-            <input
-              type="text"
-              value={assetName}
-              onChange={(e) => setAssetName(e.target.value)}
-              placeholder="Contoh: AC Kamar, Kasur, TV, dll"
-              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
-            />
-          </div>
 
+          {/* 1. Kode Aset & Tanggal Beli */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">Kategori</label>
-              <div className="flex items-center gap-2">
-                <select
-                  value={category}
-                  onChange={(e) => setCategory(e.target.value)}
-                  className="flex-1 min-w-0 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
-                >
-                  {categoryList.map((cat) => (
-                    <option key={cat.category_name} value={cat.category_name}>
-                      {cat.category_name}
-                    </option>
-                  ))}
-                </select>
-                {/* Ikon Kelola Kategori (Gambar 2 — Sliders Horizontal button) */}
-                <button
-                  type="button"
-                  onClick={() => setShowManageCategory((v) => !v)}
-                  title="Kelola Kategori Aset"
-                  className={`w-9 h-9 rounded-xl border flex items-center justify-center transition shrink-0 cursor-pointer ${
-                    showManageCategory
-                      ? 'bg-[#123524] text-[#E6C786] border-[#123524]'
-                      : 'bg-cyan-50/90 hover:bg-cyan-100 text-slate-800 border-cyan-200'
-                  }`}
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth={2}
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="w-4 h-4"
-                  >
-                    <line x1="4" x2="10" y1="8" y2="8" />
-                    <line x1="14" x2="20" y1="8" y2="8" />
-                    <circle cx="12" cy="8" r="2" />
-                    <line x1="4" x2="12" y1="16" y2="16" />
-                    <line x1="16" x2="20" y1="16" y2="16" />
-                    <circle cx="14" cy="16" r="2" />
-                  </svg>
-                </button>
-              </div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">Kode Aset</label>
+              <input
+                type="text"
+                value={assetCode}
+                onChange={(e) => setAssetCode(e.target.value)}
+                placeholder="Contoh: AST-001 (kosongkan = otomatis)"
+                className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+              />
             </div>
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Tanggal Beli</label>
@@ -666,7 +628,54 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             </div>
           </div>
 
-          {/* Panel Kelola Kategori Aset */}
+          {/* 2. Kategori + Kelola Kategori */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Kategori</label>
+            <div className="flex items-center gap-2">
+              <select
+                value={category}
+                onChange={(e) => setCategory(e.target.value)}
+                className="flex-1 min-w-0 px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+              >
+                {categoryList.map((cat) => (
+                  <option key={cat.category_name} value={cat.category_name}>
+                    {cat.category_name}
+                  </option>
+                ))}
+              </select>
+              {/* Ikon Kelola Kategori (Gambar 2 — Sliders Horizontal button) */}
+              <button
+                type="button"
+                onClick={() => setShowManageCategory((v) => !v)}
+                title="Kelola Kategori Aset"
+                className={`w-9 h-9 rounded-xl border flex items-center justify-center transition shrink-0 cursor-pointer ${
+                  showManageCategory
+                    ? 'bg-[#123524] text-[#E6C786] border-[#123524]'
+                    : 'bg-cyan-50/90 hover:bg-cyan-100 text-slate-800 border-cyan-200'
+                }`}
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="w-4 h-4"
+                >
+                  <line x1="4" x2="10" y1="8" y2="8" />
+                  <line x1="14" x2="20" y1="8" y2="8" />
+                  <circle cx="12" cy="8" r="2" />
+                  <line x1="4" x2="12" y1="16" y2="16" />
+                  <line x1="16" x2="20" y1="16" y2="16" />
+                  <circle cx="14" cy="16" r="2" />
+                </svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Panel Kelola Kategori Aset (Semua kategori punya ikon x untuk hapus) */}
           {showManageCategory && (
             <div className="p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-2.5">
               <div className="flex items-center justify-between">
@@ -703,24 +712,34 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
                     className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white border border-emerald-200 text-xs font-semibold text-slate-700"
                   >
                     <span>{cat.category_name}</span>
-                    {!cat.is_system && cat.id > 0 && (
-                      <button
-                        type="button"
-                        disabled={catBusy}
-                        onClick={() => handleDeleteCategory(cat.id, cat.category_name)}
-                        className="text-rose-500 hover:text-rose-700 font-bold"
-                        title="Hapus kategori"
-                      >
-                        ×
-                      </button>
-                    )}
+                    <button
+                      type="button"
+                      disabled={catBusy}
+                      onClick={() => handleDeleteCategory(cat.id, cat.category_name)}
+                      className="text-rose-500 hover:text-rose-700 font-bold leading-none cursor-pointer"
+                      title={`Hapus kategori ${cat.category_name}`}
+                    >
+                      ×
+                    </button>
                   </span>
                 ))}
               </div>
             </div>
           )}
 
-          {/* Lokasi Penyimpanan */}
+          {/* 3. Nama Barang */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1">Nama Barang *</label>
+            <input
+              type="text"
+              value={assetName}
+              onChange={(e) => setAssetName(e.target.value)}
+              placeholder="Contoh: AC Kamar, Kasur, TV, dll"
+              className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
+            />
+          </div>
+
+          {/* 4. Lokasi Penyimpanan */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">
               Lokasi Penyimpanan
@@ -740,6 +759,7 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
             </datalist>
           </div>
 
+          {/* 5 & 6. Harga Beli & Nilai Saat Ini */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">Harga Beli (Rp)</label>
@@ -765,6 +785,8 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               />
             </div>
           </div>
+
+          {/* 7. Depresiasi */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">Depresiasi (%/tahun)</label>
             <input
@@ -775,6 +797,8 @@ export const AddAssetModal: React.FC<AddAssetModalProps> = ({
               className="w-full px-3.5 py-2 rounded-lg border border-slate-300 bg-white text-slate-800"
             />
           </div>
+
+          {/* 8. Catatan */}
           <div>
             <label className="block text-xs font-semibold text-slate-700 mb-1">Catatan</label>
             <textarea

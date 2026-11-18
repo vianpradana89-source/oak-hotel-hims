@@ -1,6 +1,7 @@
 import type { FixedAssetItem } from './laporanTypes';
 
 export interface ImportedAssetRow {
+  asset_code?: string;
   asset_name: string;
   category: string;
   storage_location: string;
@@ -151,8 +152,9 @@ function createZipArchive(files: Array<{ name: string; content: string }>): Blob
 
 export function downloadAssetsXlsx(filename: string, assets: FixedAssetItem[]): void {
   const headerRow = [
-    'Nama Aset',
+    'Kode Aset',
     'Kategori',
+    'Nama Barang',
     'Lokasi Penyimpanan',
     'Tanggal Beli (YYYY-MM-DD)',
     'Harga Beli',
@@ -162,8 +164,9 @@ export function downloadAssetsXlsx(filename: string, assets: FixedAssetItem[]): 
   ];
 
   const dataRows = assets.map((a) => [
-    a.asset_name,
+    a.asset_code || `AST-${String(a.id).padStart(4, '0')}`,
     a.category,
+    a.asset_name,
     a.storage_location || '-',
     a.purchase_date,
     Number(a.purchase_price || 0),
@@ -344,15 +347,17 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
     return idx >= 0 ? idx : fallbackIdx;
   };
 
-  const nameIdx = findCol(['nama aset', 'nama', 'asset'], 0);
-  const catIdx = findCol(['kategori', 'category'], 1);
+  const hasCodeCol = header.some((h) => h.includes('kode') || h.includes('code'));
+  const codeIdx = hasCodeCol ? findCol(['kode', 'code'], 0) : -1;
+  const catIdx = findCol(['kategori', 'category'], hasCodeCol ? 1 : 1);
+  const nameIdx = findCol(['nama barang', 'nama aset', 'nama', 'barang', 'asset'], hasCodeCol ? 2 : 0);
   const hasLocationCol = header.some((h) => h.includes('lokasi') || h.includes('penyimpanan') || h.includes('location'));
-  const locIdx = hasLocationCol ? findCol(['lokasi', 'penyimpanan', 'location'], 2) : -1;
-  const dateIdx = findCol(['tanggal', 'date', 'beli'], hasLocationCol ? 3 : 2);
-  const priceIdx = findCol(['harga beli', 'harga', 'price'], hasLocationCol ? 4 : 3);
-  const curValIdx = findCol(['nilai saat ini', 'nilai', 'current'], hasLocationCol ? 5 : 4);
-  const depIdx = findCol(['depresiasi', 'penyusutan', 'depreciation'], hasLocationCol ? 6 : 5);
-  const notesIdx = findCol(['catatan', 'keterangan', 'note'], hasLocationCol ? 7 : 6);
+  const locIdx = hasLocationCol ? findCol(['lokasi', 'penyimpanan', 'location'], hasCodeCol ? 3 : 2) : -1;
+  const dateIdx = findCol(['tanggal', 'date', 'beli'], hasCodeCol ? 4 : hasLocationCol ? 3 : 2);
+  const priceIdx = findCol(['harga beli', 'harga', 'price'], hasCodeCol ? 5 : hasLocationCol ? 4 : 3);
+  const curValIdx = findCol(['nilai saat ini', 'nilai', 'current'], hasCodeCol ? 6 : hasLocationCol ? 5 : 4);
+  const depIdx = findCol(['depresiasi', 'penyusutan', 'depreciation'], hasCodeCol ? 7 : hasLocationCol ? 6 : 5);
+  const notesIdx = findCol(['catatan', 'keterangan', 'note'], hasCodeCol ? 8 : hasLocationCol ? 7 : 6);
 
   const results: ImportedAssetRow[] = [];
   for (let i = 1; i < grid.length; i++) {
@@ -361,6 +366,7 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
     const assetName = String(row[nameIdx] ?? '').trim();
     if (!assetName) continue;
 
+    const assetCode = codeIdx >= 0 ? String(row[codeIdx] ?? '').trim() || undefined : undefined;
     const category = String(row[catIdx] ?? '').trim() || 'Peralatan';
     const storageLocation = locIdx >= 0 ? String(row[locIdx] ?? '').trim() || '-' : '-';
     const purchaseDate = normalizeDateCell(String(row[dateIdx] ?? ''));
@@ -372,6 +378,7 @@ function mapGridToAssets(grid: string[][]): ImportedAssetRow[] {
     const notes = String(row[notesIdx] ?? '').trim();
 
     results.push({
+      asset_code: assetCode,
       asset_name: assetName,
       category,
       storage_location: storageLocation,

@@ -4543,11 +4543,14 @@ function AppContent() {
               }}
             />
 
-        {selectedMenu === 'Transaksi' && propertyId && (
+        {(selectedMenu === 'Transaksi' || selectedMenu === 'Daftar Purchase Order') && propertyId && (
           <TransactionWorkspace
+            key={selectedMenu === 'Daftar Purchase Order' ? 'po-standalone' : 'tx-default'}
+            mode={selectedMenu === 'Daftar Purchase Order' ? 'STANDALONE_PO' : 'DEFAULT'}
             propertyId={propertyId}
             currentStaffName="Front Desk Staff"
             onOpenQuickBooking={() => setCreateResOpen(true)}
+            onNavigateToPurchaseOrders={() => setSelectedMenu('Daftar Purchase Order')}
             reservations={transactionReservations}
             reservationLoading={transactionLoading}
             reservationError={transactionError}
@@ -4628,8 +4631,12 @@ function AppContent() {
           />
         )}
 
+        {selectedMenu === 'Akuntansi' && (
+          <LaporanWorkspace key="akuntansi-standalone" mode="AKUNTANSI" propertyId={propertyId} />
+        )}
+
         {selectedMenu === 'Laporan' && (
-          <LaporanWorkspace propertyId={propertyId} />
+          <LaporanWorkspace key="laporan-default" mode="LAPORAN" propertyId={propertyId} />
         )}
 
         {selectedMenu === 'Housekeeping' && propertyId !== null && (
@@ -4697,7 +4704,7 @@ function AppContent() {
             propertyId={propertyId}
             posMenuCount={posMenu.length}
             posOrderCount={posOrders.length}
-            onNavigateToProcurement={() => setSelectedMenu('Transaksi')}
+            onNavigateToProcurement={() => setSelectedMenu('Daftar Purchase Order')}
             onViewReservation={viewRoomMasterReservation}
           />
         )}

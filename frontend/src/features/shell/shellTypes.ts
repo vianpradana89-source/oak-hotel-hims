@@ -8,6 +8,8 @@ export type MainNavKey =
   | 'Mobile Portal'
   | 'Employee Mobile'
   | 'Laporan'
+  | 'Akuntansi'
+  | 'Daftar Purchase Order'
   | 'Master Kamar'
   | 'Master Produk'
   | 'Penerimaan Barang'

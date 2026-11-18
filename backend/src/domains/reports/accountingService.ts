@@ -65,6 +65,7 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
       CREATE TABLE IF NOT EXISTS accounting_fixed_assets (
         id SERIAL PRIMARY KEY,
         property_id INT NOT NULL DEFAULT 1,
+        asset_code VARCHAR(80) NULL,
         asset_name VARCHAR(180) NOT NULL,
         category VARCHAR(100) NOT NULL DEFAULT 'Peralatan',
         storage_location VARCHAR(160) NULL DEFAULT '-',
@@ -80,6 +81,8 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
 
       ALTER TABLE accounting_fixed_assets
         ADD COLUMN IF NOT EXISTS storage_location VARCHAR(160) NULL DEFAULT '-';
+      ALTER TABLE accounting_fixed_assets
+        ADD COLUMN IF NOT EXISTS asset_code VARCHAR(80) NULL;
 
       CREATE TABLE IF NOT EXISTS accounting_asset_categories (
         id SERIAL PRIMARY KEY,
@@ -131,20 +134,26 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
     );
   }
 
-  const defaultAssetCategories = [
-    'Peralatan',
-    'Elektronik',
-    'Furniture & Interior',
-    'Kendaraan',
-    'Bangunan & Renovasi',
-  ];
-  for (const cat of defaultAssetCategories) {
-    await pool.query(
-      `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
-       VALUES ($1, $2, TRUE)
-       ON CONFLICT (property_id, category_name) DO NOTHING`,
-      [propertyId, cat]
-    );
+  const catCountRes = await pool.query(
+    `SELECT COUNT(*)::int AS cnt FROM accounting_asset_categories WHERE property_id = $1`,
+    [propertyId]
+  );
+  if (Number(catCountRes.rows[0]?.cnt || 0) === 0) {
+    const defaultAssetCategories = [
+      'Peralatan',
+      'Elektronik',
+      'Furniture & Interior',
+      'Kendaraan',
+      'Bangunan & Renovasi',
+    ];
+    for (const cat of defaultAssetCategories) {
+      await pool.query(
+        `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
+         VALUES ($1, $2, FALSE)
+         ON CONFLICT (property_id, category_name) DO NOTHING`,
+        [propertyId, cat]
+      );
+    }
   }
 }
 
@@ -238,7 +247,9 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       [ctx.propertyId]
     ),
     pool.query(
-      `SELECT id, property_id, asset_name, category,
+      `SELECT id, property_id,
+              COALESCE(NULLIF(BTRIM(asset_code), ''), 'AST-' || LPAD(id::text, 4, '0')) AS asset_code,
+              asset_name, category,
               COALESCE(NULLIF(BTRIM(storage_location), ''), '-') AS storage_location,
               to_char(purchase_date, 'YYYY-MM-DD') AS purchase_date,
               purchase_price::numeric(16,2) AS purchase_price,
@@ -419,6 +430,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     return {
       id: Number(a.id),
       property_id: Number(a.property_id || ctx.propertyId),
+      asset_code: String(a.asset_code || `AST-${String(a.id).padStart(4, '0')}`),
       asset_name: String(a.asset_name || '-'),
       category: String(a.category || 'Peralatan'),
       storage_location: String(a.storage_location || '-'),

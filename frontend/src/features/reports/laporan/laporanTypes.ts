@@ -326,6 +326,7 @@ export interface InvestorTransferItem {
 export interface FixedAssetItem {
   id: number;
   property_id: number;
+  asset_code?: string;
   asset_name: string;
   category: string;
   storage_location?: string;

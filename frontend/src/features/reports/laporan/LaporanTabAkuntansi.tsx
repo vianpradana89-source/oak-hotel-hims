@@ -1067,10 +1067,10 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <table className="w-full text-xs">
                   <thead>
                     <tr className="bg-[#123524] text-white text-left">
-                      <th className="py-3 px-4 font-semibold">Nama Aset</th>
+                      <th className="py-3 px-4 font-semibold">Kode Aset</th>
                       <th className="py-3 px-4 font-semibold">Kategori</th>
+                      <th className="py-3 px-4 font-semibold">Nama Barang</th>
                       <th className="py-3 px-4 font-semibold">Lokasi Penyimpanan</th>
-                      <th className="py-3 px-4 font-semibold">Tanggal Beli</th>
                       <th className="py-3 px-4 font-semibold text-right">Harga Beli</th>
                       <th className="py-3 px-4 font-semibold text-right">Nilai Saat Ini</th>
                       <th className="py-3 px-4 font-semibold text-center">Depresiasi</th>
@@ -1081,16 +1081,21 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                   <tbody className="divide-y divide-slate-100">
                     {(subledger?.fixed_assets.items || []).map((asset) => (
                       <tr key={asset.id} className="hover:bg-emerald-50/30 transition">
-                        <td className="py-3 px-4 font-bold text-slate-900">{asset.asset_name}</td>
+                        <td className="py-3 px-4 font-mono text-[11px] font-bold text-[#123524]">
+                          {asset.asset_code || `AST-${String(asset.id).padStart(4, '0')}`}
+                          <div className="font-sans text-[10px] font-normal text-slate-400">
+                            {formatMediumDateId(asset.purchase_date)}
+                          </div>
+                        </td>
                         <td className="py-3 px-4">
                           <span className="px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 font-semibold text-[11px]">
                             {asset.category}
                           </span>
                         </td>
+                        <td className="py-3 px-4 font-bold text-slate-900">{asset.asset_name}</td>
                         <td className="py-3 px-4 font-medium text-slate-700">
                           {asset.storage_location || '-'}
                         </td>
-                        <td className="py-3 px-4 text-slate-600">{formatMediumDateId(asset.purchase_date)}</td>
                         <td className="py-3 px-4 text-right font-semibold text-slate-700">
                           {formatIdr(asset.purchase_price)}
                         </td>

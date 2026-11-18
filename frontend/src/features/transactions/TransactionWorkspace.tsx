@@ -68,11 +68,13 @@ interface TransactionWorkspaceProps {
   getPaymentBadgeClass?: (status: string) => string;
   onNavigateToReservation?: (reservationId: number) => void;
   onNavigateToInventory?: () => void;
+  onNavigateToPurchaseOrders?: () => void;
   onOpenQuickBooking?: () => void;
   // REALTIME-3B: parent-owned invalidation counter. Bumped on each
   // TransactionUpdated SSE event; the workspace refetches its canonical
   // transaction list without remounting or resetting local filters.
   realtimeRefreshVersion?: number;
+  mode?: 'DEFAULT' | 'STANDALONE_PO';
 }
 
 function formatTransactionBusinessDate(value: string | null | undefined): string {
@@ -98,9 +100,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   onViewReservationFolio,
   onNavigateToReservation,
   onNavigateToInventory,
+  onNavigateToPurchaseOrders,
   onOpenQuickBooking,
-  realtimeRefreshVersion
+  realtimeRefreshVersion,
+  mode = 'DEFAULT',
 }) => {
+  const isStandalonePo = mode === 'STANDALONE_PO';
   // Editor View Mode (null = table view, 'PURCHASE' | 'EXPENSE' | 'INCOME' = dedicated full editors)
   const [activeEditor, setActiveEditor] = useState<'PURCHASE' | 'EXPENSE' | 'INCOME' | null>(null);
   /** EDIT-1B: Store transaction id for edit mode */
@@ -2018,6 +2023,182 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     );
   }
 
+  if (isStandalonePo) {
+    return (
+      <div className="space-y-4">
+        {/* STANDALONE PURCHASE ORDER PAGE HEADER */}
+        <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm px-6 py-5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-emerald-800 font-bold mb-0.5">
+                Manajemen Pengadaan &amp; Pembelian
+              </div>
+              <div className="flex items-center gap-2.5">
+                <span className="w-2 h-2 rounded-full bg-emerald-600" />
+                <h1 className="text-xl font-bold text-slate-900 tracking-tight">
+                  Daftar Purchase Order (PO) &amp; Otorisasi Pengadaan
+                </h1>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Pengadaan baru wajib dimulai dari PO yang disetujui. Penerimaan barang (GRN) dan pencatatan tagihan/nota berjalan pada batas kuantitas kumulatif yang sama.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="relative">
+                <svg className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+                <input
+                  type="text"
+                  placeholder="Cari No. PO atau Supplier..."
+                  value={search}
+                  onChange={(e) => handleSearchChange(e.target.value)}
+                  className="w-56 text-xs bg-slate-50 border border-slate-200 rounded-xl pl-8 pr-7 py-2 text-slate-800 placeholder:text-slate-400 focus:outline-hidden focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 font-medium"
+                />
+                {search && (
+                  <button
+                    type="button"
+                    onClick={handleClearSearch}
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 cursor-pointer"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowVendorSupplierMaster(true)}
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
+                title="Buka direktori master vendor & supplier"
+              >
+                <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+                <span>Vendor &amp; Supplier</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialPoIdForInvoice(null);
+                  setActiveEditor('PURCHASE');
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-sm cursor-pointer"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>+ Catat Tagihan / Nota PO</span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {showVendorSupplierMaster ? (
+          <VendorSupplierMasterPage
+            propertyId={propertyId}
+            currentStaffName={currentStaffName}
+            onBack={() => setShowVendorSupplierMaster(false)}
+          />
+        ) : (
+          <ProcurementPoSection
+            propertyId={propertyId}
+            currentStaffName={currentStaffName}
+            searchQuery={search}
+            refreshTrigger={poRefreshTrigger}
+            showCreateModalExternal={showCreatePoModal}
+            onClearShowCreateModalExternal={() => setShowCreatePoModal(false)}
+            onOpenReceiveGoodsForPo={(po) => {
+              try {
+                sessionStorage.setItem('oak_hims_pending_grn_po_id', String(po.id));
+              } catch { /* ignore */ }
+              if (onNavigateToInventory) onNavigateToInventory();
+            }}
+            onOpenViewReceiptsForPo={(po) => {
+              try {
+                sessionStorage.setItem('oak_hims_pending_grn_search', String(po.po_number));
+              } catch { /* ignore */ }
+              if (onNavigateToInventory) onNavigateToInventory();
+            }}
+            onOpenCreateInvoiceForPo={(po) => {
+              setInitialPoIdForInvoice(po.id);
+              setActiveEditor('PURCHASE');
+            }}
+            onOpenInvoiceDetailDrawer={(txId) => openDetailDrawer(txId)}
+            onOpenVendorSupplierMaster={() => setShowVendorSupplierMaster(true)}
+            onRefreshParentTransactions={() => loadTransactions()}
+          />
+        )}
+
+        <TransactionDetailDrawer
+          isOpen={detailDrawerOpen}
+          transactionId={selectedTxIdForDetail}
+          propertyId={propertyId}
+          currentStaffName={currentStaffName}
+          currentUserId={currentUserId}
+          onClose={() => {
+            setDetailDrawerOpen(false);
+            setSelectedTxIdForDetail(null);
+          }}
+          onEditPurchase={(tx) => {
+            setDetailDrawerOpen(false);
+            openPurchaseEditor(tx);
+          }}
+          onEditExpense={(tx) => {
+            setDetailDrawerOpen(false);
+            openExpenseEditor(tx);
+          }}
+          onOpenVoidModal={(tx) => {
+            setDetailDrawerOpen(false);
+            openVoidModal(tx);
+          }}
+          onOpenSoftDeleteModal={(tx) => {
+            setDetailDrawerOpen(false);
+            openSoftDeleteModal(tx);
+          }}
+          onNavigateToReservation={(resId) => {
+            setDetailDrawerOpen(false);
+            if (onNavigateToReservation) onNavigateToReservation(resId);
+          }}
+          onNavigateToFolio={(resId) => {
+            setDetailDrawerOpen(false);
+            if (onViewReservationFolio) {
+              onViewReservationFolio({ id: resId });
+            } else if (onNavigateToReservation) {
+              onNavigateToReservation(resId);
+            }
+          }}
+          onTransactionUpdated={() => {
+            loadTransactions();
+            void loadDailyCards();
+            setPoRefreshTrigger((prev) => prev + 1);
+          }}
+          onNavigateToInventory={onNavigateToInventory}
+        />
+
+        <VoidTransactionModal
+          isOpen={voidModalOpen}
+          propertyId={propertyId}
+          transaction={selectedTxForVoid}
+          currentStaffName={currentStaffName}
+          onClose={() => {
+            setVoidModalOpen(false);
+            setSelectedTxForVoid(null);
+          }}
+          onSuccess={() => {
+            loadTransactions();
+            void loadDailyCards();
+            setPoRefreshTrigger((prev) => prev + 1);
+          }}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       {/* 1. PAGE HEADER */}
@@ -2281,35 +2462,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         />
       ) : (
         <div className="space-y-4">
-        {activeTab === 'PURCHASE' && (
-          <ProcurementPoSection
-            propertyId={propertyId}
-            currentStaffName={currentStaffName}
-            searchQuery={search}
-            refreshTrigger={poRefreshTrigger}
-            showCreateModalExternal={showCreatePoModal}
-            onClearShowCreateModalExternal={() => setShowCreatePoModal(false)}
-            onOpenReceiveGoodsForPo={(po) => {
-              try {
-                sessionStorage.setItem('oak_hims_pending_grn_po_id', String(po.id));
-              } catch { /* ignore */ }
-              if (onNavigateToInventory) onNavigateToInventory();
-            }}
-            onOpenViewReceiptsForPo={(po) => {
-              try {
-                sessionStorage.setItem('oak_hims_pending_grn_search', String(po.po_number));
-              } catch { /* ignore */ }
-              if (onNavigateToInventory) onNavigateToInventory();
-            }}
-            onOpenCreateInvoiceForPo={(po) => {
-              setInitialPoIdForInvoice(po.id);
-              setActiveEditor('PURCHASE');
-            }}
-            onOpenInvoiceDetailDrawer={(txId) => openDetailDrawer(txId)}
-            onOpenVendorSupplierMaster={() => setShowVendorSupplierMaster(true)}
-            onRefreshParentTransactions={() => loadTransactions()}
-          />
-        )}
         {/* Main Table Workspace */}
         <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm overflow-hidden">
         {/* Toolbar & Filters */}
@@ -2382,15 +2534,17 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <div className="flex items-center gap-2 shrink-0 ml-auto">
               {activeTab === 'PURCHASE' && (
                 <>
-                  <button
-                    onClick={() => setShowCreatePoModal(true)}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-all shadow-sm cursor-pointer"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                    </svg>
-                    <span>+ Buat PO</span>
-                  </button>
+                  {onNavigateToPurchaseOrders && (
+                    <button
+                      onClick={() => onNavigateToPurchaseOrders()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-all shadow-2xs cursor-pointer"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      <span>Daftar Purchase Order (PO)</span>
+                    </button>
+                  )}
                   <button
                     onClick={() => {
                       setInitialPoIdForInvoice(null);

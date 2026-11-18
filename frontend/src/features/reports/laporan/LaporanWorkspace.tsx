@@ -55,7 +55,6 @@ const TABS: { key: LaporanTabKey; label: string; icon: React.ReactNode }[] = [
   { key: 'pemasukan', label: 'Pemasukan', icon: <IconTrendingUp className="w-3.5 h-3.5" /> },
   { key: 'pengeluaran', label: 'Pengeluaran', icon: <IconTrendingDown className="w-3.5 h-3.5" /> },
   { key: 'metode_bayar', label: 'Metode Bayar', icon: <IconCreditCard className="w-3.5 h-3.5" /> },
-  { key: 'akuntansi', label: 'Akuntansi', icon: <IconScale className="w-3.5 h-3.5" /> },
 ];
 
 const KESELURUHAN_SUBVIEW_OPTIONS: {
@@ -114,10 +113,17 @@ const KINERJA_SUBVIEW_OPTIONS: {
 
 export interface LaporanWorkspaceProps {
   propertyId: number | null;
+  mode?: 'LAPORAN' | 'AKUNTANSI';
 }
 
-export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }) => {
-  const [activeTab, setActiveTab] = useState<LaporanTabKey>('keseluruhan');
+export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({
+  propertyId,
+  mode = 'LAPORAN',
+}) => {
+  const isAkuntansiOnly = mode === 'AKUNTANSI';
+  const [activeTab, setActiveTab] = useState<LaporanTabKey>(
+    isAkuntansiOnly ? 'akuntansi' : 'keseluruhan'
+  );
   const [keseluruhanSubView, setKeseluruhanSubView] = useState<KeseluruhanSubView>('ringkasan');
   const [kinerjaSubView, setKinerjaSubView] = useState<OccupancySubView>('all');
   const [penjualanSubView, setPenjualanSubView] =
@@ -177,8 +183,10 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
     downloadExportXml(`Laporan_HIMS_${range.start}_sd_${range.end}.xls`, sheets);
   };
 
+  const effectiveTab: LaporanTabKey = isAkuntansiOnly ? 'akuntansi' : activeTab;
+
   const renderFilterLeftSlot = () => {
-    if (activeTab === 'keseluruhan') {
+    if (effectiveTab === 'keseluruhan') {
       return (
         <LaporanDropdown<KeseluruhanSubView>
           value={keseluruhanSubView}
@@ -188,7 +196,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         />
       );
     }
-    if (activeTab === 'kinerja_kamar') {
+    if (effectiveTab === 'kinerja_kamar') {
       return (
         <LaporanDropdown<OccupancySubView>
           value={kinerjaSubView}
@@ -198,7 +206,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         />
       );
     }
-    if (activeTab === 'penjualan') {
+    if (effectiveTab === 'penjualan') {
       return (
         <LaporanDropdown<SalesReportMode>
           value={penjualanSubView}
@@ -208,7 +216,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         />
       );
     }
-    if (activeTab === 'akuntansi') {
+    if (effectiveTab === 'akuntansi') {
       return (
         <LaporanDropdown<AkuntansiSubView>
           value={akuntansiSubView}
@@ -222,7 +230,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
   };
 
   const renderTab = () => {
-    switch (activeTab) {
+    switch (effectiveTab) {
       case 'keseluruhan':
         return (
           <LaporanTabKeseluruhan
@@ -325,9 +333,13 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <div className="text-xs uppercase tracking-wider text-emerald-800 font-bold">
-            Laporan & Analitik Operasional
+            {isAkuntansiOnly
+              ? 'Keuangan & Akuntansi Terpadu'
+              : 'Laporan & Analitik Operasional'}
           </div>
-          <h3 className="text-xl font-bold text-gray-900 mt-0.5">Laporan</h3>
+          <h3 className="text-xl font-bold text-gray-900 mt-0.5">
+            {isAkuntansiOnly ? 'Akuntansi' : 'Laporan'}
+          </h3>
           <p className="text-xs text-gray-500 mt-1">
             {range
               ? formatInclusiveRangeDisplay(range.start, range.end)
@@ -348,24 +360,26 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({ propertyId }
         </div>
       </div>
 
-      {/* Tab bar with Lucide SVG Icons */}
-      <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80">
-        {TABS.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            onClick={() => handleSelectTab(t.key)}
-            className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
-              activeTab === t.key
-                ? 'bg-emerald-900 text-white shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 hover:bg-white/70'
-            }`}
-          >
-            <span>{t.icon}</span>
-            <span>{t.label}</span>
-          </button>
-        ))}
-      </div>
+      {/* Tab bar with Lucide SVG Icons (hidden in standalone Akuntansi mode) */}
+      {!isAkuntansiOnly && (
+        <div className="flex flex-wrap items-center gap-1.5 bg-slate-100 p-1.5 rounded-xl border border-slate-200/80">
+          {TABS.map((t) => (
+            <button
+              key={t.key}
+              type="button"
+              onClick={() => handleSelectTab(t.key)}
+              className={`px-3.5 py-2 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 cursor-pointer ${
+                effectiveTab === t.key
+                  ? 'bg-emerald-900 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-white/70'
+              }`}
+            >
+              <span>{t.icon}</span>
+              <span>{t.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Global period filter + Left Mode Selector */}
       <LaporanPeriodFilter

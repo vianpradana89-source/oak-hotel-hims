@@ -140,6 +140,19 @@ export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, 
       effective['Produk & Inventori']?.view?.allowed === true
     );
   }
+  if (menuKey === 'Daftar Purchase Order') {
+    return (
+      effective['Transaksi']?.view?.allowed === true ||
+      effective['Master Produk']?.view?.allowed === true ||
+      effective['Produk & Inventori']?.view?.allowed === true
+    );
+  }
+  if (menuKey === 'Akuntansi') {
+    return (
+      effective['Laporan']?.view?.allowed === true ||
+      effective['Transaksi']?.view?.allowed === true
+    );
+  }
   return effective[menuKey]?.view?.allowed === true;
 }
 

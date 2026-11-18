@@ -2067,6 +2067,7 @@ export function createReportsRouter(pool: Pool): Router {
     try {
       const propertyId = parsePositiveInt(req.body.property_id) || 1;
       await ensureAccountingSchema(pool, propertyId);
+      const assetCode = req.body.asset_code ? String(req.body.asset_code).trim() || null : null;
       const assetName = String(req.body.asset_name || '').trim();
       const category = String(req.body.category || 'Peralatan').trim();
       const storageLocation = String(req.body.storage_location || '-').trim() || '-';
@@ -2082,7 +2083,7 @@ export function createReportsRouter(pool: Pool): Router {
       const status = String(req.body.status || 'ACTIVE').toUpperCase();
       const notes = req.body.notes ? String(req.body.notes).trim() : null;
       if (!assetName) {
-        return res.status(400).json({ status: 'ERROR', message: 'Nama aset wajib diisi' });
+        return res.status(400).json({ status: 'ERROR', message: 'Nama barang wajib diisi' });
       }
       await pool.query(
         `INSERT INTO accounting_asset_categories (property_id, category_name, is_system)
@@ -2092,11 +2093,12 @@ export function createReportsRouter(pool: Pool): Router {
       );
       const r = await pool.query(
         `INSERT INTO accounting_fixed_assets
-           (property_id, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+           (property_id, asset_code, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
          RETURNING *`,
         [
           propertyId,
+          assetCode,
           assetName,
           category,
           storageLocation,
@@ -2126,6 +2128,7 @@ export function createReportsRouter(pool: Pool): Router {
       for (const item of items) {
         const assetName = String(item.asset_name || '').trim();
         if (!assetName) continue;
+        const assetCode = item.asset_code ? String(item.asset_code).trim() || null : null;
         const category = String(item.category || 'Peralatan').trim() || 'Peralatan';
         const storageLocation = String(item.storage_location || '-').trim() || '-';
         const purchaseDate = item.purchase_date
@@ -2147,10 +2150,11 @@ export function createReportsRouter(pool: Pool): Router {
         );
         await pool.query(
           `INSERT INTO accounting_fixed_assets
-             (property_id, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'ACTIVE', $9, NOW())`,
+             (property_id, asset_code, asset_name, category, storage_location, purchase_date, purchase_price, current_value, depreciation_rate, status, notes, updated_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ACTIVE', $10, NOW())`,
           [
             propertyId,
+            assetCode,
             assetName,
             category,
             storageLocation,
@@ -2193,9 +2197,15 @@ export function createReportsRouter(pool: Pool): Router {
   router.delete('/accounting/asset-categories/:id', async (req: Request, res: Response) => {
     try {
       const id = parsePositiveInt(req.params.id);
-      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID kategori tidak valid' });
+      const nameParam = req.query.name ? String(req.query.name).trim() : '';
       await ensureAccountingSchema(pool, 1);
-      await pool.query(`DELETE FROM accounting_asset_categories WHERE id = $1`, [id]);
+      if (id && id > 0) {
+        await pool.query(`DELETE FROM accounting_asset_categories WHERE id = $1`, [id]);
+      } else if (nameParam) {
+        await pool.query(`DELETE FROM accounting_asset_categories WHERE category_name = $1`, [nameParam]);
+      } else {
+        return res.status(400).json({ status: 'ERROR', message: 'ID atau nama kategori tidak valid' });
+      }
       return res.json({ status: 'SUCCESS' });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus kategori aset' });
