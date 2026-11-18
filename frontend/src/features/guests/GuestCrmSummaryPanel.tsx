@@ -3,6 +3,8 @@ import {
   AlertTriangle,
   Cake,
   Clock,
+  Globe2,
+  MapPin,
   MessageCircle,
   SlidersHorizontal,
   Users,
@@ -27,6 +29,7 @@ interface GuestCrmSummaryPanelProps {
   onOpenDuplicateReview: () => void;
   duplicateCount: number;
   onOpenWaTemplateModal: (target: 'birthday' | 'followup' | 'database') => void;
+  onQuickFilterDatabase?: (query: string) => void;
 }
 
 function normalizeWaPhone(raw: string | null | undefined): string | null {
@@ -53,7 +56,30 @@ function formatIndoShortDate(dateStr: string | null | undefined): string {
   if (parts.length !== 3) return clean;
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
   const mIdx = Number(parts[1]) - 1;
+  const yearNum = Number(parts[0]);
+  if (!Number.isFinite(yearNum) || yearNum < 1915 || yearNum > 2100) {
+    return `${parts[2]} ${months[mIdx] || parts[1]}`;
+  }
   return `${parts[2]} ${months[mIdx] || parts[1]} ${parts[0]}`;
+}
+
+export function computeGuestTurningAge(
+  birthDateStr: string | null | undefined,
+  referenceDateStr?: string | null
+): number | null {
+  if (!birthDateStr) return null;
+  const clean = String(birthDateStr).slice(0, 10);
+  const parts = clean.split('-');
+  if (parts.length !== 3) return null;
+  const birthYear = Number(parts[0]);
+  const refYear = referenceDateStr
+    ? Number(String(referenceDateStr).slice(0, 4))
+    : new Date().getFullYear();
+  if (!Number.isFinite(birthYear) || !Number.isFinite(refYear)) return null;
+  if (birthYear < 1915 || birthYear >= refYear) return null;
+  const age = refYear - birthYear;
+  if (age < 1 || age > 110) return null;
+  return age;
 }
 
 export function renderWaTemplate(
@@ -64,11 +90,32 @@ export function renderWaTemplate(
     terakhir?: string;
     total?: string;
     ulangtahun?: string;
+    umur?: string | number | null;
   }
 ): string {
-  return String(template || '')
+  let out = String(template || '');
+  const validAge =
+    vars.umur !== undefined && vars.umur !== null && String(vars.umur).trim() !== ''
+      ? String(vars.umur).trim()
+      : null;
+
+  if (validAge) {
+    if (/\{umur\}/i.test(out)) {
+      out = out.replace(/\{umur\}/gi, validAge);
+    } else if (/selamat ulang tahun/i.test(out)) {
+      out = out.replace(/selamat ulang tahun/i, `Selamat ulang tahun ke-${validAge}`);
+    }
+  } else {
+    out = out
+      .replace(/\s+yang\s+ke-\{umur\}(\s*tahun|\s*thn)?/gi, '')
+      .replace(/\s+ke-\{umur\}(\s*tahun|\s*thn)?/gi, '')
+      .replace(/\{umur\}/gi, '');
+  }
+
+  return out
     .replace(/\{nama\}/gi, vars.nama || 'Pelanggan')
     .replace(/\{toko\}/gi, vars.toko || 'OAK Hotel Lawang')
+    .replace(/\{hotel\}/gi, vars.toko || 'OAK Hotel Lawang')
     .replace(/\{terakhir\}/gi, vars.terakhir || '-')
     .replace(/\{total\}/gi, vars.total || 'Rp 0')
     .replace(/\{ulangtahun\}/gi, vars.ulangtahun || '-');
@@ -83,6 +130,7 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
   onOpenDuplicateReview,
   duplicateCount,
   onOpenWaTemplateModal,
+  onQuickFilterDatabase,
 }) => {
   const [followUpDays, setFollowUpDays] = useState<number>(
     loyaltySettings?.followup_threshold_days || 90
@@ -123,13 +171,15 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
   const handleSendBirthdayWa = (item: GuestCrmBirthdayItem) => {
     const wa = normalizeWaPhone(item.phone);
     if (!wa) return;
+    const turningAge = computeGuestTurningAge(item.birth_date, summary.hotel_date);
     const tpl =
       loyaltySettings?.wa_birthday_message ||
-      'Selamat ulang tahun {nama}! 🎉 Ada hadiah spesial dari {toko} untuk Anda.';
+      'Selamat ulang tahun ke-{umur} {nama}! 🎉 Semoga sehat, bahagia, dan sukses selalu. Ada hadiah spesial dari {toko} untuk Anda.';
     const text = renderWaTemplate(tpl, {
       nama: item.full_name,
       toko: propertyName,
       ulangtahun: formatIndoShortDate(item.birth_date),
+      umur: turningAge,
     });
     window.open(`https://wa.me/${wa}?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
   };
@@ -290,6 +340,7 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
             ) : (
               summary.birthdays_this_month.map((item) => {
                 const hasWa = Boolean(normalizeWaPhone(item.phone));
+                const turningAge = computeGuestTurningAge(item.birth_date, summary.hotel_date);
                 return (
                   <div
                     key={item.id}
@@ -300,10 +351,15 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
                       onClick={() => onSelectGuest(item.id)}
                       className="min-w-0 text-left flex-1 cursor-pointer group"
                     >
-                      <div className="flex items-center space-x-1.5">
+                      <div className="flex items-center flex-wrap gap-1.5">
                         <p className="text-xs font-semibold text-stone-900 group-hover:text-[#1E392A] truncate">
                           {item.full_name}
                         </p>
+                        {turningAge !== null && (
+                          <span className="px-1.5 py-0.5 text-[10px] font-bold rounded-md bg-blue-50 text-blue-700 border border-blue-200/80">
+                            Ke-{turningAge} Thn
+                          </span>
+                        )}
                         {item.vip_status !== 'STANDARD' && (
                           <span className="px-1.5 py-0.2 text-[9px] font-bold rounded bg-amber-100 text-amber-800">
                             {item.vip_status}
@@ -312,6 +368,7 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
                       </div>
                       <p className="text-[11px] text-stone-400 mt-0.5">
                         {formatIndoShortDate(item.birth_date)}
+                        {turningAge !== null ? ` · Umur ${turningAge} tahun` : ''}
                         {item.phone ? ` · ${item.phone}` : ''}
                       </p>
                     </button>
@@ -325,7 +382,11 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
                           ? 'bg-[#FAF8F3] hover:bg-[#F1EDE2] text-stone-800 border-[#E6DFC8] shadow-2xs cursor-pointer'
                           : 'bg-stone-100 text-stone-400 border-stone-200 cursor-not-allowed opacity-60'
                       }`}
-                      title={hasWa ? `Kirim ucapan ulang tahun ke ${item.full_name}` : 'Nomor telepon tidak tersedia'}
+                      title={
+                        hasWa
+                          ? `Kirim ucapan ulang tahun${turningAge ? ` ke-${turningAge}` : ''} ke ${item.full_name}`
+                          : 'Nomor telepon tidak tersedia'
+                      }
                     >
                       <MessageCircle className="w-3.5 h-3.5 text-stone-700" />
                       <span>Ucapkan</span>
@@ -423,6 +484,154 @@ export const GuestCrmSummaryPanel: React.FC<GuestCrmSummaryPanelProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Demographics Dashboard: Laporan Kota Asal Tamu & WNI vs WNA */}
+      {summary.demographics && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">
+          {/* WNI vs WNA Breakdown (5 cols) */}
+          <div className="lg:col-span-5 bg-white border border-stone-200 rounded-2xl shadow-xs p-5 flex flex-col justify-between">
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center space-x-2">
+                  <Globe2 className="w-4 h-4 text-[#1E392A]" />
+                  <h3 className="text-sm font-bold text-stone-900">
+                    Kewarganegaraan Tamu (WNI vs WNA)
+                  </h3>
+                </div>
+                <span className="text-[11px] font-medium text-stone-400">
+                  Total {(summary.demographics.wni_count + summary.demographics.wna_count).toLocaleString('id-ID')} Tamu
+                </span>
+              </div>
+
+              {/* Stacked Progress Bar */}
+              <div className="w-full h-3.5 bg-stone-100 rounded-full overflow-hidden flex border border-stone-200/70 mb-4">
+                <div
+                  style={{ width: `${Math.max(summary.demographics.wni_pct, summary.demographics.wni_count > 0 ? 4 : 0)}%` }}
+                  className="bg-[#1E392A] h-full transition-all"
+                  title={`WNI: ${summary.demographics.wni_count} (${summary.demographics.wni_pct}%)`}
+                />
+                <div
+                  style={{ width: `${Math.max(summary.demographics.wna_pct, summary.demographics.wna_count > 0 ? 4 : 0)}%` }}
+                  className="bg-amber-600 h-full transition-all"
+                  title={`WNA: ${summary.demographics.wna_count} (${summary.demographics.wna_pct}%)`}
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => onQuickFilterDatabase?.('WNI')}
+                  className="text-left p-3.5 rounded-xl bg-[#FAF8F3] hover:bg-[#F1EDE2] border border-[#E6DFC8] transition-colors cursor-pointer group"
+                  title="Klik untuk memfilter tamu WNI di tabel bawah"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-[#1E392A]">
+                      <span className="w-2.5 h-2.5 rounded-full bg-[#1E392A]" />
+                      WNI (Domestik)
+                    </span>
+                    <span className="text-[11px] font-bold text-emerald-800 bg-emerald-100/80 px-2 py-0.5 rounded-full">
+                      {summary.demographics.wni_pct}%
+                    </span>
+                  </div>
+                  <p className="text-2xl font-bold text-stone-900 mt-1.5">
+                    {summary.demographics.wni_count.toLocaleString('id-ID')}
+                  </p>
+                  <p className="text-[11px] text-stone-500 mt-0.5 group-hover:text-[#1E392A]">
+                    Warga Negara Indonesia
+                  </p>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => onQuickFilterDatabase?.('WNA')}
+                  className="text-left p-3.5 rounded-xl bg-[#FAF8F3] hover:bg-[#F1EDE2] border border-[#E6DFC8] transition-colors cursor-pointer group"
+                  title="Klik untuk memfilter tamu WNA di tabel bawah"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="inline-flex items-center gap-1.5 text-xs font-bold text-amber-900">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-600" />
+                      WNA (Asing)
+                    </span>
+                    <span className="text-[11px] font-bold text-amber-900 bg-amber-100 px-2 py-0.5 rounded-full">
+                      {summary.demographics.wna_pct}%
+                    </span>
+                  </div>
+                  <p className="text-2xl font-bold text-stone-900 mt-1.5">
+                    {summary.demographics.wna_count.toLocaleString('id-ID')}
+                  </p>
+                  <p className="text-[11px] text-stone-500 mt-0.5 group-hover:text-amber-800">
+                    Warga Negara Asing
+                  </p>
+                </button>
+              </div>
+            </div>
+
+            <p className="text-[11px] text-stone-400 mt-3 pt-2.5 border-t border-stone-100">
+              Klik kartu WNI atau WNA untuk memfilter daftar tamu di tabel Database Pelanggan.
+            </p>
+          </div>
+
+          {/* Top Cities Breakdown (7 cols) */}
+          <div className="lg:col-span-7 bg-white border border-stone-200 rounded-2xl shadow-xs p-5 flex flex-col">
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="flex items-center space-x-2">
+                <MapPin className="w-4 h-4 text-[#1E392A]" />
+                <h3 className="text-sm font-bold text-stone-900">
+                  Laporan Asal Kota / Daerah Tamu
+                </h3>
+              </div>
+              <span className="text-[11px] text-stone-500">
+                Teridentifikasi: <strong>{summary.demographics.known_city_guests}</strong> tamu
+                {summary.demographics.unknown_city_guests > 0
+                  ? ` · Belum diisi: ${summary.demographics.unknown_city_guests}`
+                  : ''}
+              </span>
+            </div>
+
+            {summary.demographics.top_cities.length === 0 ? (
+              <div className="flex-1 flex items-center justify-center py-8 text-center text-xs text-stone-400">
+                Belum ada data kota asal tamu yang tercatat. Isi Kota/Kabupaten saat verifikasi KTP atau edit profil tamu.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-5 gap-y-2.5 max-h-56 overflow-y-auto pr-1">
+                {summary.demographics.top_cities.map((c, idx) => {
+                  const maxCount = Math.max(1, summary.demographics?.top_cities[0]?.guest_count || 1);
+                  const barWidth = Math.max(8, Math.round((c.guest_count / maxCount) * 100));
+                  return (
+                    <button
+                      key={c.city}
+                      type="button"
+                      onClick={() => onQuickFilterDatabase?.(c.city)}
+                      className="text-left p-2 rounded-xl hover:bg-stone-50 border border-transparent hover:border-stone-200 transition-all cursor-pointer group"
+                      title={`Klik untuk melihat tamu dari ${c.city}`}
+                    >
+                      <div className="flex items-center justify-between text-xs mb-1">
+                        <span className="font-semibold text-stone-800 group-hover:text-[#1E392A] truncate">
+                          {idx + 1}. {c.city}
+                        </span>
+                        <span className="text-[11px] font-bold text-stone-700 shrink-0 ml-2">
+                          {c.guest_count} tamu ({c.pct}%)
+                        </span>
+                      </div>
+                      <div className="w-full h-2 bg-stone-100 rounded-full overflow-hidden">
+                        <div
+                          style={{ width: `${barWidth}%` }}
+                          className="h-full bg-[#1E392A] rounded-full transition-all"
+                        />
+                      </div>
+                      {c.total_spend > 0 && (
+                        <p className="text-[10px] text-stone-400 mt-0.5">
+                          Kontribusi transaksi: {formatRupiah(c.total_spend)}
+                        </p>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

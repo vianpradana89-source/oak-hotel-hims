@@ -94,7 +94,11 @@ export function filterGuestsBySearch(guests: Guest[], query: string): Guest[] {
     const prefMatch = g.preferred_name?.toLowerCase().includes(q);
     const phoneMatch = g.phone?.toLowerCase().includes(q);
     const emailMatch = g.email?.toLowerCase().includes(q);
-    return Boolean(nameMatch || prefMatch || phoneMatch || emailMatch);
+    const nikMatch = g.identity_number?.toLowerCase().includes(q);
+    const cityMatch = g.city?.toLowerCase().includes(q) || g.birth_place?.toLowerCase().includes(q);
+    const citVal = (g.citizenship || g.nationality || 'WNI').toLowerCase();
+    const citMatch = citVal.includes(q);
+    return Boolean(nameMatch || prefMatch || phoneMatch || emailMatch || nikMatch || cityMatch || citMatch);
   });
 }
 

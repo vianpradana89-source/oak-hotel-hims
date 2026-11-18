@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Crown,
   Download,
@@ -20,7 +20,8 @@ import {
   filterGuestsBySearch,
   deriveBehavioralSegment,
 } from './guestCrmHelpers';
-import { renderWaTemplate } from './GuestCrmSummaryPanel';
+import { computeGuestTurningAge, renderWaTemplate } from './GuestCrmSummaryPanel';
+import { buildXlsxBytes } from '../products/productExcelUtils';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestDatabaseTableProps {
@@ -30,6 +31,7 @@ interface GuestDatabaseTableProps {
   loading: boolean;
   hotelDate: string;
   loyaltySettings?: PropertyLoyaltySettings | null;
+  externalSearchQuery?: string;
   onSelectGuest: (guestId: number) => void;
   onEditGuest: (guest: Guest) => void;
   onCreateGuest: () => void;
@@ -73,6 +75,7 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
   loading,
   hotelDate,
   loyaltySettings,
+  externalSearchQuery,
   onSelectGuest,
   onEditGuest,
   onCreateGuest,
@@ -84,6 +87,14 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
   const [sortBy, setSortBy] = useState<SortOption>('SPEND_DESC');
   const [page, setPage] = useState<number>(1);
   const pageSize = 25;
+
+  useEffect(() => {
+    if (externalSearchQuery !== undefined && externalSearchQuery !== '') {
+      setSearch(externalSearchQuery);
+      setSegment('SEMUA');
+      setPage(1);
+    }
+  }, [externalSearchQuery]);
 
   // Manual merge state
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -192,14 +203,17 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
     window.open(`https://wa.me/${wa}?text=${encodeURIComponent(text)}`, '_blank', 'noopener,noreferrer');
   };
 
-  const handleExportCsv = () => {
+  const handleExportXlsx = () => {
     const headers = [
       'Kode Tamu',
       'Nama Lengkap',
-      'Telepon',
+      'Kewarganegaraan',
+      'Kota / Daerah Asal',
+      'Telepon / WhatsApp',
       'Email',
       'NIK / Identitas',
-      'Kota',
+      'Tanggal Lahir',
+      'Umur (Thn)',
       'Status VIP',
       'Tier Loyalitas',
       'Total Kunjungan',
@@ -208,30 +222,44 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
       'Poin Loyalitas Aktif',
       'Stay Terakhir',
     ];
-    const rows = filteredGuests.map((g) => [
-      g.guest_code || `GST-${String(g.id).padStart(5, '0')}`,
-      `"${String(g.full_name || '').replace(/"/g, '""')}"`,
-      `"${String(g.phone || '').replace(/"/g, '""')}"`,
-      `"${String(g.email || '').replace(/"/g, '""')}"`,
-      `"${String(g.identity_number || '').replace(/"/g, '""')}"`,
-      `"${String(g.city || '').replace(/"/g, '""')}"`,
-      g.vip_status || 'STANDARD',
-      g.loyalty_tier_name || g.loyalty_tier || 'Bronze',
-      Number(g.visit_count || 0),
-      Number(g.room_nights || 0),
-      Math.round(Number(g.total_spend || 0)),
-      Number(g.loyalty_points || 0),
-      g.last_stay || '',
-    ]);
-    const csvContent =
-      '\uFEFF' + [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const rows = filteredGuests.map((g) => {
+      const age = computeGuestTurningAge(g.birth_date, hotelDate);
+      const rawCit = (g.citizenship || g.nationality || 'WNI').trim().toUpperCase();
+      const citLabel =
+        rawCit === 'WNA' || (rawCit !== '' && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(rawCit))
+          ? 'WNA'
+          : 'WNI';
+      return [
+        g.guest_code || `GST-${String(g.id).padStart(5, '0')}`,
+        String(g.full_name || ''),
+        citLabel,
+        String(g.city || g.birth_place || ''),
+        String(g.phone || ''),
+        String(g.email || ''),
+        String(g.identity_number || ''),
+        g.birth_date ? String(g.birth_date).slice(0, 10) : '',
+        age !== null ? age : '',
+        g.vip_status || 'STANDARD',
+        g.loyalty_tier_name || g.loyalty_tier || 'Bronze',
+        Number(g.visit_count || 0),
+        Number(g.room_nights || 0),
+        Math.round(Number(g.total_spend || 0)),
+        Number(g.loyalty_points || 0),
+        g.last_stay || '',
+      ];
+    });
+    const bytes = buildXlsxBytes('Database Pelanggan CRM', [headers, ...rows]);
+    const blob = new Blob([bytes as unknown as BlobPart], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `Database-Pelanggan-CRM-${hotelDate}.csv`;
+    a.download = `Database_Pelanggan_CRM_${hotelDate}.xlsx`;
+    document.body.appendChild(a);
     a.click();
-    URL.revokeObjectURL(url);
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   };
 
   return (
@@ -267,11 +295,11 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
           )}
           <button
             type="button"
-            onClick={handleExportCsv}
+            onClick={handleExportXlsx}
             className="px-3 py-1.5 bg-stone-100 hover:bg-stone-200 text-stone-700 text-xs font-semibold rounded-lg transition-colors border border-stone-200 flex items-center gap-1.5 cursor-pointer"
           >
             <Download className="w-3.5 h-3.5" />
-            <span>Export CSV</span>
+            <span>Export XLSX</span>
           </button>
           <button
             type="button"
@@ -457,13 +485,21 @@ export const GuestDatabaseTable: React.FC<GuestDatabaseTableProps> = ({
                       />
                     </td>
 
-                    {/* Pelanggan (Name + Phone below, matching Gambar 4) */}
+                    {/* Pelanggan (Name + Phone + City/Citizenship below, matching Gambar 4) */}
                     <td className="py-3.5 px-4">
-                      <div className="font-semibold text-stone-900 group-hover:text-[#1E392A] transition-colors">
-                        {guest.full_name}
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-semibold text-stone-900 group-hover:text-[#1E392A] transition-colors">
+                          {guest.full_name}
+                        </span>
+                        {guest.citizenship === 'WNA' && (
+                          <span className="px-1.5 py-0.5 text-[9px] font-bold rounded bg-amber-100 text-amber-900">
+                            WNA
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] text-stone-400 mt-0.5">
                         {guest.phone || guest.email || guest.guest_code || `#${guest.id}`}
+                        {guest.city ? ` · ${guest.city}` : ''}
                       </div>
                     </td>
 

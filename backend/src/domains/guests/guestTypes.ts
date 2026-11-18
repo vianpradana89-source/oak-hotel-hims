@@ -302,6 +302,23 @@ export interface GuestCrmFollowUpItem {
   total_spend?: number;
 }
 
+export interface GuestCrmCityStat {
+  city: string;
+  guest_count: number;
+  pct: number;
+  total_spend: number;
+}
+
+export interface GuestCrmDemographics {
+  wni_count: number;
+  wna_count: number;
+  wni_pct: number;
+  wna_pct: number;
+  known_city_guests: number;
+  unknown_city_guests: number;
+  top_cities: GuestCrmCityStat[];
+}
+
 export interface GuestCrmSummary {
   property_id: number;
   hotel_date: string;
@@ -317,6 +334,7 @@ export interface GuestCrmSummary {
   avg_customer_ltv?: number;
   birthdays_this_month: GuestCrmBirthdayItem[];
   follow_up_candidates: GuestCrmFollowUpItem[];
+  demographics?: GuestCrmDemographics;
 }
 
 export interface DuplicateCandidateCluster {

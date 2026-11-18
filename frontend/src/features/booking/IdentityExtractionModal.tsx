@@ -503,7 +503,9 @@ export default function IdentityExtractionModal({
       // Always initialize form & extractedData immediately on open (no intermediate chooser step)
       const d = initialIdentityData;
       const defaultName = d?.full_name || _guestName || '';
-      const defaultCitizenship = d?.citizenship || 'WNI';
+      const rawCit = (d?.citizenship || '').trim().toUpperCase();
+      const defaultCitizenship =
+        rawCit && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(rawCit) ? 'WNA' : 'WNI';
       setFormName(defaultName);
       setFormNik(d?.identity_number || '');
       setFormBirthPlace(d?.birth_place || '');
@@ -1393,13 +1395,20 @@ export default function IdentityExtractionModal({
                   <label className="block text-xs font-semibold text-stone-700 mb-1">
                     Kewarganegaraan
                   </label>
-                  <input
-                    type="text"
-                    value={formCitizenship}
+                  <select
+                    value={
+                      formCitizenship.trim().toUpperCase() === 'WNA' ||
+                      (formCitizenship.trim() !== '' &&
+                        !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(formCitizenship.trim().toUpperCase()))
+                        ? 'WNA'
+                        : 'WNI'
+                    }
                     onChange={(e) => setFormCitizenship(e.target.value)}
-                    placeholder="Contoh: WNI"
                     className="w-full text-xs px-3 py-2 bg-stone-50 border border-stone-300 rounded-lg focus:ring-2 focus:ring-emerald-600 focus:bg-white outline-none"
-                  />
+                  >
+                    <option value="WNI">WNI</option>
+                    <option value="WNA">WNA</option>
+                  </select>
                 </div>
               </div>
 

@@ -546,7 +546,12 @@ export async function searchGuests(
       `g.phone ILIKE ${textPatternParam}`,
       `g.email ILIKE ${textPatternParam}`,
       `g.identity_number ILIKE ${textPatternParam}`,
-      `g.guest_code ILIKE ${textPatternParam}`
+      `g.guest_code ILIKE ${textPatternParam}`,
+      `g.city ILIKE ${textPatternParam}`,
+      `g.birth_place ILIKE ${textPatternParam}`,
+      `g.citizenship ILIKE ${textPatternParam}`,
+      `g.nationality ILIKE ${textPatternParam}`,
+      `EXISTS (SELECT 1 FROM regencies reg_s WHERE reg_s.id = g.ktp_regency_id AND reg_s.name ILIKE ${textPatternParam})`
     ];
 
     if (digitsOnly && digitsOnly.length >= 3) {
@@ -587,6 +592,7 @@ export async function searchGuests(
   const res = await pool.query(
     `SELECT
        g.*,
+       COALESCE(NULLIF(BTRIM(g.city), ''), reg.name, NULLIF(BTRIM(g.birth_place), '')) AS resolved_city,
        COALESCE(g.guest_code, 'GST-' || LPAD(g.id::text, 5, '0')) AS guest_code,
        COALESCE(stats.visit_count, 0)::int AS visit_count,
        COALESCE(stats.paid_visit_count, 0)::int AS paid_visit_count,
@@ -597,6 +603,7 @@ export async function searchGuests(
        COALESCE(loy.bonus_points, 0)::int AS bonus_points,
        COALESCE(loy.redeemed_points, 0)::int AS redeemed_points
      FROM guests g
+     LEFT JOIN regencies reg ON reg.id = g.ktp_regency_id
      LEFT JOIN LATERAL (
        SELECT
          COUNT(DISTINCT r.id)::int AS visit_count,
@@ -722,8 +729,12 @@ export async function searchGuests(
         r.vip_status || 'STANDARD',
         loyaltySettings
       );
+      const resolvedCity = resolveGuestCityLabel(r);
+      const resolvedCitizenship = classifyGuestCitizenship(r);
       return {
         ...r,
+        city: resolvedCity || r.city || null,
+        citizenship: resolvedCitizenship,
         total_spend: totalSpend,
         earned_points: metrics.earned_points,
         bonus_points: bonusPoints,
@@ -884,6 +895,82 @@ export async function checkGuestDuplicates(
   };
 }
 
+const COMMON_CITY_KEYWORDS = [
+  'MALANG', 'SURABAYA', 'SIDOARJO', 'PASURUAN', 'BATU', 'JAKARTA', 'BANDUNG',
+  'SEMARANG', 'YOGYAKARTA', 'JOGJA', 'DENPASAR', 'BALI', 'KEDIRI', 'BLITAR',
+  'JEMBER', 'BANYUWANGI', 'GRESIK', 'MOJOKERTO', 'PROBOLINGGO', 'LUMAJANG',
+  'MADIUN', 'SURAKARTA', 'SOLO', 'MEDAN', 'MAKASSAR', 'BALIKPAPAN', 'SAMARINDA',
+  'BOGOR', 'DEPOK', 'TANGERANG', 'BEKASI', 'LAMONGAN', 'TUBAN', 'BOJONEGORO',
+  'JOMBANG', 'NGANJUK', 'TULUNGAGUNG', 'TRENGGALEK', 'PONOROGO', 'JEPARA',
+  'KUDUS', 'PATI', 'PEKALONGAN', 'TEGAL', 'CILACAP', 'PURWOKERTO', 'MAGELANG',
+  'KLATEN', 'SRAGEN', 'PALEMBANG', 'PEKANBARU', 'BATAM', 'PADANG', 'LAMPUNG',
+  'BANJARMASIN', 'PONTIANAK', 'MANADO', 'MATARAM', 'LOMBOK', 'KUPANG', 'JAYAPURA'
+];
+
+function classifyGuestCitizenship(row: any): 'WNI' | 'WNA' {
+  const cit = String(row.citizenship || '').trim().toUpperCase();
+  if (cit === 'WNA' || cit === 'FOREIGN' || cit === 'ASING') return 'WNA';
+  if (cit !== '' && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(cit)) {
+    return 'WNA';
+  }
+  const nat = String(row.nationality || '').trim().toUpperCase();
+  if (nat !== '' && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(nat)) {
+    return 'WNA';
+  }
+  const country = String(row.country || '').trim().toUpperCase();
+  if (country !== '' && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(country)) {
+    return 'WNA';
+  }
+  const phone = String(row.phone || '').trim();
+  if (phone.startsWith('+') && !phone.startsWith('+62') && cit !== 'WNI') {
+    return 'WNA';
+  }
+  return 'WNI';
+}
+
+function formatTitleCaseCity(raw: string): string {
+  const clean = raw
+    .replace(/\s+/g, ' ')
+    .replace(/^KABUPATEN\s+/i, 'Kab. ')
+    .replace(/^KAB\.?\s+/i, 'Kab. ')
+    .replace(/^KOTA\s+ADMINISTRASI\s+/i, 'Kota ')
+    .replace(/^KOTA\s+/i, 'Kota ')
+    .trim();
+  return clean
+    .split(' ')
+    .map((w) => {
+      if (w.toLowerCase() === 'kab.') return 'Kab.';
+      if (w.length <= 1) return w.toUpperCase();
+      return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase();
+    })
+    .join(' ');
+}
+
+function resolveGuestCityLabel(row: any): string | null {
+  const candidates = [
+    row.city,
+    row.resolved_city,
+    row.ktp_regency_name,
+    row.birth_place,
+  ];
+  for (const cand of candidates) {
+    const str = String(cand || '').trim();
+    if (str && str.length >= 3 && !/^\d+$/.test(str) && str !== '-' && str.toLowerCase() !== 'null') {
+      return formatTitleCaseCity(str);
+    }
+  }
+  const addr = String(row.address || '').toUpperCase();
+  if (addr) {
+    for (const kw of COMMON_CITY_KEYWORDS) {
+      const regex = new RegExp(`\\b${kw}\\b`, 'i');
+      if (regex.test(addr)) {
+        return formatTitleCaseCity(kw === 'JOGJA' ? 'Yogyakarta' : kw);
+      }
+    }
+  }
+  return null;
+}
+
 export async function getCrmSummary(
   pool: Pool,
   propertyId: number,
@@ -1036,6 +1123,92 @@ export async function getCrmSummary(
     [propertyId, hotelDate]
   );
 
+  const demographicsRowsRes = await pool.query(
+    `SELECT
+       g.id,
+       g.city,
+       reg.name AS ktp_regency_name,
+       g.birth_place,
+       g.address,
+       g.citizenship,
+       g.nationality,
+       g.country,
+       g.phone,
+       COALESCE(stay_sp.paid_spend, 0)::numeric(14,2) AS paid_spend
+     FROM guests g
+     LEFT JOIN regencies reg ON reg.id = g.ktp_regency_id
+     LEFT JOIN LATERAL (
+       SELECT
+         COALESCE(
+           SUM(
+             CASE
+               WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                 AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                 AND COALESCE(r.discount_percent, 0) < 100
+                 AND COALESCE(r.total_price, 0) > 0
+                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+               THEN COALESCE(r.total_price, 0)
+               ELSE 0
+             END
+           ),
+           0
+         ) AS paid_spend
+       FROM reservation_guests rg
+       JOIN reservations r ON rg.reservation_id = r.id
+       JOIN bookings b ON r.booking_id = b.id
+       WHERE rg.guest_id = g.id
+         AND b.property_id = $1
+         AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+         AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+         AND COALESCE(b.booking_status, '') != 'CANCELLED'
+     ) stay_sp ON true
+     WHERE ${baseFilter}
+       AND (g.is_archived IS NULL OR g.is_archived = FALSE)`,
+    [propertyId]
+  );
+
+  let wniCount = 0;
+  let wnaCount = 0;
+  let knownCityGuests = 0;
+  let unknownCityGuests = 0;
+  const cityMap = new Map<string, { city: string; guest_count: number; total_spend: number }>();
+
+  for (const dRow of demographicsRowsRes.rows) {
+    const citType = classifyGuestCitizenship(dRow);
+    if (citType === 'WNA') {
+      wnaCount++;
+    } else {
+      wniCount++;
+    }
+    const cityLabel = resolveGuestCityLabel(dRow);
+    if (cityLabel) {
+      knownCityGuests++;
+      const normKey = cityLabel.toUpperCase();
+      const existing = cityMap.get(normKey) || { city: cityLabel, guest_count: 0, total_spend: 0 };
+      existing.guest_count += 1;
+      existing.total_spend += Number(dRow.paid_spend || 0);
+      cityMap.set(normKey, existing);
+    } else {
+      unknownCityGuests++;
+    }
+  }
+
+  const totalDemGuests = wniCount + wnaCount;
+  const wniPct = totalDemGuests > 0 ? Number(((wniCount / totalDemGuests) * 100).toFixed(1)) : 100;
+  const wnaPct = totalDemGuests > 0 ? Number(((wnaCount / totalDemGuests) * 100).toFixed(1)) : 0;
+
+  const topCities = Array.from(cityMap.values())
+    .sort((a, b) => b.guest_count - a.guest_count || b.total_spend - a.total_spend)
+    .slice(0, 12)
+    .map((c) => ({
+      city: c.city,
+      guest_count: c.guest_count,
+      pct: knownCityGuests > 0 ? Number(((c.guest_count / knownCityGuests) * 100).toFixed(1)) : 0,
+      total_spend: Math.round(c.total_spend),
+    }));
+
   return {
     property_id: propertyId,
     hotel_date: hotelDate,
@@ -1053,7 +1226,16 @@ export async function getCrmSummary(
     follow_up_candidates: followUpRes.rows.map((r) => ({
       ...r,
       total_spend: Number(r.total_spend || 0),
-    }))
+    })),
+    demographics: {
+      wni_count: wniCount,
+      wna_count: wnaCount,
+      wni_pct: wniPct,
+      wna_pct: wnaPct,
+      known_city_guests: knownCityGuests,
+      unknown_city_guests: unknownCityGuests,
+      top_cities: topCities,
+    },
   };
 }
 

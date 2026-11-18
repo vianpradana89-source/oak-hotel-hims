@@ -24,7 +24,8 @@ interface GuestCrmWorkspaceProps {
 }
 
 const DEFAULT_WA_MESSAGES = {
-  birthday: 'Selamat ulang tahun {nama}! 🎉 Ada hadiah spesial dari {toko} untuk Anda.',
+  birthday:
+    'Selamat ulang tahun ke-{umur} {nama}! 🎉 Semoga sehat, bahagia, dan sukses selalu. Ada hadiah spesial dari {toko} untuk Anda.',
   followup:
     'Halo {nama}, apa kabar? Kami dari {toko} merindukan kunjungan Anda sejak {terakhir}. Dapatkan promo spesial untuk kunjungan berikutnya!',
   database:
@@ -50,6 +51,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
   const [waModalTarget, setWaModalTarget] = useState<'birthday' | 'followup' | 'database' | null>(null);
   const [waMessageDraft, setWaMessageDraft] = useState<string>('');
   const [savingWaTemplate, setSavingWaTemplate] = useState<boolean>(false);
+  const [quickDatabaseSearch, setQuickDatabaseSearch] = useState<string>('');
 
   // Authoritative Jakarta hotel date
   const hotelDate = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Jakarta' });
@@ -231,6 +233,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             onOpenDuplicateReview={() => setIsDuplicateModalOpen(true)}
             duplicateCount={duplicateClusters.length}
             onOpenWaTemplateModal={handleOpenWaTemplateModal}
+            onQuickFilterDatabase={(q) => setQuickDatabaseSearch(q)}
           />
 
           <GuestDatabaseTable
@@ -239,6 +242,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
             loading={loading}
             hotelDate={hotelDate}
             loyaltySettings={loyaltySettings}
+            externalSearchQuery={quickDatabaseSearch}
             onSelectGuest={handleOpenProfile}
             onEditGuest={handleEditGuest}
             onCreateGuest={handleCreateNew}
@@ -327,7 +331,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
                 className="w-full p-3.5 text-sm text-stone-800 bg-[#FAF8F3] border-2 border-blue-600 rounded-2xl focus:outline-hidden focus:ring-2 focus:ring-blue-600/20"
               />
               <p className="text-xs text-stone-500 mt-2 font-mono">
-                Variabel: &#123;nama&#125;, &#123;toko&#125;, &#123;terakhir&#125;, &#123;total&#125;, &#123;ulangtahun&#125;
+                Variabel: &#123;nama&#125;, &#123;umur&#125;, &#123;toko&#125;, &#123;terakhir&#125;, &#123;total&#125;, &#123;ulangtahun&#125;
               </p>
             </div>
 

@@ -1828,26 +1828,37 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               continue;
             }
 
-            // 3. Resolve or create Category strictly per product_type
+            // 3. Resolve or create Category strictly per product_type (with safe savepoint fallback)
             let categoryId: number | null = null;
             if (rawCategoryName) {
               const findCat = await client.query(
                 `SELECT id, product_type
                    FROM pos_menu_categories
                   WHERE property_id = $1
-                    AND LOWER(name) = LOWER($2)
-                    AND COALESCE(product_type, 'FINISHED_GOOD') = $3
-                  LIMIT 1`,
+                    AND LOWER(BTRIM(name)) = LOWER(BTRIM($2))
+                  ORDER BY CASE WHEN COALESCE(product_type, 'FINISHED_GOOD') = $3 THEN 0 ELSE 1 END, id ASC`,
                 [propertyId, rawCategoryName, productTypeVal]
               );
-              if ((findCat.rowCount ?? 0) > 0) {
-                categoryId = Number(findCat.rows[0].id);
+              const exactTypeMatch = findCat.rows.find(
+                (r: any) => (r.product_type || 'FINISHED_GOOD') === productTypeVal
+              );
+              if (exactTypeMatch) {
+                categoryId = Number(exactTypeMatch.id);
               } else {
-                const newCat = await client.query(
-                  `INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING id`,
-                  [propertyId, rawCategoryName, productTypeVal]
-                );
-                categoryId = Number(newCat.rows[0].id);
+                await client.query(`SAVEPOINT sp_cat_${idx}`);
+                try {
+                  const newCat = await client.query(
+                    `INSERT INTO pos_menu_categories (property_id, name, product_type) VALUES ($1, $2, $3) RETURNING id`,
+                    [propertyId, rawCategoryName, productTypeVal]
+                  );
+                  categoryId = Number(newCat.rows[0].id);
+                  await client.query(`RELEASE SAVEPOINT sp_cat_${idx}`);
+                } catch {
+                  await client.query(`ROLLBACK TO SAVEPOINT sp_cat_${idx}`);
+                  if (findCat.rows.length > 0) {
+                    categoryId = Number(findCat.rows[0].id);
+                  }
+                }
               }
             }
 

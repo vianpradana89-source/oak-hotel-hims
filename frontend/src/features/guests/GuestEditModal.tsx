@@ -133,7 +133,10 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
       setReligion(guest.religion || '');
       setMaritalStatus(guest.marital_status || '');
       setOccupation(guest.occupation || '');
-      setCitizenship(guest.citizenship || 'WNI');
+      const rawCit = (guest.citizenship || guest.nationality || '').trim().toUpperCase();
+      setCitizenship(
+        rawCit && !['WNI', 'INDONESIA', 'INDONESIAN', 'ID', 'IDN'].includes(rawCit) ? 'WNA' : 'WNI'
+      );
       setValidUntil(guest.valid_until || 'SEUMUR HIDUP');
       setAddress(guest.address || '');
       setCity(guest.city || '');
@@ -461,13 +464,14 @@ export const GuestEditModal: React.FC<GuestEditModalProps> = ({
               </div>
               <div>
                 <label className="block font-semibold text-stone-700 mb-1">Kewarganegaraan</label>
-                <input
-                  type="text"
-                  value={citizenship}
+                <select
+                  value={citizenship.trim().toUpperCase() === 'WNA' ? 'WNA' : 'WNI'}
                   onChange={(e) => setCitizenship(e.target.value)}
-                  placeholder="WNI / WNA"
-                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none"
-                />
+                  className="w-full px-3 py-2 border border-stone-300 rounded focus:ring-1 focus:ring-[#1E392A] outline-none bg-white"
+                >
+                  <option value="WNI">WNI</option>
+                  <option value="WNA">WNA</option>
+                </select>
               </div>
             </div>
           </div>

@@ -807,7 +807,7 @@ export async function initializeDatabase(pool: Pool) {
       END IF;
     END $$;
 
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_pmc_property_name ON pos_menu_categories(property_id, name);
+    DROP INDEX IF EXISTS uq_pmc_property_name;
     CREATE UNIQUE INDEX IF NOT EXISTS uq_pmi_property_code ON pos_menu_items(property_id, item_code) WHERE item_code IS NOT NULL;
     CREATE INDEX IF NOT EXISTS idx_pmc_property ON pos_menu_categories(property_id);
     CREATE INDEX IF NOT EXISTS idx_pmi_property ON pos_menu_items(property_id);
@@ -6921,6 +6921,16 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
       IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'pos_menu_categories_property_id_name_key') THEN
         ALTER TABLE pos_menu_categories DROP CONSTRAINT pos_menu_categories_property_id_name_key;
       END IF;
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'uq_pmc_property_name') THEN
+        ALTER TABLE pos_menu_categories DROP CONSTRAINT uq_pmc_property_name;
+      END IF;
+    END $$;
+    DROP INDEX IF EXISTS uq_pmc_property_name;
+    DO $$ BEGIN
+      CREATE UNIQUE INDEX IF NOT EXISTS uq_pmc_property_name_type
+        ON pos_menu_categories (property_id, LOWER(BTRIM(name)), COALESCE(product_type, 'FINISHED_GOOD'));
+    EXCEPTION WHEN OTHERS THEN
+      NULL;
     END $$;
 
     -- ═══ property_pos_pricing_settings (POS Service & Tax V1) ═══

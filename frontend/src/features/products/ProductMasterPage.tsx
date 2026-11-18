@@ -2215,6 +2215,17 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const stockLocationsBound = Number(data.stock_locations_bound_count || 0);
       const stockMovements = Number(data.stock_movements_count || 0);
       const failed = Number(data.failed_count || 0);
+      const rowErrors: Array<{ row_index?: number; name?: string; message?: string }> = Array.isArray(data.errors)
+        ? data.errors
+        : [];
+      if (created === 0 && updated === 0 && failed > 0) {
+        const firstErr = rowErrors[0];
+        const errDetail = firstErr
+          ? `Baris ${firstErr.row_index ?? '-'} (${firstErr.name || '-'}): ${firstErr.message || 'Gagal disimpan'}`
+          : 'Semua baris gagal diproses.';
+        setExcelImportError(`Gagal mengimpor ${failed} baris produk. Detail: ${errDetail}`);
+        return;
+      }
       setShowExcelImportModal(false);
       setExcelImportRows([]);
       setExcelImportFileName('');
@@ -2223,7 +2234,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
           stockLocationsBound > 0 ? `, ${stockLocationsBound} produk masuk ke lokasi Stok & Mutasi` : ''
         }${stockMovements > 0 ? ` (${stockMovements} mutasi stok dicatat)` : ''}${
           skipped > 0 ? `, ${skipped} baris dilewati` : ''
-        }${failed > 0 ? ` (${failed} gagal)` : ''}.`
+        }${
+          failed > 0
+            ? ` (${failed} gagal${rowErrors[0]?.message ? `: ${rowErrors[0].message}` : ''})`
+            : ''
+        }.`
       );
       const { propertyId: curPid, statusFilter: curSf } = ctxRef.current;
       await loadProducts(curSf, curPid ?? targetPropertyId);

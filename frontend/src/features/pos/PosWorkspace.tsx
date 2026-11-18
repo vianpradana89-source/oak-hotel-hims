@@ -3,6 +3,7 @@ import GuestPicker from './GuestPicker';
 import {buildPosOrderDraft, buildPosOrderEditPayload, previewPosDraft, normalizeDiscountInput, type PosCartLine, type PosDiscountType, type PosPricingPreviewParams, type PosOrderEditItem} from './posOrderDraft';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import type { PosPayCashOrderContext } from './PosPayCashModal';
+import type { Guest, PropertyLoyaltySettings } from '../guests/guestTypes';
 
 function formatPosOrderDisplayRef(orderId: number | string | null | undefined): string {
   if (orderId === null || orderId === undefined || orderId === '') return '';
@@ -2515,6 +2516,100 @@ export default function PosWorkspace({
   const [liveFinishedCategories, setLiveFinishedCategories] = useState<string[] | null>(null);
   const [variantPickerItem, setVariantPickerItem] = useState<PosMenuItem | null>(null);
 
+  // ── CRM Guest Autocomplete, Member Tier & Loyalty Points in POS ────────────
+  const [crmGuests, setCrmGuests] = useState<Guest[]>([]);
+  const [posLoyaltySettings, setPosLoyaltySettings] = useState<PropertyLoyaltySettings | null>(null);
+  const [selectedCrmGuest, setSelectedCrmGuest] = useState<Guest | null>(null);
+  const [showGuestSuggest, setShowGuestSuggest] = useState<boolean>(false);
+  const [showEditGuestSuggest, setShowEditGuestSuggest] = useState<boolean>(false);
+  const [posPointsToRedeem, setPosPointsToRedeem] = useState<number>(0);
+  const [posRedeemPointsInput, setPosRedeemPointsInput] = useState<string>('');
+
+  const fetchPosCrmData = useCallback(() => {
+    if (propertyId === null) return;
+    const fetcher = authFetch ?? authenticatedFetch;
+    Promise.resolve(fetcher(`/api/guests?property_id=${propertyId}&limit=1000`))
+      .then(async (res) => {
+        if (!res || !res.ok || typeof res.json !== 'function') return;
+        const json = await res.json().catch(() => null);
+        if (Array.isArray(json?.data)) {
+          setCrmGuests(json.data as Guest[]);
+        }
+      })
+      .catch(() => {});
+    Promise.resolve(fetcher(`/api/guests/loyalty-settings?property_id=${propertyId}`))
+      .then(async (res) => {
+        if (!res || !res.ok || typeof res.json !== 'function') return;
+        const json = await res.json().catch(() => null);
+        if (json?.data) {
+          setPosLoyaltySettings(json.data as PropertyLoyaltySettings);
+        }
+      })
+      .catch(() => {});
+  }, [propertyId, authFetch]);
+
+  useEffect(() => {
+    fetchPosCrmData();
+  }, [fetchPosCrmData]);
+
+  const effectivePosGuestQuery = useMemo(() => {
+    if (pickedGuest?.guest_name) return pickedGuest.guest_name.trim();
+    if (reservationId !== null && guestNameInitial) return guestNameInitial.trim();
+    return guestName.trim();
+  }, [pickedGuest, reservationId, guestNameInitial, guestName]);
+
+  const activeCrmGuest = useMemo<Guest | null>(() => {
+    if (crmGuests.length === 0) return null;
+    const qLower = effectivePosGuestQuery.toLowerCase();
+    if (!qLower) return null;
+    if (selectedCrmGuest && selectedCrmGuest.full_name?.trim().toLowerCase() === qLower) {
+      return crmGuests.find((g) => g.id === selectedCrmGuest.id) ?? selectedCrmGuest;
+    }
+    return crmGuests.find((g) => g.full_name?.trim().toLowerCase() === qLower) ?? null;
+  }, [crmGuests, effectivePosGuestQuery, selectedCrmGuest]);
+
+  const crmGuestSuggestions = useMemo<Guest[]>(() => {
+    const q = guestName.trim().toLowerCase();
+    if (!q || crmGuests.length === 0) return [];
+    const startsWith: Guest[] = [];
+    const includes: Guest[] = [];
+    for (const g of crmGuests) {
+      const name = String(g.full_name || '').trim().toLowerCase();
+      const phone = String(g.phone || '').trim().toLowerCase();
+      const code = String(g.guest_code || '').trim().toLowerCase();
+      if (name.startsWith(q) || name.split(/\s+/).some((w) => w.startsWith(q))) {
+        startsWith.push(g);
+      } else if (name.includes(q) || phone.includes(q) || code.includes(q)) {
+        includes.push(g);
+      }
+    }
+    return [...startsWith, ...includes].slice(0, 8);
+  }, [crmGuests, guestName]);
+
+  const editCrmGuestSuggestions = useMemo<Guest[]>(() => {
+    const q = (editMeta?.guestName ?? '').trim().toLowerCase();
+    if (!q || crmGuests.length === 0) return [];
+    const startsWith: Guest[] = [];
+    const includes: Guest[] = [];
+    for (const g of crmGuests) {
+      const name = String(g.full_name || '').trim().toLowerCase();
+      const phone = String(g.phone || '').trim().toLowerCase();
+      const code = String(g.guest_code || '').trim().toLowerCase();
+      if (name.startsWith(q) || name.split(/\s+/).some((w) => w.startsWith(q))) {
+        startsWith.push(g);
+      } else if (name.includes(q) || phone.includes(q) || code.includes(q)) {
+        includes.push(g);
+      }
+    }
+    return [...startsWith, ...includes].slice(0, 8);
+  }, [crmGuests, editMeta?.guestName]);
+
+  const activeEditCrmGuest = useMemo<Guest | null>(() => {
+    const q = (editMeta?.guestName ?? '').trim().toLowerCase();
+    if (!q || crmGuests.length === 0) return null;
+    return crmGuests.find((g) => g.full_name?.trim().toLowerCase() === q) ?? null;
+  }, [crmGuests, editMeta?.guestName]);
+
   useEffect(() => {
     setLivePosMenu(null);
     setLiveFinishedCategories(null);
@@ -2913,6 +3008,29 @@ export default function PosWorkspace({
           setCart([]);
           setGuestPhone(''); setOrderNotes(''); setOrderDiscountType('PERCENT');
           setOrderDiscountInput(''); setDiscountReason('');
+          const redeemedPts = posPointsToRedeem;
+          const redeemedGuestId = activeCrmGuest?.id ?? null;
+          setPosPointsToRedeem(0);
+          setPosRedeemPointsInput('');
+          if (res.status === 201 && redeemedPts > 0 && redeemedGuestId && propertyId !== null) {
+            const fetcher = authFetch ?? authenticatedFetch;
+            Promise.resolve(
+              fetcher('/api/guests/loyalty-ledger', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  property_id: propertyId,
+                  guest_id: redeemedGuestId,
+                  entry_type: 'REDEEM',
+                  points: redeemedPts,
+                  description: `Redeem Poin di POS Resto (${createdOrder.order_number})`,
+                  reference_no: createdOrder.order_number,
+                }),
+              })
+            )
+              .then(() => fetchPosCrmData())
+              .catch(() => {});
+          }
           setAmbiguous(false);
           setLocalPaidOrderId(null);
           appliedPaidOrderIdRef.current = null;
@@ -3815,16 +3933,59 @@ export default function PosWorkspace({
                               placeholder="Tabel / Takeaway"
                             />
                           </div>
-                          <div>
+                          <div className="relative">
                             <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">Nama Tamu</label>
                             <input
                               type="text"
                               maxLength={100}
                               value={editMeta.guestName}
-                              onChange={e => updateEditMeta({ guestName: e.target.value })}
+                              onFocus={() => setShowEditGuestSuggest(true)}
+                              onBlur={() => setTimeout(() => setShowEditGuestSuggest(false), 180)}
+                              onChange={e => {
+                                updateEditMeta({ guestName: e.target.value });
+                                setShowEditGuestSuggest(true);
+                              }}
                               className="w-full border border-gray-200 rounded-lg p-1.5"
                               placeholder="Nama tamu (opsional)"
                             />
+                            {showEditGuestSuggest && editCrmGuestSuggestions.length > 0 && (
+                              <div className="absolute left-0 right-0 z-30 mt-1 max-h-48 overflow-y-auto rounded-lg border border-emerald-200 bg-white shadow-lg divide-y divide-gray-100">
+                                {editCrmGuestSuggestions.map((g) => {
+                                  const tierLabel = g.loyalty_tier_name || g.loyalty_tier || 'BRONZE';
+                                  const pts = Number(g.loyalty_points || 0);
+                                  return (
+                                    <button
+                                      key={g.id}
+                                      type="button"
+                                      onMouseDown={(ev) => {
+                                        ev.preventDefault();
+                                        updateEditMeta({
+                                          guestName: g.full_name,
+                                          guestPhone: g.phone ? String(g.phone) : editMeta.guestPhone,
+                                        });
+                                        setShowEditGuestSuggest(false);
+                                      }}
+                                      className="w-full text-left px-2.5 py-1.5 hover:bg-emerald-50/70 transition-colors flex items-center justify-between gap-2"
+                                    >
+                                      <div className="min-w-0">
+                                        <div className="text-[11px] font-bold text-gray-900 truncate">{g.full_name}</div>
+                                        <div className="text-[10px] text-gray-500 truncate">
+                                          {g.phone || 'Tanpa No. HP'} {g.city ? `· ${g.city}` : ''}
+                                        </div>
+                                      </div>
+                                      <div className="shrink-0 flex flex-col items-end gap-0.5">
+                                        <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-50 text-amber-800 border border-amber-200">
+                                          {tierLabel}
+                                        </span>
+                                        <span className="text-[10px] font-semibold text-emerald-700">
+                                          {pts.toLocaleString('id-ID')} Poin
+                                        </span>
+                                      </div>
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <label className="block text-[10px] uppercase font-bold text-gray-500 mb-0.5">No. WhatsApp</label>
@@ -3901,6 +4062,60 @@ export default function PosWorkspace({
                                 </div>
                               </div>
                             </>
+                          )}
+                          {activeEditCrmGuest && (
+                            <div className="sm:col-span-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 flex flex-wrap items-center justify-between gap-2 text-xs">
+                              <div>
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  <span className="font-bold text-emerald-950">{activeEditCrmGuest.full_name}</span>
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                                    Member {activeEditCrmGuest.loyalty_tier_name || activeEditCrmGuest.loyalty_tier || 'BRONZE'}
+                                  </span>
+                                  <span className="text-[11px] text-emerald-800 font-semibold">
+                                    · {Number(activeEditCrmGuest.loyalty_points || 0).toLocaleString('id-ID')} Poin
+                                  </span>
+                                </div>
+                              </div>
+                              {canDiscountPos && (
+                                <div className="flex items-center gap-1.5 flex-wrap">
+                                  {Number(activeEditCrmGuest.tier_discount_pct || 0) > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const pct = Number(activeEditCrmGuest.tier_discount_pct || 0);
+                                        const tierName = activeEditCrmGuest.loyalty_tier_name || activeEditCrmGuest.loyalty_tier || 'Member';
+                                        updateEditMeta({
+                                          orderDiscountType: 'PERCENT',
+                                          orderDiscountInput: String(pct),
+                                          discountReason: `Diskon Member Tier ${tierName} (${pct}%)`,
+                                        });
+                                      }}
+                                      className="px-2 py-1 rounded-md text-[11px] font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors cursor-pointer"
+                                    >
+                                      Pakai Diskon Member ({Number(activeEditCrmGuest.tier_discount_pct)}%)
+                                    </button>
+                                  )}
+                                  {Number(activeEditCrmGuest.loyalty_points || 0) > 0 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        const availPts = Math.max(0, Math.floor(Number(activeEditCrmGuest.loyalty_points || 0)));
+                                        const ptVal = Math.max(1, Number(posLoyaltySettings?.point_value_idr || 350));
+                                        const nominalRp = availPts * ptVal;
+                                        updateEditMeta({
+                                          orderDiscountType: 'NOMINAL',
+                                          orderDiscountInput: String(Math.round(nominalRp)),
+                                          discountReason: `Tukar ${availPts} Poin Loyalitas CRM (${activeEditCrmGuest.full_name})`,
+                                        });
+                                      }}
+                                      className="px-2 py-1 rounded-md text-[11px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white transition-colors cursor-pointer"
+                                    >
+                                      Pakai Poin ({Number(activeEditCrmGuest.loyalty_points || 0)} Poin)
+                                    </button>
+                                  )}
+                                </div>
+                              )}
+                            </div>
                           )}
                         </div>
                       )}
@@ -4306,7 +4521,7 @@ export default function PosWorkspace({
                       </div>
                     )}
                     {/* Nama Tamu — read-only bila reservasi terhubung (header/scoped),
-                        input biasa bila pelanggan manual */}
+                        input biasa dengan rekomendasi autocomplete CRM bila pelanggan manual */}
                     {(showGuestPicker && pickedGuest) || reservationId != null ? (
                       <div>
                         <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
@@ -4319,19 +4534,198 @@ export default function PosWorkspace({
                         />
                       </div>
                     ) : (
-                      <div>
+                      <div className="relative">
                         <label className="text-[10px] uppercase font-bold text-gray-500">Nama Tamu</label>
                         <input
                           type="text"
                           value={guestName}
-                          onChange={(e) => {if (canMutateDraft()) setGuestName(e.target.value);}}
+                          onFocus={() => setShowGuestSuggest(true)}
+                          onBlur={() => setTimeout(() => setShowGuestSuggest(false), 180)}
+                          onChange={(e) => {
+                            if (canMutateDraft()) {
+                              setGuestName(e.target.value);
+                              setShowGuestSuggest(true);
+                            }
+                          }}
                           disabled={draftLocked}
-                          placeholder="Nama tamu (opsional)"
+                          placeholder="Ketik nama tamu (rekomendasi CRM)..."
                           className="w-full text-xs bg-gray-50 border border-gray-200 rounded-lg p-1.5 mt-0.5"
                         />
+                        {showGuestSuggest && !draftLocked && crmGuestSuggestions.length > 0 && (
+                          <div className="absolute left-0 right-0 z-30 mt-1 max-h-52 overflow-y-auto rounded-lg border border-emerald-200 bg-white shadow-lg divide-y divide-gray-100">
+                            <div className="px-2.5 py-1 bg-emerald-50/70 text-[10px] font-bold uppercase tracking-wider text-emerald-800 flex items-center justify-between">
+                              <span>Rekomendasi Tamu CRM</span>
+                              <span>{crmGuestSuggestions.length} cocok</span>
+                            </div>
+                            {crmGuestSuggestions.map((g) => {
+                              const tierLabel = g.loyalty_tier_name || g.loyalty_tier || 'BRONZE';
+                              const tierDisc = Number(g.tier_discount_pct || 0);
+                              const pts = Number(g.loyalty_points || 0);
+                              return (
+                                <button
+                                  key={g.id}
+                                  type="button"
+                                  onMouseDown={(ev) => {
+                                    ev.preventDefault();
+                                    if (!canMutateDraft()) return;
+                                    setSelectedCrmGuest(g);
+                                    setGuestName(g.full_name || '');
+                                    if (g.phone) {
+                                      setGuestPhone(String(g.phone));
+                                    }
+                                    setShowGuestSuggest(false);
+                                  }}
+                                  className="w-full text-left px-2.5 py-1.5 hover:bg-emerald-50/70 transition-colors flex items-center justify-between gap-2 cursor-pointer"
+                                >
+                                  <div className="min-w-0">
+                                    <div className="text-xs font-bold text-gray-900 truncate">{g.full_name}</div>
+                                    <div className="text-[10px] text-gray-500 truncate">
+                                      {g.phone || 'Tanpa No. WA'} {g.city ? `· ${g.city}` : ''}
+                                    </div>
+                                  </div>
+                                  <div className="shrink-0 flex flex-col items-end gap-0.5">
+                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase bg-amber-50 text-amber-800 border border-amber-200">
+                                      {tierLabel}{tierDisc > 0 ? ` (${tierDisc}%)` : ''}
+                                    </span>
+                                    <span className="text-[10px] font-semibold text-emerald-700">
+                                      {pts.toLocaleString('id-ID')} Poin
+                                    </span>
+                                  </div>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
+
+                  {/* Kartu Member CRM & Poin Loyalitas di POS */}
+                  {activeCrmGuest && (
+                    <div className="mt-2 rounded-lg border border-emerald-200 bg-emerald-50/60 p-2.5 space-y-2 text-xs">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="font-bold text-emerald-950 truncate">{activeCrmGuest.full_name}</span>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold uppercase bg-amber-100 text-amber-900 border border-amber-300">
+                              Member {activeCrmGuest.loyalty_tier_name || activeCrmGuest.loyalty_tier || 'BRONZE'}
+                            </span>
+                            {Number(activeCrmGuest.tier_discount_pct || 0) > 0 && (
+                              <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-emerald-100 text-emerald-800">
+                                Diskon {Number(activeCrmGuest.tier_discount_pct)}%
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-emerald-800 mt-0.5">
+                            Saldo Poin: <span className="font-bold">{Number(activeCrmGuest.loyalty_points || 0).toLocaleString('id-ID')} Poin</span>
+                            {' '}
+                            <span className="text-emerald-700/80">
+                              (Setara {formatIDR(Number(activeCrmGuest.loyalty_points || 0) * Number(posLoyaltySettings?.point_value_idr || 350))})
+                            </span>
+                          </div>
+                        </div>
+                        {selectedCrmGuest && !pickedGuest && reservationId === null && (
+                          <button
+                            type="button"
+                            disabled={draftLocked}
+                            onClick={() => {
+                              if (!canMutateDraft()) return;
+                              setSelectedCrmGuest(null);
+                              setPosPointsToRedeem(0);
+                              setPosRedeemPointsInput('');
+                            }}
+                            className="text-[10px] text-gray-500 hover:text-red-600 px-1.5 py-0.5 rounded border border-gray-200 bg-white"
+                            title="Lepas tautan member CRM"
+                          >
+                            Reset
+                          </button>
+                        )}
+                      </div>
+
+                      {canDiscountPos && (
+                        <div className="pt-1 border-t border-emerald-200/70 space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {Number(activeCrmGuest.tier_discount_pct || 0) > 0 && (
+                              <button
+                                type="button"
+                                disabled={draftLocked}
+                                onClick={() => {
+                                  if (!canMutateDraft()) return;
+                                  const pct = Number(activeCrmGuest.tier_discount_pct || 0);
+                                  const tierName = activeCrmGuest.loyalty_tier_name || activeCrmGuest.loyalty_tier || 'Member';
+                                  setOrderDiscountType('PERCENT');
+                                  setOrderDiscountInput(String(pct));
+                                  setDiscountReason(`Diskon Member Tier ${tierName} (${pct}%)`);
+                                  setPosPointsToRedeem(0);
+                                }}
+                                className="px-2 py-1 rounded-md text-[11px] font-bold bg-amber-600 hover:bg-amber-700 text-white transition-colors cursor-pointer disabled:opacity-40"
+                              >
+                                Pakai Diskon Member ({Number(activeCrmGuest.tier_discount_pct)}%)
+                              </button>
+                            )}
+
+                            {Number(activeCrmGuest.loyalty_points || 0) > 0 && (
+                              <div className="flex items-center gap-1 flex-1 min-w-[180px]">
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={Number(activeCrmGuest.loyalty_points || 0)}
+                                  value={posRedeemPointsInput}
+                                  disabled={draftLocked}
+                                  onChange={(e) => setPosRedeemPointsInput(e.target.value)}
+                                  placeholder={`Jml poin (maks ${Number(activeCrmGuest.loyalty_points || 0)})`}
+                                  className="w-28 text-[11px] bg-white border border-emerald-300 rounded-md px-2 py-1"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={draftLocked}
+                                  onClick={() => {
+                                    if (!canMutateDraft()) return;
+                                    const availPts = Math.max(0, Math.floor(Number(activeCrmGuest.loyalty_points || 0)));
+                                    const ptVal = Math.max(1, Number(posLoyaltySettings?.point_value_idr || 350));
+                                    const maxNeededPts = cartSubtotal > 0 ? Math.min(availPts, Math.ceil(cartSubtotal / ptVal)) : availPts;
+                                    const rawReq = Math.floor(Number(posRedeemPointsInput || 0));
+                                    const ptsToUse = rawReq > 0 ? Math.min(rawReq, maxNeededPts) : maxNeededPts;
+                                    if (ptsToUse <= 0) return;
+                                    const nominalRp = Math.min(cartSubtotal > 0 ? cartSubtotal : ptsToUse * ptVal, ptsToUse * ptVal);
+                                    setPosRedeemPointsInput(String(ptsToUse));
+                                    setPosPointsToRedeem(ptsToUse);
+                                    setOrderDiscountType('NOMINAL');
+                                    setOrderDiscountInput(String(Math.round(nominalRp)));
+                                    setDiscountReason(`Tukar ${ptsToUse} Poin Loyalitas CRM (${activeCrmGuest.full_name})`);
+                                  }}
+                                  className="px-2 py-1 rounded-md text-[11px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white transition-colors cursor-pointer disabled:opacity-40 shrink-0"
+                                >
+                                  Pakai Poin
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          {posPointsToRedeem > 0 && (
+                            <div className="text-[10px] font-semibold text-emerald-900 bg-emerald-100/80 px-2 py-1 rounded flex items-center justify-between">
+                              <span>
+                                Akan memotong <strong>{posPointsToRedeem.toLocaleString('id-ID')} Poin</strong> saat pesanan disimpan
+                              </span>
+                              <button
+                                type="button"
+                                disabled={draftLocked}
+                                onClick={() => {
+                                  if (!canMutateDraft()) return;
+                                  setPosPointsToRedeem(0);
+                                  setPosRedeemPointsInput('');
+                                  setOrderDiscountInput('');
+                                  setDiscountReason('');
+                                }}
+                                className="text-red-700 hover:underline font-bold ml-2"
+                              >
+                                Batal Poin
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="space-y-2">
