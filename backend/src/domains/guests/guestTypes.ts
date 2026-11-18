@@ -208,9 +208,42 @@ export interface GuestStayStatistics {
   room_nights: number;
   first_stay: string | null;
   last_stay: string | null;
+  total_spend?: number;
+  earned_points?: number;
+  bonus_points?: number;
+  redeemed_points?: number;
+  loyalty_points?: number;
+  loyalty_tier?: 'SILVER' | 'GOLD' | 'PLATINUM';
 }
 
 export interface GuestWithStats extends Guest, GuestStayStatistics {}
+
+export interface GuestLoyaltyLedgerEntry {
+  id: number;
+  property_id: number;
+  guest_id: number;
+  guest_name?: string;
+  entry_type: 'BONUS' | 'REDEEM' | 'ADJUSTMENT';
+  points: number;
+  description: string;
+  reference_no: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export interface GuestMergeInput {
+  property_id: number;
+  primary_guest_id: number;
+  duplicate_guest_ids: number[];
+  actor_name?: string | null;
+}
+
+export interface GuestMergeResult {
+  primary_guest: Guest;
+  merged_guest_ids: number[];
+  relinked_reservations: number;
+  relinked_transactions: number;
+}
 
 export interface GuestCrmBirthdayItem {
   id: number;
@@ -232,6 +265,7 @@ export interface GuestCrmFollowUpItem {
   last_stay: string;
   days_since_last_stay: number;
   visit_count: number;
+  total_spend?: number;
 }
 
 export interface GuestCrmSummary {
@@ -242,7 +276,11 @@ export interface GuestCrmSummary {
   repeat_guests: number;
   repeat_rate: number;
   new_guests_last_30d: number;
+  dormant_guests_30d?: number;
+  dormant_guests_60d?: number;
   dormant_guests_90d: number;
+  total_customer_revenue?: number;
+  avg_customer_ltv?: number;
   birthdays_this_month: GuestCrmBirthdayItem[];
   follow_up_candidates: GuestCrmFollowUpItem[];
 }

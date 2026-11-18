@@ -60,6 +60,12 @@ export interface Guest {
   room_nights?: number;
   first_stay?: string | null;
   last_stay?: string | null;
+  total_spend?: number;
+  earned_points?: number;
+  bonus_points?: number;
+  redeemed_points?: number;
+  loyalty_points?: number;
+  loyalty_tier?: 'SILVER' | 'GOLD' | 'PLATINUM';
 }
 
 export interface GuestStay {
@@ -128,6 +134,7 @@ export interface GuestCrmFollowUpItem {
   last_stay: string;
   days_since_last_stay: number;
   visit_count: number;
+  total_spend?: number;
 }
 
 export interface GuestCrmSummary {
@@ -138,18 +145,35 @@ export interface GuestCrmSummary {
   repeat_guests: number;
   repeat_rate: number;
   new_guests_last_30d: number;
+  dormant_guests_30d?: number;
+  dormant_guests_60d?: number;
   dormant_guests_90d: number;
+  total_customer_revenue?: number;
+  avg_customer_ltv?: number;
   birthdays_this_month: GuestCrmBirthdayItem[];
   follow_up_candidates: GuestCrmFollowUpItem[];
 }
 
 export interface DuplicateCandidateCluster {
-  match_reason: 'PHONE' | 'EMAIL' | 'NAME_BIRTH_DATE';
+  match_reason: 'PHONE' | 'EMAIL' | 'NAME_BIRTH_DATE' | 'NAME_AND_DOB';
   match_key: string;
   guests: Guest[];
 }
 
-export type GuestCrmTab = 'summary' | 'database' | 'communication';
+export interface GuestLoyaltyLedgerEntry {
+  id: number;
+  property_id: number;
+  guest_id: number;
+  guest_name?: string;
+  entry_type: 'BONUS' | 'REDEEM' | 'ADJUSTMENT';
+  points: number;
+  description: string;
+  reference_no: string | null;
+  created_by: string | null;
+  created_at: string;
+}
+
+export type GuestCrmTab = 'summary' | 'database' | 'communication' | 'loyalty';
 
 export interface GuestFilterState {
   search: string;

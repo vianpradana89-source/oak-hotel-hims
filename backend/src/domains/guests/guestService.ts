@@ -7,6 +7,9 @@ import type {
   Guest,
   GuestCrmSummary,
   GuestCreateInput,
+  GuestLoyaltyLedgerEntry,
+  GuestMergeInput,
+  GuestMergeResult,
   GuestRole,
   GuestUpdateInput,
   GuestWithStats,
@@ -16,6 +19,27 @@ import type {
   ReservationGuestUpdateInput,
   VipStatus
 } from './guestTypes';
+
+let crmTablesEnsured = false;
+export async function ensureGuestCrmTables(pool: Pool | PoolClient): Promise<void> {
+  if (crmTablesEnsured) return;
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS guest_loyalty_ledger (
+      id BIGSERIAL PRIMARY KEY,
+      property_id INTEGER NOT NULL,
+      guest_id BIGINT NOT NULL REFERENCES guests(id) ON DELETE CASCADE,
+      entry_type VARCHAR(30) NOT NULL CHECK (entry_type IN ('BONUS', 'REDEEM', 'ADJUSTMENT')),
+      points INTEGER NOT NULL,
+      description TEXT NOT NULL,
+      reference_no VARCHAR(100),
+      created_by VARCHAR(120),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_guest_loyalty_ledger_prop_guest
+      ON guest_loyalty_ledger(property_id, guest_id);
+  `);
+  crmTablesEnsured = true;
+}
 
 export function httpError(statusCode: number, code: string, message: string): Error & { statusCode: number; code: string } {
   const err = new Error(message) as Error & { statusCode: number; code: string };
@@ -171,7 +195,7 @@ export function normalizeRole(raw: unknown): GuestRole {
 export async function writeGuestAudit(
    client: PoolClient | Pool,
    entry: {
-     action: 'GUEST_CREATE' | 'GUEST_UPDATE' | 'GUEST_ARCHIVE' | 'GUEST_RESTORE' | 'GUEST_DELETE' | 'RESERVATION_GUEST_ADD' | 'RESERVATION_GUEST_UPDATE' | 'RESERVATION_GUEST_REMOVE' | 'PRIMARY_GUEST_REPLACE';
+     action: 'GUEST_CREATE' | 'GUEST_UPDATE' | 'GUEST_ARCHIVE' | 'GUEST_RESTORE' | 'GUEST_DELETE' | 'GUEST_MERGE' | 'GUEST_LOYALTY' | 'RESERVATION_GUEST_ADD' | 'RESERVATION_GUEST_UPDATE' | 'RESERVATION_GUEST_REMOVE' | 'PRIMARY_GUEST_REPLACE';
      entity: 'GUEST' | 'RESERVATION_GUEST';
      recordId: string | number;
      newValue: any;
@@ -213,8 +237,9 @@ export async function searchGuests(
   includeArchived = false
 ): Promise<{ guests: GuestWithStats[]; total: number }> {
   await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
 
-  const safeLimit = Math.max(1, Math.min(limit, 100));
+  const safeLimit = Math.max(1, Math.min(limit, 2000));
   const safeOffset = Math.max(0, offset);
 
   const baseFilter = `
@@ -293,28 +318,150 @@ export async function searchGuests(
        COALESCE(stats.visit_count, 0)::int AS visit_count,
        COALESCE(stats.room_nights, 0)::int AS room_nights,
        stats.first_stay,
-       stats.last_stay
+       stats.last_stay,
+       (COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0))::numeric(14,2) AS total_spend,
+       (
+         FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
+         + (COALESCE(stats.paid_room_nights, 0)::int * 10)
+       ) AS earned_points,
+       COALESCE(loy.bonus_points, 0)::int AS bonus_points,
+       COALESCE(loy.redeemed_points, 0)::int AS redeemed_points,
+       GREATEST(
+         0,
+         FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
+         + (COALESCE(stats.paid_room_nights, 0)::int * 10)
+         + COALESCE(loy.bonus_points, 0)::int
+         - COALESCE(loy.redeemed_points, 0)::int
+       )::int AS loyalty_points,
+       CASE
+         WHEN g.vip_status = 'VVIP'
+           OR COALESCE(stats.room_nights, 0) >= 15
+           OR (
+             FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
+             + (COALESCE(stats.paid_room_nights, 0)::int * 10)
+             + COALESCE(loy.bonus_points, 0)::int
+           ) >= 1500
+         THEN 'PLATINUM'
+         WHEN g.vip_status = 'VIP'
+           OR COALESCE(stats.room_nights, 0) >= 5
+           OR (
+             FLOOR((COALESCE(stats.paid_room_spend, 0) + COALESCE(pos_stats.paid_pos_spend, 0)) / 10000.0)::int
+             + (COALESCE(stats.paid_room_nights, 0)::int * 10)
+             + COALESCE(loy.bonus_points, 0)::int
+           ) >= 500
+         THEN 'GOLD'
+         ELSE 'SILVER'
+       END AS loyalty_tier
      FROM guests g
      LEFT JOIN LATERAL (
        SELECT
          COUNT(DISTINCT r.id)::int AS visit_count,
-         COALESCE(SUM(r.check_out::date - r.check_in::date), 0)::int AS room_nights,
+         COALESCE(SUM(GREATEST(1, r.check_out::date - r.check_in::date)), 0)::int AS room_nights,
          TO_CHAR(MIN(r.check_in), 'YYYY-MM-DD') AS first_stay,
-         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay
+         TO_CHAR(MAX(r.check_out), 'YYYY-MM-DD') AS last_stay,
+         COALESCE(
+           SUM(
+             CASE
+               WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                 AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                 AND COALESCE(r.discount_percent, 0) < 100
+                 AND COALESCE(r.total_price, 0) > 0
+                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%FREE%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM reservation_complimentary_requests rcr
+                   WHERE rcr.reservation_id = r.id
+                     AND rcr.property_id = b.property_id
+                     AND UPPER(COALESCE(rcr.status, '')) IN ('APPROVED', 'APPLIED', 'ACTIVE', 'COMPLETED')
+                 )
+                 AND NOT (
+                   EXISTS (
+                     SELECT 1 FROM transactions t_v
+                     WHERE t_v.property_id = b.property_id
+                       AND (t_v.reservation_id = r.id OR (t_v.reservation_id IS NULL AND t_v.booking_id = b.id))
+                       AND t_v.transaction_type = 'SALE'
+                       AND t_v.deleted_at IS NULL
+                   )
+                   AND NOT EXISTS (
+                     SELECT 1 FROM transactions t_l
+                     WHERE t_l.property_id = b.property_id
+                       AND (t_l.reservation_id = r.id OR (t_l.reservation_id IS NULL AND t_l.booking_id = b.id))
+                       AND t_l.transaction_type = 'SALE'
+                       AND t_l.deleted_at IS NULL
+                       AND UPPER(COALESCE(t_l.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                   )
+                 )
+               THEN COALESCE(r.total_price, 0)
+               ELSE 0
+             END
+           ),
+           0
+         )::numeric(14,2) AS paid_room_spend,
+         COALESCE(
+           SUM(
+             CASE
+               WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                 AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                 AND COALESCE(r.discount_percent, 0) < 100
+                 AND COALESCE(r.total_price, 0) > 0
+                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+               THEN GREATEST(1, r.check_out::date - r.check_in::date)
+               ELSE 0
+             END
+           ),
+           0
+         )::int AS paid_room_nights
        FROM reservation_guests rg
        JOIN reservations r ON rg.reservation_id = r.id
        JOIN bookings b ON r.booking_id = b.id
        WHERE rg.guest_id = g.id
          AND b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+         AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+         AND COALESCE(b.booking_status, '') != 'CANCELLED'
      ) stats ON true
+     LEFT JOIN LATERAL (
+       SELECT
+         COALESCE(SUM(t.net_amount), 0)::numeric(14,2) AS paid_pos_spend
+       FROM transactions t
+       WHERE t.property_id = $1
+         AND t.guest_id = g.id
+         AND t.reservation_id IS NULL
+         AND t.transaction_type = 'SALE'
+         AND t.deleted_at IS NULL
+         AND UPPER(COALESCE(t.transaction_status, 'POSTED')) NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+         AND UPPER(COALESCE(t.payment_status, '')) = 'PAID'
+         AND COALESCE(t.net_amount, 0) > 0
+         AND UPPER(COALESCE(t.payment_method, '')) NOT LIKE '%COMP%'
+     ) pos_stats ON true
+     LEFT JOIN LATERAL (
+       SELECT
+         COALESCE(SUM(CASE WHEN gll.points > 0 THEN gll.points ELSE 0 END), 0)::int AS bonus_points,
+         COALESCE(SUM(CASE WHEN gll.points < 0 THEN ABS(gll.points) ELSE 0 END), 0)::int AS redeemed_points
+       FROM guest_loyalty_ledger gll
+       WHERE gll.property_id = $1 AND gll.guest_id = g.id
+     ) loy ON true
      WHERE ${whereClause}
      ORDER BY g.updated_at DESC, g.id DESC
      LIMIT ${limitParam} OFFSET ${offsetParam}`,
     params
   );
 
-  return { guests: res.rows, total };
+  return {
+    guests: res.rows.map((r) => ({
+      ...r,
+      total_spend: Number(r.total_spend || 0),
+      earned_points: Number(r.earned_points || 0),
+      bonus_points: Number(r.bonus_points || 0),
+      redeemed_points: Number(r.redeemed_points || 0),
+      loyalty_points: Number(r.loyalty_points || 0),
+    })),
+    total
+  };
 }
 
 export async function checkGuestDuplicates(
@@ -502,18 +649,39 @@ export async function getCrmSummary(
        SELECT
          rg.guest_id,
          COUNT(DISTINCT r.id) AS stay_count,
-         MAX(r.check_out::date) AS last_checkout
+         MAX(r.check_out::date) AS last_checkout,
+         COALESCE(
+           SUM(
+             CASE
+               WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                 AND COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))) <= 0
+                 AND COALESCE(r.discount_percent, 0) < 100
+                 AND COALESCE(r.total_price, 0) > 0
+                 AND UPPER(COALESCE(r.payment_status, '')) NOT LIKE '%COMP%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%COMPLIMENT%'
+                 AND UPPER(COALESCE(r.special_requests, '')) NOT LIKE '%HOUSE USE%'
+               THEN COALESCE(r.total_price, 0)
+               ELSE 0
+             END
+           ),
+           0
+         )::numeric(14,2) AS paid_spend
        FROM reservation_guests rg
        JOIN reservations r ON rg.reservation_id = r.id
        JOIN bookings b ON r.booking_id = b.id
        WHERE b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+         AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+         AND COALESCE(b.booking_status, '') != 'CANCELLED'
        GROUP BY rg.guest_id
      )
      SELECT
        COUNT(DISTINCT qs.guest_id)::int AS qualifying_guests,
        COUNT(DISTINCT CASE WHEN qs.stay_count > 1 THEN qs.guest_id END)::int AS repeat_guests,
-       COUNT(DISTINCT CASE WHEN qs.last_checkout < ($2::date - INTERVAL '90 days') THEN qs.guest_id END)::int AS dormant_guests
+       COUNT(DISTINCT CASE WHEN ($2::date - qs.last_checkout) >= 30 THEN qs.guest_id END)::int AS dormant_30d,
+       COUNT(DISTINCT CASE WHEN ($2::date - qs.last_checkout) >= 60 THEN qs.guest_id END)::int AS dormant_60d,
+       COUNT(DISTINCT CASE WHEN ($2::date - qs.last_checkout) >= 90 THEN qs.guest_id END)::int AS dormant_90d,
+       COALESCE(SUM(qs.paid_spend), 0)::numeric(14,2) AS total_customer_revenue
      FROM qualifying_stays qs
      JOIN guests g ON qs.guest_id = g.id
      WHERE (g.is_archived IS NULL OR g.is_archived = FALSE)`,
@@ -522,7 +690,11 @@ export async function getCrmSummary(
 
   const qualifyingCount = stayStatsRes.rows[0]?.qualifying_guests || 0;
   const repeatGuests = stayStatsRes.rows[0]?.repeat_guests || 0;
-  const dormantGuests90d = stayStatsRes.rows[0]?.dormant_guests || 0;
+  const dormantGuests30d = stayStatsRes.rows[0]?.dormant_30d || 0;
+  const dormantGuests60d = stayStatsRes.rows[0]?.dormant_60d || 0;
+  const dormantGuests90d = stayStatsRes.rows[0]?.dormant_90d || 0;
+  const totalCustomerRevenue = Number(stayStatsRes.rows[0]?.total_customer_revenue || 0);
+  const avgCustomerLtv = qualifyingCount > 0 ? Math.round(totalCustomerRevenue / qualifyingCount) : 0;
   const repeatRate = qualifyingCount > 0 ? Number(((repeatGuests / qualifyingCount) * 100).toFixed(1)) : 0;
 
   const newGuestsRes = await pool.query(
@@ -559,12 +731,15 @@ export async function getCrmSummary(
        SELECT
          rg.guest_id,
          MAX(r.check_out::date) AS last_stay,
-         COUNT(DISTINCT r.id)::int AS visit_count
+         COUNT(DISTINCT r.id)::int AS visit_count,
+         COALESCE(SUM(CASE WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID' THEN COALESCE(r.total_price, 0) ELSE 0 END), 0)::numeric(14,2) AS total_spend
        FROM reservation_guests rg
        JOIN reservations r ON rg.reservation_id = r.id
        JOIN bookings b ON r.booking_id = b.id
        WHERE b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
+         AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+         AND COALESCE(b.booking_status, '') != 'CANCELLED'
        GROUP BY rg.guest_id
      )
      SELECT
@@ -575,13 +750,14 @@ export async function getCrmSummary(
        g.vip_status,
        TO_CHAR(gls.last_stay, 'YYYY-MM-DD') AS last_stay,
        ($2::date - gls.last_stay)::int AS days_since_last_stay,
-       gls.visit_count
+       gls.visit_count,
+       gls.total_spend
      FROM guest_last_stay gls
      JOIN guests g ON gls.guest_id = g.id
      WHERE ($2::date - gls.last_stay) >= 30
        AND (g.is_archived IS NULL OR g.is_archived = FALSE)
      ORDER BY gls.last_stay DESC
-     LIMIT 20`,
+     LIMIT 50`,
     [propertyId, hotelDate]
   );
 
@@ -593,9 +769,16 @@ export async function getCrmSummary(
     repeat_guests: repeatGuests,
     repeat_rate: repeatRate,
     new_guests_last_30d: newGuestsLast30d,
+    dormant_guests_30d: dormantGuests30d,
+    dormant_guests_60d: dormantGuests60d,
     dormant_guests_90d: dormantGuests90d,
+    total_customer_revenue: totalCustomerRevenue,
+    avg_customer_ltv: avgCustomerLtv,
     birthdays_this_month: bdayRes.rows,
-    follow_up_candidates: followUpRes.rows
+    follow_up_candidates: followUpRes.rows.map((r) => ({
+      ...r,
+      total_spend: Number(r.total_spend || 0),
+    }))
   };
 }
 
@@ -616,21 +799,31 @@ export async function getDuplicateCandidates(
         WHERE rg.guest_id = g.id AND b.property_id = $1
       )
     )
+    AND (g.is_archived IS NULL OR g.is_archived = FALSE)
   `;
 
-  // 1. Matching Phone Candidates
+  const phoneNormExpr = `
+    CASE
+      WHEN REGEXP_REPLACE(COALESCE(g.phone, ''), '[^0-9]', '', 'g') LIKE '62%'
+        AND LENGTH(REGEXP_REPLACE(COALESCE(g.phone, ''), '[^0-9]', '', 'g')) > 8
+      THEN '0' || SUBSTRING(REGEXP_REPLACE(COALESCE(g.phone, ''), '[^0-9]', '', 'g') FROM 3)
+      ELSE REGEXP_REPLACE(COALESCE(g.phone, ''), '[^0-9]', '', 'g')
+    END
+  `;
+
+  // 1. Matching Phone Candidates (normalized digits >= 7)
   const phoneRes = await pool.query(
     `WITH visible_guests AS (
-       SELECT g.*
+       SELECT g.*, (${phoneNormExpr}) AS norm_phone_key
        FROM guests g
        WHERE ${baseFilter}
          AND g.phone IS NOT NULL
-         AND TRIM(g.phone) != ''
+         AND LENGTH((${phoneNormExpr})) >= 7
      ),
      matched_keys AS (
-       SELECT TRIM(phone) AS phone_key
+       SELECT norm_phone_key AS phone_key
        FROM visible_guests
-       GROUP BY TRIM(phone)
+       GROUP BY norm_phone_key
        HAVING COUNT(*) >= 2
      )
      SELECT
@@ -641,7 +834,7 @@ export async function getDuplicateCandidates(
        stats.first_stay,
        stats.last_stay
      FROM visible_guests vg
-     JOIN matched_keys mk ON TRIM(vg.phone) = mk.phone_key
+     JOIN matched_keys mk ON vg.norm_phone_key = mk.phone_key
      LEFT JOIN LATERAL (
        SELECT
          COUNT(DISTINCT r.id)::int AS visit_count,
@@ -655,7 +848,7 @@ export async function getDuplicateCandidates(
          AND b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
      ) stats ON true
-     ORDER BY vg.phone ASC, vg.updated_at DESC`,
+     ORDER BY vg.norm_phone_key ASC, stats.visit_count DESC NULLS LAST, vg.updated_at DESC`,
     [propertyId]
   );
 
@@ -696,7 +889,7 @@ export async function getDuplicateCandidates(
          AND b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
      ) stats ON true
-     ORDER BY LOWER(TRIM(vg.email)) ASC, vg.updated_at DESC`,
+     ORDER BY LOWER(TRIM(vg.email)) ASC, stats.visit_count DESC NULLS LAST, vg.updated_at DESC`,
     [propertyId]
   );
 
@@ -738,7 +931,7 @@ export async function getDuplicateCandidates(
          AND b.property_id = $1
          AND r.status IN ('CHECKED_IN', 'CHECKED_OUT')
      ) stats ON true
-     ORDER BY LOWER(TRIM(vg.full_name)) ASC, vg.updated_at DESC`,
+     ORDER BY LOWER(TRIM(vg.full_name)) ASC, stats.visit_count DESC NULLS LAST, vg.updated_at DESC`,
     [propertyId]
   );
 
@@ -746,7 +939,7 @@ export async function getDuplicateCandidates(
 
   const phoneMap = new Map<string, GuestWithStats[]>();
   for (const row of phoneRes.rows) {
-    const key = String(row.phone).trim();
+    const key = String(row.norm_phone_key || row.phone).trim();
     if (!phoneMap.has(key)) phoneMap.set(key, []);
     phoneMap.get(key)!.push(row);
   }
@@ -787,6 +980,451 @@ export async function getDuplicateCandidates(
   }
 
   return clusters;
+}
+
+export async function mergeGuests(
+  pool: Pool,
+  input: GuestMergeInput,
+  correlationId?: string,
+  actorUserId?: number | null
+): Promise<GuestMergeResult> {
+  const propertyId = parsePropertyId(input.property_id, 'property_id');
+  const primaryId = Number(input.primary_guest_id);
+  if (!Number.isInteger(primaryId) || primaryId <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'primary_guest_id wajib dipilih');
+  }
+  const dupIds = Array.from(
+    new Set(
+      (input.duplicate_guest_ids || [])
+        .map((id) => Number(id))
+        .filter((id) => Number.isInteger(id) && id > 0 && id !== primaryId)
+    )
+  );
+  if (dupIds.length === 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Pilih minimal 1 profil duplikat untuk digabungkan');
+  }
+
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const primaryGuest = await assertGuestBelongsToProperty(client, primaryId, propertyId);
+    const dupGuests: Guest[] = [];
+    for (const dId of dupIds) {
+      const dg = await assertGuestBelongsToProperty(client, dId, propertyId);
+      dupGuests.push(dg);
+    }
+
+    // Lock rows
+    await client.query(
+      `SELECT id FROM guests WHERE id = ANY($1::bigint[]) FOR UPDATE`,
+      [[primaryId, ...dupIds]]
+    );
+
+    // 1. Auto-enrich empty fields on primary guest from duplicate guests
+    const vipRank: Record<string, number> = { STANDARD: 0, VIP: 1, VVIP: 2 };
+    let bestVip: VipStatus = primaryGuest.vip_status || 'STANDARD';
+    let phone = primaryGuest.phone;
+    let email = primaryGuest.email;
+    let identityType = primaryGuest.identity_type;
+    let identityNumber = primaryGuest.identity_number;
+    let identityPath = primaryGuest.identity_path;
+    let hasValidIdentity = Boolean(primaryGuest.has_valid_identity);
+    let birthDate = primaryGuest.birth_date;
+    let birthPlace = primaryGuest.birth_place;
+    let gender = primaryGuest.gender;
+    let address = primaryGuest.address;
+    let city = primaryGuest.city;
+    let province = primaryGuest.province;
+    let nationality = primaryGuest.nationality;
+    let occupation = primaryGuest.occupation;
+    let preferences = primaryGuest.preferences;
+    const notesParts: string[] = [];
+    if (primaryGuest.notes && primaryGuest.notes.trim()) {
+      notesParts.push(primaryGuest.notes.trim());
+    }
+
+    for (const dg of dupGuests) {
+      if ((vipRank[dg.vip_status] || 0) > (vipRank[bestVip] || 0)) {
+        bestVip = dg.vip_status;
+      }
+      if (!phone && dg.phone) phone = dg.phone;
+      if (!email && dg.email) email = dg.email;
+      if (!identityNumber && dg.identity_number) {
+        identityNumber = dg.identity_number;
+        identityType = dg.identity_type || identityType || 'KTP';
+      }
+      if (!identityPath && dg.identity_path) identityPath = dg.identity_path;
+      if (dg.has_valid_identity) hasValidIdentity = true;
+      if (!birthDate && dg.birth_date) birthDate = dg.birth_date;
+      if (!birthPlace && dg.birth_place) birthPlace = dg.birth_place;
+      if (!gender && dg.gender) gender = dg.gender;
+      if (!address && dg.address) address = dg.address;
+      if (!city && dg.city) city = dg.city;
+      if (!province && dg.province) province = dg.province;
+      if (!nationality && dg.nationality) nationality = dg.nationality;
+      if (!occupation && dg.occupation) occupation = dg.occupation;
+      if (!preferences && dg.preferences) preferences = dg.preferences;
+      if (dg.notes && dg.notes.trim() && !notesParts.includes(dg.notes.trim())) {
+        notesParts.push(dg.notes.trim());
+      }
+    }
+
+    const normPhone = normalizeDigitsOnly(phone);
+    const normEmail = normalizeEmail(email);
+    const normNik = normalizeIdentityNumber(identityNumber);
+    const mergedNotes = notesParts.length > 0 ? notesParts.join(' | ') : null;
+
+    await client.query(
+      `UPDATE guests
+       SET phone = $1,
+           normalized_phone = $2,
+           email = $3,
+           normalized_email = $4,
+           identity_type = $5,
+           identity_number = $6,
+           normalized_identity_number = $7,
+           identity_path = $8,
+           has_valid_identity = $9,
+           birth_date = $10,
+           birth_place = $11,
+           gender = $12,
+           address = $13,
+           city = $14,
+           province = $15,
+           nationality = $16,
+           occupation = $17,
+           preferences = $18,
+           vip_status = $19,
+           notes = $20,
+           is_archived = FALSE,
+           is_active = TRUE,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = $21`,
+      [
+        phone,
+        normPhone,
+        email,
+        normEmail,
+        identityType,
+        identityNumber,
+        normNik,
+        identityPath,
+        hasValidIdentity,
+        birthDate,
+        birthPlace,
+        gender,
+        address,
+        city,
+        province,
+        nationality,
+        occupation,
+        preferences,
+        bestVip,
+        mergedNotes,
+        primaryId
+      ]
+    );
+
+    // 2. Relink reservation_guests safely (avoid duplicate (reservation_id, guest_id))
+    // First upgrade primary guest role to PRIMARY_GUEST if a duplicate had PRIMARY_GUEST on the same reservation
+    await client.query(
+      `UPDATE reservation_guests rg_prim
+       SET role = 'PRIMARY_GUEST',
+           updated_at = CURRENT_TIMESTAMP
+       FROM reservation_guests rg_dup
+       WHERE rg_prim.reservation_id = rg_dup.reservation_id
+         AND rg_prim.guest_id = $1
+         AND rg_dup.guest_id = ANY($2::bigint[])
+         AND rg_dup.role = 'PRIMARY_GUEST'
+         AND rg_prim.role != 'PRIMARY_GUEST'`,
+      [primaryId, dupIds]
+    );
+
+    // Delete duplicate reservation_guests rows where primaryId is already linked to that reservation
+    await client.query(
+      `DELETE FROM reservation_guests rg_dup
+       WHERE rg_dup.guest_id = ANY($2::bigint[])
+         AND EXISTS (
+           SELECT 1 FROM reservation_guests rg_prim
+           WHERE rg_prim.reservation_id = rg_dup.reservation_id
+             AND rg_prim.guest_id = $1
+         )`,
+      [primaryId, dupIds]
+    );
+
+    // For remaining reservation_guests rows where multiple duplicates were on the same reservation, deduplicate them before relinking
+    await client.query(
+      `DELETE FROM reservation_guests rg_a
+       USING reservation_guests rg_b
+       WHERE rg_a.reservation_id = rg_b.reservation_id
+         AND rg_a.guest_id = ANY($1::bigint[])
+         AND rg_b.guest_id = ANY($1::bigint[])
+         AND rg_a.id > rg_b.id`,
+      [dupIds]
+    );
+
+    const relinkResv = await client.query(
+      `UPDATE reservation_guests
+       SET guest_id = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE guest_id = ANY($2::bigint[])`,
+      [primaryId, dupIds]
+    );
+
+    // 3. Relink transactions
+    const relinkTx = await client.query(
+      `UPDATE transactions
+       SET guest_id = $1,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE guest_id = ANY($2::bigint[])`,
+      [primaryId, dupIds]
+    );
+
+    // 4. Relink loyalty ledger
+    await client.query(
+      `UPDATE guest_loyalty_ledger
+       SET guest_id = $1
+       WHERE guest_id = ANY($2::bigint[])`,
+      [primaryId, dupIds]
+    );
+
+    // 5. Relink communication logs if table exists
+    const commTableRes = await client.query(`SELECT to_regclass('guest_communication_logs') AS tbl`);
+    if (commTableRes.rows[0]?.tbl) {
+      await client.query(
+        `UPDATE guest_communication_logs
+         SET guest_id = $1
+         WHERE guest_id = ANY($2::bigint[])`,
+        [primaryId, dupIds]
+      );
+    }
+
+    // 6. Soft-archive duplicate guests so they no longer appear in active lists or duplicate clusters
+    await client.query(
+      `UPDATE guests
+       SET is_archived = TRUE,
+           is_active = FALSE,
+           notes = CASE
+             WHEN notes IS NULL OR BTRIM(notes) = '' THEN 'Digabungkan ke profil #' || $1::text
+             ELSE notes || ' | Digabungkan ke profil #' || $1::text
+           END,
+           updated_at = CURRENT_TIMESTAMP
+       WHERE id = ANY($2::bigint[])`,
+      [primaryId, dupIds]
+    );
+
+    const updatedPrimaryRes = await client.query(`SELECT * FROM guests WHERE id = $1`, [primaryId]);
+    const updatedPrimary = updatedPrimaryRes.rows[0];
+
+    await writeGuestAudit(client, {
+      action: 'GUEST_MERGE',
+      entity: 'GUEST',
+      recordId: primaryId,
+      newValue: {
+        primary_guest_id: primaryId,
+        merged_duplicate_guest_ids: dupIds,
+        relinked_reservations: relinkResv.rowCount || 0,
+        relinked_transactions: relinkTx.rowCount || 0
+      },
+      propertyId,
+      correlationId,
+      actorUserId
+    });
+
+    await client.query('COMMIT');
+    return {
+      primary_guest: updatedPrimary,
+      merged_guest_ids: dupIds,
+      relinked_reservations: relinkResv.rowCount || 0,
+      relinked_transactions: relinkTx.rowCount || 0
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
+export async function listLoyaltyLedger(
+  pool: Pool,
+  propertyId: number,
+  guestId?: number
+): Promise<GuestLoyaltyLedgerEntry[]> {
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+
+  const params: any[] = [propertyId];
+  let guestClause = '';
+  if (guestId && Number.isInteger(guestId) && guestId > 0) {
+    params.push(guestId);
+    guestClause = `AND gll.guest_id = $2`;
+  }
+
+  const res = await pool.query(
+    `SELECT
+       gll.*,
+       g.full_name AS guest_name
+     FROM guest_loyalty_ledger gll
+     JOIN guests g ON g.id = gll.guest_id
+     WHERE gll.property_id = $1
+       ${guestClause}
+     ORDER BY gll.created_at DESC, gll.id DESC
+     LIMIT 200`,
+    params
+  );
+
+  return res.rows.map((r) => ({
+    id: Number(r.id),
+    property_id: Number(r.property_id),
+    guest_id: Number(r.guest_id),
+    guest_name: r.guest_name,
+    entry_type: r.entry_type,
+    points: Number(r.points),
+    description: r.description,
+    reference_no: r.reference_no,
+    created_by: r.created_by,
+    created_at: r.created_at
+  }));
+}
+
+export async function addLoyaltyLedgerEntry(
+  pool: Pool,
+  input: {
+    property_id: number;
+    guest_id: number;
+    entry_type: 'BONUS' | 'REDEEM' | 'ADJUSTMENT';
+    points: number;
+    description: string;
+    reference_no?: string | null;
+    created_by?: string | null;
+  },
+  correlationId?: string,
+  actorUserId?: number | null
+): Promise<GuestLoyaltyLedgerEntry> {
+  const propertyId = parsePropertyId(input.property_id, 'property_id');
+  const guestId = Number(input.guest_id);
+  if (!Number.isInteger(guestId) || guestId <= 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'guest_id wajib valid');
+  }
+  const entryType = String(input.entry_type || '').trim().toUpperCase() as 'BONUS' | 'REDEEM' | 'ADJUSTMENT';
+  if (!['BONUS', 'REDEEM', 'ADJUSTMENT'].includes(entryType)) {
+    throw httpError(400, 'VALIDATION_ERROR', 'entry_type harus BONUS, REDEEM, atau ADJUSTMENT');
+  }
+  const rawPoints = Math.round(Number(input.points || 0));
+  if (!Number.isFinite(rawPoints) || rawPoints === 0) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Jumlah poin harus berupa angka bulat bukan nol');
+  }
+  const description = String(input.description || '').trim();
+  if (!description) {
+    throw httpError(400, 'VALIDATION_ERROR', 'Keterangan poin wajib diisi');
+  }
+
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+  await assertGuestBelongsToProperty(pool, guestId, propertyId);
+
+  const signedPoints = entryType === 'REDEEM' ? -Math.abs(rawPoints) : (entryType === 'BONUS' ? Math.abs(rawPoints) : rawPoints);
+
+  if (signedPoints < 0) {
+    // Check available points
+    const { guests } = await searchGuests(pool, propertyId, undefined, 2000, 0, undefined, true);
+    const target = guests.find((g) => Number(g.id) === guestId);
+    const currentPoints = Number(target?.loyalty_points || 0);
+    if (Math.abs(signedPoints) > currentPoints) {
+      throw httpError(
+        400,
+        'INSUFFICIENT_POINTS',
+        `Saldo poin tamu (${currentPoints} poin) tidak mencukupi untuk penukaran ${Math.abs(signedPoints)} poin`
+      );
+    }
+  }
+
+  const insRes = await pool.query(
+    `INSERT INTO guest_loyalty_ledger (
+       property_id, guest_id, entry_type, points, description, reference_no, created_by
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+     RETURNING *`,
+    [
+      propertyId,
+      guestId,
+      entryType,
+      signedPoints,
+      description,
+      input.reference_no ? String(input.reference_no).trim() : null,
+      input.created_by || 'Front Office'
+    ]
+  );
+
+  const row = insRes.rows[0];
+  await writeGuestAudit(pool, {
+    action: 'GUEST_LOYALTY',
+    entity: 'GUEST',
+    recordId: guestId,
+    newValue: row,
+    propertyId,
+    correlationId,
+    actorUserId
+  });
+
+  return {
+    id: Number(row.id),
+    property_id: Number(row.property_id),
+    guest_id: Number(row.guest_id),
+    entry_type: row.entry_type,
+    points: Number(row.points),
+    description: row.description,
+    reference_no: row.reference_no,
+    created_by: row.created_by,
+    created_at: row.created_at
+  };
+}
+
+export async function syncGuestLoyaltyVipTiers(
+  pool: Pool,
+  propertyId: number,
+  correlationId?: string,
+  actorUserId?: number | null
+): Promise<{ updated_count: number }> {
+  await assertPropertyExists(pool, propertyId);
+  await ensureGuestCrmTables(pool);
+
+  const { guests } = await searchGuests(pool, propertyId, undefined, 2000, 0, undefined, false);
+  let updatedCount = 0;
+
+  for (const g of guests) {
+    let targetVip: VipStatus = g.vip_status;
+    if (g.loyalty_tier === 'PLATINUM' && g.vip_status !== 'VVIP') {
+      targetVip = 'VVIP';
+    } else if (g.loyalty_tier === 'GOLD' && g.vip_status === 'STANDARD') {
+      targetVip = 'VIP';
+    }
+    if (targetVip !== g.vip_status) {
+      await pool.query(
+        `UPDATE guests SET vip_status = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`,
+        [targetVip, g.id]
+      );
+      updatedCount++;
+    }
+  }
+
+  if (updatedCount > 0) {
+    await writeGuestAudit(pool, {
+      action: 'GUEST_LOYALTY',
+      entity: 'GUEST',
+      recordId: propertyId,
+      newValue: { action: 'SYNC_VIP_TIERS', updated_count: updatedCount },
+      propertyId,
+      correlationId,
+      actorUserId
+    });
+  }
+
+  return { updated_count: updatedCount };
 }
 
 export async function getGuestById(

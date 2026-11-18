@@ -11,6 +11,7 @@ import { GuestProfileModal } from './GuestProfileModal';
 import { GuestEditModal } from './GuestEditModal';
 import { GuestDuplicateModal } from './GuestDuplicateModal';
 import { GuestCommunicationPanel } from './GuestCommunicationPanel';
+import { GuestLoyaltyPanel } from './GuestLoyaltyPanel';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 
 interface GuestCrmWorkspaceProps {
@@ -42,7 +43,7 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
 
     try {
       const [guestsRes, summaryRes, dupRes] = await Promise.all([
-        authenticatedFetch(`/api/guests?property_id=${propertyId}`),
+        authenticatedFetch(`/api/guests?property_id=${propertyId}&limit=1000`),
         authenticatedFetch(`/api/guests/crm-summary?property_id=${propertyId}&hotel_date=${hotelDate}`),
         authenticatedFetch(`/api/guests/duplicate-candidates?property_id=${propertyId}`)
       ]);
@@ -148,17 +149,17 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
                 : 'text-stone-600 hover:text-stone-900'
             }`}
           >
-            Komunikasi Tamu
+            💬 Komunikasi Tamu
           </button>
           <button
-            disabled
-            className="px-3 py-1.5 text-xs font-medium text-stone-400 cursor-not-allowed flex items-center space-x-1"
-            title="Program Loyalitas akan hadir pada fase mendatang"
+            onClick={() => setActiveTab('loyalty')}
+            className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-all flex items-center space-x-1 ${
+              activeTab === 'loyalty'
+                ? 'bg-white text-[#1E392A] shadow-xs'
+                : 'text-stone-600 hover:text-stone-900'
+            }`}
           >
-            <span>🎁 Loyalitas</span>
-            <span className="text-[9px] bg-stone-200 text-stone-500 px-1 py-0.2 rounded">
-              Segera
-            </span>
+            <span>🎁 Loyalitas & Poin</span>
           </button>
         </div>
       </div>
@@ -189,18 +190,30 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
 
       {activeTab === 'database' && (
         <GuestDatabaseTable
+          propertyId={propertyId}
           guests={guests}
           loading={loading}
           hotelDate={hotelDate}
           onSelectGuest={handleOpenProfile}
           onEditGuest={handleEditGuest}
           onCreateGuest={handleCreateNew}
+          onMerged={loadData}
         />
       )}
 
       {activeTab === 'communication' && (
         <GuestCommunicationPanel propertyId={propertyId} />
       )}
+
+      {activeTab === 'loyalty' && (
+        <GuestLoyaltyPanel
+          propertyId={propertyId}
+          guests={guests}
+          onRefreshGuests={loadData}
+          onSelectGuest={handleOpenProfile}
+        />
+      )}
+
       {/* Modals */}
       <GuestProfileModal
         guestId={selectedGuestId}
@@ -227,10 +240,12 @@ export const GuestCrmWorkspace: React.FC<GuestCrmWorkspaceProps> = ({ propertyId
 
       <GuestDuplicateModal
         isOpen={isDuplicateModalOpen}
+        propertyId={propertyId}
         clusters={duplicateClusters}
         loading={loading}
         onClose={() => setIsDuplicateModalOpen(false)}
         onSelectGuest={handleOpenProfile}
+        onMerged={loadData}
       />
     </div>
   );

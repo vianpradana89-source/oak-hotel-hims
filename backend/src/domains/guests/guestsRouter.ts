@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import type { Pool } from 'pg';
 import {
+  addLoyaltyLedgerEntry,
   addReservationGuest,
   archiveGuest,
   checkGuestDuplicates,
@@ -11,11 +12,14 @@ import {
   getDuplicateCandidates,
   getGuestById,
   httpError,
+  listLoyaltyLedger,
   listReservationGuests,
   matchGuest,
+  mergeGuests,
   parsePropertyId,
   restoreGuest,
   searchGuests,
+  syncGuestLoyaltyVipTiers,
   updateGuest,
   updateReservationGuest
 } from './guestService';
@@ -119,13 +123,105 @@ export function createGuestsRouter(pool: Pool) {
     }
   });
 
+  // POST /api/guests/merge
+  router.post('/merge', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const result = await mergeGuests(
+        pool,
+        {
+          property_id: propertyId,
+          primary_guest_id: Number(req.body?.primary_guest_id),
+          duplicate_guest_ids: Array.isArray(req.body?.duplicate_guest_ids) ? req.body.duplicate_guest_ids : [],
+          actor_name: req.user?.full_name || req.user?.username || null
+        },
+        correlationId,
+        actorUserId
+      );
+      return res.json({
+        status: 'SUCCESS',
+        data: result
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // GET /api/guests/loyalty-ledger?property_id=X&guest_id=Y
+  router.get('/loyalty-ledger', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id, 'property_id');
+      const guestId = req.query.guest_id ? Number(req.query.guest_id) : undefined;
+      const entries = await listLoyaltyLedger(pool, propertyId, guestId);
+      return res.json({
+        status: 'SUCCESS',
+        data: entries
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/loyalty-ledger
+  router.post('/loyalty-ledger', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const entry = await addLoyaltyLedgerEntry(
+        pool,
+        {
+          property_id: propertyId,
+          guest_id: Number(req.body?.guest_id),
+          entry_type: req.body?.entry_type,
+          points: Number(req.body?.points),
+          description: String(req.body?.description || ''),
+          reference_no: req.body?.reference_no || null,
+          created_by: req.user?.full_name || req.user?.username || req.body?.created_by || 'Front Office'
+        },
+        correlationId,
+        actorUserId
+      );
+      return res.status(201).json({
+        status: 'SUCCESS',
+        data: entry
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
+  // POST /api/guests/loyalty-sync-vip
+  router.post('/loyalty-sync-vip', async (req: any, res: any) => {
+    try {
+      const propertyId = parsePropertyId(req.body?.property_id, 'property_id');
+      const correlationId = getCorrelationId(req);
+      const actorUserId = (req.user?.id && Number.isFinite(Number(req.user.id)) && Number(req.user.id) > 0)
+        ? Number(req.user.id)
+        : null;
+      const result = await syncGuestLoyaltyVipTiers(pool, propertyId, correlationId, actorUserId);
+      return res.json({
+        status: 'SUCCESS',
+        data: result
+      });
+    } catch (err: any) {
+      return handleRouterError(err, res);
+    }
+  });
+
   // GET /api/guests?property_id=X&search=...&limit=...&offset=...&vip_status=...
   router.get('/', async (req: any, res: any) => {
     try {
       const propertyId = parsePropertyId(req.query.property_id, 'property_id');
       const search = typeof req.query.search === 'string' ? req.query.search : (typeof req.query.q === 'string' ? req.query.q : undefined);
       const vipStatus = typeof req.query.vip_status === 'string' ? req.query.vip_status : undefined;
-      const limit = req.query.limit !== undefined ? Number(req.query.limit) : 50;
+      const limit = req.query.limit !== undefined ? Number(req.query.limit) : 1000;
       const offset = req.query.offset !== undefined ? Number(req.query.offset) : 0;
       const includeArchived = req.query.include_archived === 'true';
 
@@ -135,7 +231,7 @@ export function createGuestsRouter(pool: Pool) {
         data: result.guests,
         meta: {
           total: result.total,
-          limit: Math.max(1, Math.min(limit, 100)),
+          limit: Math.max(1, Math.min(limit, 2000)),
           offset: Math.max(0, offset)
         }
       });
