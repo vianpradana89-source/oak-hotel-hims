@@ -1459,7 +1459,8 @@ export async function hardDeleteEmployeeAccount(
   client: PoolClient,
   propertyId: number,
   employeeId: number,
-  actor?: { id?: number; name?: string; role?: string }
+  actor?: { id?: number; name?: string; role?: string },
+  options: { cascade?: boolean } = {}
 ): Promise<{ success: boolean; message: string; deleted_employee: { id: number; employee_code: string; full_name: string } }> {
   // 1. Fetch employee
   const empRes = await client.query(
@@ -1474,127 +1475,196 @@ export async function hardDeleteEmployeeAccount(
   }
   const emp = empRes.rows[0];
 
-  // 2. Check operational & history references
-  // 2a. Work schedules
-  const schedRes = await client.query(
-    'SELECT COUNT(*) FROM employee_work_schedules WHERE employee_id = $1',
-    [employeeId]
-  );
-  if (Number(schedRes.rows[0].count) > 0) {
-    throw Object.assign(
-      new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat operasional jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
-      { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_HISTORY' }
-    );
-  }
+  const cascade = Boolean(options?.cascade);
 
-  // 2b. Schedule audits
-  const schedAuditRes = await client.query(
-    'SELECT COUNT(*) FROM employee_work_schedule_audits WHERE employee_id = $1',
-    [employeeId]
-  );
-  if (Number(schedAuditRes.rows[0].count) > 0) {
-    throw Object.assign(
-      new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat audit jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
-      { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_AUDIT' }
-    );
-  }
-
-  // 2c. Attendance
-  try {
-    const attRes = await client.query(
-      'SELECT COUNT(*) FROM employee_attendance WHERE employee_id = $1',
+  if (!cascade) {
+    // 2. Check operational & history references (strict mode without cascade)
+    // 2a. Work schedules
+    const schedRes = await client.query(
+      'SELECT COUNT(*) FROM employee_work_schedules WHERE employee_id = $1',
       [employeeId]
     );
-    if (Number(attRes.rows[0].count) > 0) {
+    if (Number(schedRes.rows[0].count) > 0) {
       throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena memiliki data kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat operasional jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_HISTORY' }
       );
     }
-  } catch (err: any) {
-    if (err.statusCode === 409) throw err;
-  }
 
-  try {
-    const attRecRes = await client.query(
-      'SELECT COUNT(*) FROM employee_attendance_records WHERE employee_id = $1',
+    // 2b. Schedule audits
+    const schedAuditRes = await client.query(
+      'SELECT COUNT(*) FROM employee_work_schedule_audits WHERE employee_id = $1',
       [employeeId]
     );
-    if (Number(attRecRes.rows[0].count) > 0) {
+    if (Number(schedAuditRes.rows[0].count) > 0) {
       throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat catatan kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat audit jadwal kerja. Nonaktifkan karyawan untuk mempertahankan histori.'),
+        { statusCode: 409, code: 'EMPLOYEE_HAS_SCHEDULE_AUDIT' }
       );
     }
-  } catch (err: any) {
-    if (err.statusCode === 409) throw err;
-  }
 
-  // 2d. Payroll
-  try {
-    const payrollRes = await client.query(
-      'SELECT COUNT(*) FROM payroll_records WHERE employee_id = $1',
+    // 2c. Attendance
+    try {
+      const attRes = await client.query(
+        'SELECT COUNT(*) FROM employee_attendance WHERE employee_id = $1',
+        [employeeId]
+      );
+      if (Number(attRes.rows[0].count) > 0) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena memiliki data kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+        );
+      }
+    } catch (err: any) {
+      if (err.statusCode === 409) throw err;
+    }
+
+    try {
+      const attRecRes = await client.query(
+        'SELECT COUNT(*) FROM employee_attendance_records WHERE employee_id = $1',
+        [employeeId]
+      );
+      if (Number(attRecRes.rows[0].count) > 0) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat catatan kehadiran. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_HAS_ATTENDANCE' }
+        );
+      }
+    } catch (err: any) {
+      if (err.statusCode === 409) throw err;
+    }
+
+    // 2d. Payroll
+    try {
+      const payrollRes = await client.query(
+        'SELECT COUNT(*) FROM payroll_records WHERE employee_id = $1',
+        [employeeId]
+      );
+      if (Number(payrollRes.rows[0].count) > 0) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat slip gaji/payroll. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_HAS_PAYROLL' }
+        );
+      }
+    } catch (err: any) {
+      if (err.statusCode === 409) throw err;
+    }
+
+    // 2e. Face enrollment
+    try {
+      const faceRes = await client.query(
+        'SELECT COUNT(*) FROM employee_face_enrollments WHERE employee_id = $1',
+        [employeeId]
+      );
+      if (Number(faceRes.rows[0].count) > 0) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena memiliki data biometrik/face enrollment. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_HAS_FACE_ENROLLMENT' }
+        );
+      }
+    } catch (err: any) {
+      if (err.statusCode === 409) throw err;
+    }
+
+    // 3. Linked users account check
+    const userRes = await client.query(
+      'SELECT * FROM users WHERE employee_id = $1',
       [employeeId]
     );
-    if (Number(payrollRes.rows[0].count) > 0) {
-      throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena memiliki riwayat slip gaji/payroll. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_HAS_PAYROLL' }
-      );
-    }
-  } catch (err: any) {
-    if (err.statusCode === 409) throw err;
-  }
+    if (userRes.rows.length > 0) {
+      const linkedUser = userRes.rows[0];
+      const userHistory = await checkUserHasOperationalHistory(client, linkedUser.id);
+      if (userHistory.hasHistory) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung memiliki riwayat operasional. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_USER_HAS_HISTORY', details: userHistory.reasons }
+        );
+      }
 
-  // 2e. Face enrollment
-  try {
-    const faceRes = await client.query(
-      'SELECT COUNT(*) FROM employee_face_enrollments WHERE employee_id = $1',
-      [employeeId]
-    );
-    if (Number(faceRes.rows[0].count) > 0) {
-      throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena memiliki data biometrik/face enrollment. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_HAS_FACE_ENROLLMENT' }
+      // Check if user is referenced in schedules as creator or publisher
+      const userSchedRes = await client.query(
+        'SELECT COUNT(*) FROM employee_work_schedules WHERE created_by_user_id = $1 OR published_by_user_id = $1 OR updated_by_user_id = $1',
+        [linkedUser.id]
       );
-    }
-  } catch (err: any) {
-    if (err.statusCode === 409) throw err;
-  }
+      if (Number(userSchedRes.rows[0].count) > 0) {
+        throw Object.assign(
+          new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung tercatat sebagai pembuat/penerbit jadwal. Nonaktifkan karyawan untuk mempertahankan histori.'),
+          { statusCode: 409, code: 'EMPLOYEE_USER_HAS_SCHEDULE_HISTORY' }
+        );
+      }
 
-  // 3. Linked users account check
-  const userRes = await client.query(
-    'SELECT * FROM users WHERE employee_id = $1',
-    [employeeId]
-  );
-  if (userRes.rows.length > 0) {
-    const linkedUser = userRes.rows[0];
-    const userHistory = await checkUserHasOperationalHistory(client, linkedUser.id);
-    if (userHistory.hasHistory) {
-      throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung memiliki riwayat operasional. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_USER_HAS_HISTORY', details: userHistory.reasons }
-      );
+      // If safe, delete user permission overrides if table exists, then delete the user
+      const tblCheck = await client.query("SELECT to_regclass('user_permission_overrides') as tbl");
+      if (tblCheck.rows[0]?.tbl) {
+        await client.query('DELETE FROM user_permission_overrides WHERE user_id = $1', [linkedUser.id]);
+      }
+      await client.query('DELETE FROM users WHERE id = $1', [linkedUser.id]);
     }
+  } else {
+    // CASCADE MODE: Safely clean up associated records before employee deletion
+    // 2a. Work schedule audits & schedules
+    await client.query('DELETE FROM employee_work_schedule_audits WHERE employee_id = $1', [employeeId]);
+    await client.query('DELETE FROM employee_work_schedules WHERE employee_id = $1', [employeeId]);
 
-    // Check if user is referenced in schedules as creator or publisher
-    const userSchedRes = await client.query(
-      'SELECT COUNT(*) FROM employee_work_schedules WHERE created_by_user_id = $1 OR published_by_user_id = $1 OR updated_by_user_id = $1',
-      [linkedUser.id]
-    );
-    if (Number(userSchedRes.rows[0].count) > 0) {
-      throw Object.assign(
-        new Error('Karyawan tidak dapat dihapus permanen karena akun login terhubung tercatat sebagai pembuat/penerbit jadwal. Nonaktifkan karyawan untuk mempertahankan histori.'),
-        { statusCode: 409, code: 'EMPLOYEE_USER_HAS_SCHEDULE_HISTORY' }
-      );
-    }
+    // 2b. Attendance records & attendance
+    try {
+      await client.query('DELETE FROM employee_attendance_records WHERE employee_id = $1', [employeeId]);
+    } catch {}
+    try {
+      await client.query('DELETE FROM employee_attendance WHERE employee_id = $1', [employeeId]);
+    } catch {}
 
-    // If safe, delete user permission overrides if table exists, then delete the user
-    const tblCheck = await client.query("SELECT to_regclass('user_permission_overrides') as tbl");
-    if (tblCheck.rows[0]?.tbl) {
-      await client.query('DELETE FROM user_permission_overrides WHERE user_id = $1', [linkedUser.id]);
+    // 2c. Payroll records
+    try {
+      await client.query('DELETE FROM payroll_records WHERE employee_id = $1', [employeeId]);
+    } catch {}
+
+    // 2d. Face enrollments
+    try {
+      await client.query('DELETE FROM employee_face_enrollments WHERE employee_id = $1', [employeeId]);
+    } catch {}
+
+    // 2e. Housekeeping / Maintenance tasks: nullify assigned_employee_id
+    try {
+      await client.query('UPDATE housekeeping_tasks SET assigned_employee_id = NULL WHERE assigned_employee_id = $1', [employeeId]);
+    } catch {}
+    try {
+      await client.query('UPDATE maintenance_tasks SET assigned_employee_id = NULL WHERE assigned_employee_id = $1', [employeeId]);
+    } catch {}
+
+    // 2f. Linked users handling
+    const userRes = await client.query('SELECT * FROM users WHERE employee_id = $1', [employeeId]);
+    if (userRes.rows.length > 0) {
+      for (const linkedUser of userRes.rows) {
+        try {
+          await client.query(
+            'UPDATE employee_work_schedules SET created_by_user_id = NULL WHERE created_by_user_id = $1',
+            [linkedUser.id]
+          );
+          await client.query(
+            'UPDATE employee_work_schedules SET published_by_user_id = NULL WHERE published_by_user_id = $1',
+            [linkedUser.id]
+          );
+          await client.query(
+            'UPDATE employee_work_schedules SET updated_by_user_id = NULL WHERE updated_by_user_id = $1',
+            [linkedUser.id]
+          );
+        } catch {}
+
+        const userHistory = await checkUserHasOperationalHistory(client, linkedUser.id);
+        if (userHistory.hasHistory) {
+          // Keep user account for operational audit trail integrity, but unlink from employee
+          await client.query('UPDATE users SET employee_id = NULL WHERE id = $1', [linkedUser.id]);
+        } else {
+          // Safe to delete user account completely
+          const tblCheck = await client.query("SELECT to_regclass('user_permission_overrides') as tbl");
+          if (tblCheck.rows[0]?.tbl) {
+            await client.query('DELETE FROM user_permission_overrides WHERE user_id = $1', [linkedUser.id]);
+          }
+          await client.query('DELETE FROM users WHERE id = $1', [linkedUser.id]);
+        }
+      }
     }
-    await client.query('DELETE FROM users WHERE id = $1', [linkedUser.id]);
   }
 
   // 4. Safe to delete hr_employees

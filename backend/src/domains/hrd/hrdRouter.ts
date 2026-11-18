@@ -464,7 +464,8 @@ export function createHrdRouter(pool: Pool): Router {
         role: 'Super Admin'
       };
 
-      const result = await hardDeleteEmployeeAccount(client, propertyId, employeeId, actor);
+      const cascade = req.query.cascade === 'true' || req.query.force === 'true' || req.body?.cascade === true;
+      const result = await hardDeleteEmployeeAccount(client, propertyId, employeeId, actor, { cascade });
       await client.query('COMMIT');
       res.json({
         status: 'OK',

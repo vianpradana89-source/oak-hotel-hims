@@ -132,6 +132,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [dynamicRoles, setDynamicRoles] = useState<DynamicRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
+  const [departmentFilter, setDepartmentFilter] = useState<string>('ALL');
   const [showAddModal, setShowAddModal] = useState(false);
 
   const [editingEmployee, setEditingEmployee] = useState<HrEmployee | null>(null);
@@ -210,7 +211,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
     setHardDeleting(true);
     setHardDeleteError(null);
     try {
-      const res = await fetch(`/api/hrd/employees/${hardDeleteTarget.id}/hard-delete?property_id=${propertyId}`, {
+      const res = await fetch(`/api/hrd/employees/${hardDeleteTarget.id}/hard-delete?property_id=${propertyId}&cascade=true`, {
         method: 'DELETE',
         headers: getAuthHeaders()
       });
@@ -832,6 +833,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const archiveEmployeesList = employees.filter(emp => emp.is_active === false || emp.status !== 'ACTIVE');
 
   const displayedEmployees = (employeeScopeTab === 'ACTIVE' ? activeEmployeesList : archiveEmployeesList).filter(emp => {
+    if (departmentFilter !== 'ALL') {
+      const empDept = emp.department || '';
+      if (empDept.toLowerCase() !== departmentFilter.toLowerCase()) return false;
+    }
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     const fullName = (emp.full_name || `${emp.first_name || ''} ${emp.last_name || ''}`).toLowerCase();
@@ -1025,21 +1030,33 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
           </div>
 
           <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs overflow-hidden">
-            {/* Search Bar */}
-            <div className="p-4 border-b border-slate-100 flex items-center justify-between gap-4">
-              <div className="relative flex-1 max-w-sm">
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Cari karyawan berdasarkan nama, role, atau email..."
-                  className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
-                />
-                <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                </svg>
+            {/* Search Bar & Department Filter */}
+            <div className="p-4 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div className="flex items-center gap-3 flex-1 max-w-xl">
+                <div className="relative flex-1">
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Cari karyawan berdasarkan nama, role, atau email..."
+                    className="w-full pl-9 pr-3 py-2 rounded-xl border border-slate-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#1b4332]"
+                  />
+                  <svg className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                  </svg>
+                </div>
+                <select
+                  value={departmentFilter}
+                  onChange={(e) => setDepartmentFilter(e.target.value)}
+                  className="py-2 px-3 rounded-xl border border-slate-200 text-xs bg-white text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-[#1b4332] shrink-0"
+                >
+                  <option value="ALL">Semua Departemen</option>
+                  {departments.map((dept) => (
+                    <option key={dept.id} value={dept.name}>{dept.name}</option>
+                  ))}
+                </select>
               </div>
-              <span className="text-xs text-slate-500 font-medium">
+              <span className="text-xs text-slate-500 font-medium shrink-0">
                 Total: <strong>{displayedEmployees.length}</strong> Karyawan
               </span>
             </div>
@@ -1997,7 +2014,7 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
             </div>
 
             <p className="text-xs text-slate-600">
-              Yakin ingin menghapus data ini? Data akan dihapus permanen.
+              Yakin ingin menghapus karyawan <strong>{hardDeleteTarget.full_name || hardDeleteTarget.employee_code}</strong>? Data karyawan beserta riwayat jadwal kerja dan absensi terkait akan dihapus permanen.
             </p>
 
             {hardDeleteError && (
