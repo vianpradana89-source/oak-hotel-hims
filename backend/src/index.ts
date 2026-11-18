@@ -267,9 +267,19 @@ const allowedOrigins = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:51
   .split(',')
   .map((o) => o.trim())
   .filter(Boolean);
+
+const isAllowedCorsOrigin = (origin: string): boolean => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return true;
+  if (/^https:\/\/.*\.run\.app$/.test(origin)) return true;
+  if (/^https:\/\/([a-zA-Z0-9-]+\.)*oaklawang\.com$/.test(origin)) return true;
+  return false;
+};
+
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    if (!origin || isAllowedCorsOrigin(origin)) return callback(null, true);
     callback(new Error('Not allowed by CORS'));
   },
   credentials: false,
