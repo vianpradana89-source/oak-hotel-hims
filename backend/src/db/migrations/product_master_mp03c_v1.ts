@@ -437,10 +437,8 @@ export const PRODUCT_MASTER_MP03C_STEPS: MigrationStep[] = [
       CREATE OR REPLACE FUNCTION trg_fn_guard_stock_location_identity()
       RETURNS TRIGGER AS $$
       BEGIN
-        IF OLD.property_id IS DISTINCT FROM NEW.property_id
-           OR OLD.location_type IS DISTINCT FROM NEW.location_type
-           OR OLD.room_id IS DISTINCT FROM NEW.room_id THEN
-          RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id, location_type, dan room_id pada stock_locations tidak dapat diubah setelah dibuat';
+        IF OLD.property_id IS DISTINCT FROM NEW.property_id THEN
+          RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id pada stock_locations tidak dapat diubah setelah dibuat';
         END IF;
         RETURN NEW;
       END;

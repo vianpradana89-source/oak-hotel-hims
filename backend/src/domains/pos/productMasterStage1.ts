@@ -991,6 +991,24 @@ export function createPosMenuItemPatchHandler(deps: PosMenuItemPatchDeps) {
         setClauses.push(`variants = $${params.length}::jsonb`);
       }
 
+      if (body.default_location_id !== undefined) {
+        if (body.default_location_id === null || body.default_location_id === '') {
+          params.push(null);
+          setClauses.push(`default_location_id = $${params.length}`);
+        } else {
+          const dlId = Number(body.default_location_id);
+          if (!Number.isInteger(dlId) || dlId <= 0) {
+            return res.status(400).json({
+              status: 'ERROR',
+              code: 'VALIDATION_ERROR',
+              message: 'default_location_id harus berupa bilangan bulat positif atau null',
+            });
+          }
+          params.push(dlId);
+          setClauses.push(`default_location_id = $${params.length}`);
+        }
+      }
+
       if (setClauses.length === 0 && !hasAnyUnitField) {
         return res.status(400).json({ status: 'ERROR', code: 'VALIDATION_ERROR', message: 'no valid fields to update' });
       }
@@ -1506,22 +1524,40 @@ export function createPosMenuItemCreateHandler(deps: PosMenuItemCreateDeps) {
                   barcodeVal,
                 ]
               );
+        let defaultLocationIdVal: number | null = null;
+        if (
+          body.default_location_id !== undefined &&
+          body.default_location_id !== null &&
+          String(body.default_location_id).trim() !== ''
+        ) {
+          const parsedLocId = Number(body.default_location_id);
+          if (Number.isInteger(parsedLocId) && parsedLocId > 0) {
+            defaultLocationIdVal = parsedLocId;
+          }
+        }
+
         let row = insertRes.rows[0];
-        if ( (storageSublocationVal !== null || variantsVal.length > 0) && row?.id) {
+        if ((storageSublocationVal !== null || variantsVal.length > 0 || defaultLocationIdVal !== null) && row?.id) {
           const subRes = await client
             .query(
               `UPDATE pos_menu_items
                   SET storage_sublocation = COALESCE($1, storage_sublocation),
-                      variants = $2::jsonb
-                WHERE id = $3 AND property_id = $4
+                      variants = $2::jsonb,
+                      default_location_id = COALESCE($3, default_location_id)
+                WHERE id = $4 AND property_id = $5
                 RETURNING *`,
-              [storageSublocationVal, JSON.stringify(variantsVal), row.id, propId]
+              [storageSublocationVal, JSON.stringify(variantsVal), defaultLocationIdVal, row.id, propId]
             )
             .catch(() => ({ rowCount: 0, rows: [] as any[] }));
           if ((subRes.rowCount ?? 0) > 0) {
             row = subRes.rows[0];
           } else {
-            row = { ...row, storage_sublocation: storageSublocationVal, variants: variantsVal };
+            row = {
+              ...row,
+              storage_sublocation: storageSublocationVal,
+              variants: variantsVal,
+              ...(defaultLocationIdVal !== null ? { default_location_id: defaultLocationIdVal } : {}),
+            };
           }
         }
         if (finalCategoryId !== null && productTypeVal !== null) {
@@ -2049,6 +2085,16 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             }
 
             const uniqueLocIds = Array.from(new Set(resolvedLocationIds));
+            if (uniqueLocIds.length > 0) {
+              await client
+                .query(
+                  `UPDATE pos_menu_items
+                      SET default_location_id = COALESCE(default_location_id, $1)
+                    WHERE id = $2 AND property_id = $3`,
+                  [uniqueLocIds[0], targetProductId, propertyId]
+                )
+                .catch(() => {});
+            }
             for (const locId of uniqueLocIds) {
               const qtyDeltaNum = stockQtyVal !== null && stockQtyVal > 0 ? stockQtyVal : 0;
               const qtyDeltaFormatted = qtyDeltaNum.toFixed(3);

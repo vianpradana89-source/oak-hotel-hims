@@ -301,6 +301,7 @@ export interface ProductItem {
   is_sellable_pos?: boolean;
   track_stock?: boolean;
   track_inventory?: boolean;
+  default_location_id?: number | null;
   storage_sublocation?: string | null;
   variants?: ProductVariantDto[] | null;
   product_type?: ProductTypeCode | string | null;
@@ -357,6 +358,7 @@ export interface ProductFormState {
   canonicalBaseUnitCode?: string;
   isSellablePos: boolean;
   trackStock?: boolean;
+  defaultLocationId?: string;
   storageSublocation?: string;
   variants?: ProductVariantFormDraft[];
 }
@@ -374,6 +376,7 @@ export const EMPTY_PRODUCT_FORM: ProductFormState = {
   canonicalBaseUnitCode: '',
   isSellablePos: true,
   trackStock: false,
+  defaultLocationId: '',
   storageSublocation: '',
   variants: [],
 };
@@ -604,6 +607,7 @@ export function buildEditProductForm(item: ProductItem): ProductFormState {
     canonicalBaseUnitCode: item.canonical_base_unit_code || '',
     isSellablePos: item.is_sellable_pos !== false,
     trackStock: effectiveTrackStock,
+    defaultLocationId: item.default_location_id != null ? String(item.default_location_id) : '',
     storageSublocation: typeof item.storage_sublocation === 'string' ? item.storage_sublocation : '',
     variants: Array.isArray(item.variants)
       ? item.variants.map((v) => ({
@@ -1070,6 +1074,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setSuccessMsg(null);
     setLoading(true);
     void loadProducts('active', propertyId);
+    void loadStockLocationsAndCandidates(propertyId);
   }, [propertyId]); // sengaja hanya propertyId; loadProducts di deps karena useMemo
 
   // Fokus otomatis ke input Nama Produk saat modal tambah dibuka.
@@ -1471,6 +1476,12 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       if (addSublocationClean !== '') {
         productPayload.storage_sublocation = addSublocationClean;
       }
+      if (newProduct.defaultLocationId && newProduct.defaultLocationId.trim() !== '') {
+        const dlId = Number(newProduct.defaultLocationId);
+        if (Number.isInteger(dlId) && dlId > 0) {
+          productPayload.default_location_id = dlId;
+        }
+      }
       if (newProduct.productType === 'FINISHED_GOOD' && Array.isArray(newProduct.variants)) {
         productPayload.variants = newProduct.variants
           .filter((v) => v.name.trim() !== '')
@@ -1650,6 +1661,11 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       const nextSublocation = (editProduct.storageSublocation || '').trim();
       if (nextSublocation !== origSublocation || nextSublocation !== '') {
         patch.storage_sublocation = nextSublocation === '' ? null : nextSublocation;
+      }
+      const origDefaultLoc = editingItem.default_location_id != null ? String(editingItem.default_location_id) : '';
+      const nextDefaultLoc = (editProduct.defaultLocationId || '').trim();
+      if (nextDefaultLoc !== origDefaultLoc) {
+        patch.default_location_id = nextDefaultLoc === '' ? null : Number(nextDefaultLoc) || null;
       }
       if (editProduct.productType === 'FINISHED_GOOD' && Array.isArray(editProduct.variants)) {
         patch.variants = editProduct.variants
@@ -2730,16 +2746,22 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
       setStockLocationErrorMsg('Kamar fisik wajib dipilih untuk lokasi bertipe Minibar Kamar');
       return;
     }
-    if (isRoomMinibar && stockLocationForm.mode === 'add' && roomIdVal != null) {
+    if (isRoomMinibar && roomIdVal != null) {
       const selectedCandidate = roomCandidates.find((r) => Number(r.room_id) === roomIdVal);
       const existingLocId =
         selectedCandidate?.existing_stock_location_id ?? selectedCandidate?.existing_location_id ?? null;
       const existingLocCode =
         selectedCandidate?.existing_stock_location_code ?? selectedCandidate?.existing_location_code ?? null;
+      const isSameEditedLocation =
+        stockLocationForm.mode === 'edit' &&
+        stockLocationForm.id != null &&
+        existingLocId != null &&
+        Number(existingLocId) === Number(stockLocationForm.id);
       if (
-        existingLocId != null ||
-        Boolean(existingLocCode) ||
-        selectedCandidate?.is_available_for_minibar === false
+        !isSameEditedLocation &&
+        (existingLocId != null ||
+          Boolean(existingLocCode) ||
+          selectedCandidate?.is_available_for_minibar === false)
       ) {
         setStockLocationErrorMsg(
           `Kamar ${selectedCandidate?.room_number || roomIdVal} sudah memiliki lokasi minibar (${existingLocCode || existingLocId})`
@@ -2754,22 +2776,14 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     try {
       setSaving(true);
       setStockLocationErrorMsg(null);
-      const payload =
-        stockLocationForm.mode === 'add'
-          ? {
-              property_id: targetPropertyId,
-              code: codeClean,
-              name: nameClean,
-              location_type: stockLocationForm.locationType,
-              room_id: isRoomMinibar ? roomIdVal : null,
-              notes: stockLocationForm.notes.trim() === '' ? null : stockLocationForm.notes.trim(),
-            }
-          : {
-              property_id: targetPropertyId,
-              code: codeClean,
-              name: nameClean,
-              notes: stockLocationForm.notes.trim() === '' ? null : stockLocationForm.notes.trim(),
-            };
+      const payload = {
+        property_id: targetPropertyId,
+        code: codeClean,
+        name: nameClean,
+        location_type: stockLocationForm.locationType,
+        room_id: isRoomMinibar ? roomIdVal : null,
+        notes: stockLocationForm.notes.trim() === '' ? null : stockLocationForm.notes.trim(),
+      };
       const url =
         stockLocationForm.mode === 'add'
           ? `/api/pos/stock-locations?property_id=${targetPropertyId}`
@@ -3796,21 +3810,47 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">
-                      Tempat Penyimpanan (Sub-Lokasi Gudang / Outlet)
-                    </label>
-                    <input
-                      type="text"
-                      list="oak-storage-sublocations"
-                      maxLength={100}
-                      placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen"
-                      value={newProduct.storageSublocation || ''}
-                      onChange={(e) => setNewProduct({ ...newProduct, storageSublocation: e.target.value })}
-                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
-                    />
-                    <div className="text-[10px] text-gray-400 mt-0.5">
-                      Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Lokasi Gudang / Outlet Default
+                      </label>
+                      <select
+                        aria-label="Pilih lokasi gudang default produk"
+                        value={newProduct.defaultLocationId || ''}
+                        onChange={(e) => setNewProduct({ ...newProduct, defaultLocationId: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                      >
+                        <option value="">— Otomatis (Sesuai Resep / SKU / Tipe) —</option>
+                        {stockLocations
+                          .filter((loc) => loc.is_active && loc.location_type !== 'ROOM_MINIBAR')
+                          .map((loc) => (
+                            <option key={loc.id} value={String(loc.id)}>
+                              {loc.code} — {loc.name} ({loc.location_type})
+                            </option>
+                          ))}
+                      </select>
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        Titik potong stok POS otomatis (cth: KCH Dapur, RCP Toko 1, CCR Coffee Corner).
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Tempat Penyimpanan (Sub-Lokasi)
+                      </label>
+                      <input
+                        type="text"
+                        list="oak-storage-sublocations"
+                        maxLength={100}
+                        placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering"
+                        value={newProduct.storageSublocation || ''}
+                        onChange={(e) => setNewProduct({ ...newProduct, storageSublocation: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                      />
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi serta Riwayat Mutasi.
+                      </div>
                     </div>
                   </div>
 
@@ -4373,21 +4413,47 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                     </div>
                   </div>
 
-                  <div>
-                    <label className="block text-xs font-semibold text-gray-700 mb-1">
-                      Tempat Penyimpanan (Sub-Lokasi Gudang / Outlet)
-                    </label>
-                    <input
-                      type="text"
-                      list="oak-storage-sublocations"
-                      maxLength={100}
-                      placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering, Lemari Linen"
-                      value={editProduct.storageSublocation || ''}
-                      onChange={(e) => setEditProduct({ ...editProduct, storageSublocation: e.target.value })}
-                      className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
-                    />
-                    <div className="text-[10px] text-gray-400 mt-0.5">
-                      Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi, Riwayat Mutasi, serta Laporan Mutasi Barang.
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Lokasi Gudang / Outlet Default
+                      </label>
+                      <select
+                        aria-label="Pilih lokasi gudang default edit produk"
+                        value={editProduct.defaultLocationId || ''}
+                        onChange={(e) => setEditProduct({ ...editProduct, defaultLocationId: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                      >
+                        <option value="">— Otomatis (Sesuai Resep / SKU / Tipe) —</option>
+                        {stockLocations
+                          .filter((loc) => loc.is_active && loc.location_type !== 'ROOM_MINIBAR')
+                          .map((loc) => (
+                            <option key={loc.id} value={String(loc.id)}>
+                              {loc.code} — {loc.name} ({loc.location_type})
+                            </option>
+                          ))}
+                      </select>
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        Titik potong stok POS otomatis (cth: KCH Dapur, RCP Toko 1, CCR Coffee Corner).
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-gray-700 mb-1">
+                        Tempat Penyimpanan (Sub-Lokasi)
+                      </label>
+                      <input
+                        type="text"
+                        list="oak-storage-sublocations"
+                        maxLength={100}
+                        placeholder="Contoh: Showcase, Chiller, Freezer, Rak Kering"
+                        value={editProduct.storageSublocation || ''}
+                        onChange={(e) => setEditProduct({ ...editProduct, storageSublocation: e.target.value })}
+                        className="w-full text-xs sm:text-sm bg-gray-50 border border-gray-300 rounded-lg px-3 py-2 focus:ring-2 focus:ring-emerald-500 focus:outline-hidden"
+                      />
+                      <div className="text-[10px] text-gray-400 mt-0.5">
+                        Ditampilkan di samping Lokasi pada Saldo &amp; Valuasi serta Riwayat Mutasi.
+                      </div>
                     </div>
                   </div>
 
@@ -5162,7 +5228,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                       <label className="block text-xs font-semibold text-gray-700 mb-1">Tipe Lokasi *</label>
                       <select
                         aria-label="Pilih tipe lokasi stok"
-                        disabled={saving || stockLocationForm.mode === 'edit'}
+                        disabled={saving}
                         value={stockLocationForm.locationType}
                         onChange={(e) => {
                           const nextType = e.target.value as StockLocationTypeCode;
@@ -5187,7 +5253,7 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                         <label className="block text-xs font-semibold text-gray-700 mb-1">Kamar Fisik Minibar *</label>
                         <select
                           aria-label="Pilih kamar minibar"
-                          disabled={saving || stockLocationForm.mode === 'edit'}
+                          disabled={saving}
                           value={stockLocationForm.roomId}
                           onChange={(e) => {
                             const selectedRoomId = e.target.value;
@@ -5213,10 +5279,16 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
                             const existingId = room.existing_stock_location_id ?? room.existing_location_id;
                             const existingActive =
                               room.existing_stock_location_is_active ?? room.existing_location_is_active;
+                            const isSelfEdited =
+                              stockLocationForm.mode === 'edit' &&
+                              stockLocationForm.id != null &&
+                              existingId != null &&
+                              Number(existingId) === Number(stockLocationForm.id);
                             const isTaken =
-                              existingId != null ||
-                              Boolean(existingCode) ||
-                              room.is_available_for_minibar === false;
+                              !isSelfEdited &&
+                              (existingId != null ||
+                                Boolean(existingCode) ||
+                                room.is_available_for_minibar === false);
                             return (
                               <option key={room.room_id} value={String(room.room_id)} disabled={isTaken}>
                                 Kamar {room.room_number} {room.room_type_name ? `(${room.room_type_name})` : ''}

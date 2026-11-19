@@ -2912,11 +2912,18 @@ async function main() {
               };
             }
             if (norm.startsWith('UPDATE stock_locations SET code = $1')) {
-              const target = locations.find((l) => l.id === Number(params[4]));
+              const target =
+                params.length >= 8
+                  ? locations.find((l) => l.id === Number(params[6]))
+                  : locations.find((l) => l.id === Number(params[4]));
               target.code = params[0];
               target.name = params[1];
               target.is_active = Boolean(params[2]);
               target.notes = params[3];
+              if (params.length >= 8) {
+                target.location_type = params[4];
+                target.room_id = params[5];
+              }
               return { rowCount: 1, rows: [{ ...target }] };
             }
             throw new Error(`Unexpected client.query in T8.6: ${norm}`);
@@ -3019,30 +3026,32 @@ async function main() {
     assert.strictEqual(resMbDupRoom.statusCode, 409);
     assert.strictEqual(resMbDupRoom.body.code, 'ROOM_MINIBAR_LOCATION_EXISTS');
 
-    // 7) PATCH yang mencoba mengubah location_type atau room_id -> 400 IMMUTABLE_LOCATION_IDENTITY
+    // 7) PATCH mengubah location_type dari ROOM_MINIBAR ke POS_OUTLET -> otomatis mengosongkan room_id = null, lalu dapat dikembalikan ke ROOM_MINIBAR
     const resPatchType = makeMockRes();
     await patchLocHandler(
       {
         params: { id: '2' },
         query: { property_id: '1' },
-        body: { location_type: 'KITCHEN' },
+        body: { location_type: 'POS_OUTLET' },
       },
       resPatchType
     );
-    assert.strictEqual(resPatchType.statusCode, 400);
-    assert.strictEqual(resPatchType.body.code, 'IMMUTABLE_LOCATION_IDENTITY');
+    assert.strictEqual(resPatchType.statusCode, 200);
+    assert.strictEqual(resPatchType.body.data.location_type, 'POS_OUTLET');
+    assert.strictEqual(resPatchType.body.data.room_id, null);
 
     const resPatchRoom = makeMockRes();
     await patchLocHandler(
       {
         params: { id: '2' },
         query: { property_id: '1' },
-        body: { room_id: 102 },
+        body: { location_type: 'ROOM_MINIBAR', room_id: 101 },
       },
       resPatchRoom
     );
-    assert.strictEqual(resPatchRoom.statusCode, 400);
-    assert.strictEqual(resPatchRoom.body.code, 'IMMUTABLE_LOCATION_IDENTITY');
+    assert.strictEqual(resPatchRoom.statusCode, 200);
+    assert.strictEqual(resPatchRoom.body.data.location_type, 'ROOM_MINIBAR');
+    assert.strictEqual(resPatchRoom.body.data.room_id, 101);
 
     // 8) PATCH nama/catatan/is_active -> 200 OK (menonaktifkan lokasi minibar kamar 101)
     const resPatchOk = makeMockRes();

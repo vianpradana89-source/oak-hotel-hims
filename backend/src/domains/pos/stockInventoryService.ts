@@ -7509,10 +7509,14 @@ export async function deductStockForPosSale(
   // 2. Ambil baris pesanan
   const itemsRes = await client.query(
     `SELECT poi.id, poi.menu_item_id, poi.quantity,
-            pmi.name, pmi.track_stock, pmi.track_inventory,
-            pmi.base_unit, pmi.canonical_base_unit_code
+            pmi.name, pmi.item_code, pmi.track_stock, pmi.track_inventory,
+            pmi.base_unit, pmi.canonical_base_unit_code,
+            pmi.default_location_id,
+            pmc.name AS category_name,
+            pmc.default_location_id AS category_default_location_id
        FROM pos_order_items poi
        JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+       LEFT JOIN pos_menu_categories pmc ON pmc.id = pmi.category_id
       WHERE poi.order_id = $1
       ORDER BY poi.id ASC`,
     [orderId]
@@ -7534,6 +7538,10 @@ export async function deductStockForPosSale(
     ingredient_product_id: number;
     recipe_quantity: number;
     ingredient_name: string;
+    ingredient_item_code: string | null;
+    ingredient_default_location_id: number | null;
+    ingredient_category_name: string | null;
+    ingredient_category_default_location_id: number | null;
     ingredient_track_stock: boolean;
     ingredient_track_inventory: boolean;
     ingredient_base_unit: string | null;
@@ -7544,13 +7552,18 @@ export async function deductStockForPosSale(
   if (menuItemIds.length > 0) {
     const recRes = await client.query(
       `SELECT r.id AS recipe_id, r.product_id, r.ingredient_product_id, r.quantity AS recipe_quantity,
-              r.uom_id, i.name AS ingredient_name, i.track_stock AS ingredient_track_stock,
+              r.uom_id, i.name AS ingredient_name, i.item_code AS ingredient_item_code,
+              i.default_location_id AS ingredient_default_location_id,
+              i.track_stock AS ingredient_track_stock,
               i.track_inventory AS ingredient_track_inventory,
               i.base_unit AS ingredient_base_unit,
               i.canonical_base_unit_code AS ingredient_canonical_unit,
+              ic.name AS ingredient_category_name,
+              ic.default_location_id AS ingredient_category_default_location_id,
               u.code AS uom_code
          FROM pos_product_recipes r
          JOIN pos_menu_items i ON i.id = r.ingredient_product_id
+         LEFT JOIN pos_menu_categories ic ON ic.id = i.category_id
          LEFT JOIN pos_product_uoms u ON u.id = r.uom_id
         WHERE r.property_id = $1 AND r.product_id = ANY($2::int[])
         ORDER BY r.id ASC`,
@@ -7568,6 +7581,10 @@ export async function deductStockForPosSale(
         ingredient_product_id: Number(r.ingredient_product_id),
         recipe_quantity: parseFloat(r.recipe_quantity),
         ingredient_name: r.ingredient_name,
+        ingredient_item_code: r.ingredient_item_code || null,
+        ingredient_default_location_id: r.ingredient_default_location_id ? Number(r.ingredient_default_location_id) : null,
+        ingredient_category_name: r.ingredient_category_name || null,
+        ingredient_category_default_location_id: r.ingredient_category_default_location_id ? Number(r.ingredient_category_default_location_id) : null,
         ingredient_track_stock: Boolean(r.ingredient_track_stock),
         ingredient_track_inventory: Boolean(r.ingredient_track_inventory),
         ingredient_base_unit: r.ingredient_base_unit,
@@ -7588,6 +7605,13 @@ export async function deductStockForPosSale(
     base_unit_code: string;
     is_ingredient: boolean;
     source_notes: string[];
+    item_code: string | null;
+    default_location_id: number | null;
+    category_name: string | null;
+    category_default_location_id: number | null;
+    parent_item_code: string | null;
+    parent_category_name: string | null;
+    parent_default_location_id: number | null;
   }>();
 
   let skippedNonTracked = 0;
@@ -7617,6 +7641,13 @@ export async function deductStockForPosSale(
             base_unit_code: unitCode,
             is_ingredient: true,
             source_notes: [note],
+            item_code: ing.ingredient_item_code || null,
+            default_location_id: ing.ingredient_default_location_id || null,
+            category_name: ing.ingredient_category_name || null,
+            category_default_location_id: ing.ingredient_category_default_location_id || null,
+            parent_item_code: item.item_code || null,
+            parent_category_name: item.category_name || null,
+            parent_default_location_id: item.default_location_id ? Number(item.default_location_id) : null,
           });
         }
       }
@@ -7634,6 +7665,13 @@ export async function deductStockForPosSale(
           base_unit_code: unitCode,
           is_ingredient: false,
           source_notes: [`Penjualan produk langsung`],
+          item_code: item.item_code || null,
+          default_location_id: item.default_location_id ? Number(item.default_location_id) : null,
+          category_name: item.category_name || null,
+          category_default_location_id: item.category_default_location_id ? Number(item.category_default_location_id) : null,
+          parent_item_code: null,
+          parent_category_name: null,
+          parent_default_location_id: null,
         });
       }
     } else {
@@ -7784,6 +7822,107 @@ export async function deductStockForPosSale(
     }
   }
 
+  // 4c. Muat seluruh lokasi aktif pada properti untuk smart multi-location routing (KCH / RCP / CCR)
+  const allActiveLocsRes = await client.query(
+    `SELECT id, code, name, location_type
+       FROM stock_locations
+      WHERE property_id = $1 AND is_active = TRUE
+      ORDER BY id ASC`,
+    [propertyId]
+  );
+  const activeLocById = new Map<number, { id: number; code: string; name: string; location_type: string; display: string }>();
+  let rcpLocId: number | null = null;
+  let ccrLocId: number | null = null;
+  let kchLocId: number | null = null;
+
+  for (const r of allActiveLocsRes.rows) {
+    const idNum = Number(r.id);
+    const codeStr = String(r.code || '').trim().toUpperCase();
+    const nameStr = String(r.name || '').trim();
+    const typeStr = String(r.location_type || '').trim().toUpperCase();
+    const display = codeStr ? `${codeStr} — ${nameStr}` : nameStr || `#${idNum}`;
+    activeLocById.set(idNum, { id: idNum, code: codeStr, name: nameStr, location_type: typeStr, display });
+
+    if (codeStr === 'RCP' || (!rcpLocId && /^RECEPTION/i.test(nameStr))) {
+      rcpLocId = idNum;
+    }
+    if (codeStr === 'CCR' || (!ccrLocId && /COFFEE|COFFE/i.test(nameStr))) {
+      ccrLocId = idNum;
+    }
+    if (codeStr === 'KCH' || (!kchLocId && typeStr === 'KITCHEN')) {
+      kchLocId = idNum;
+    }
+  }
+
+  const resolvePreferredLocationForItem = (item: (typeof sortedItems)[number]): { locId: number; locDisplay: string } => {
+    const pickActive = (candidateId: number | null | undefined): { locId: number; locDisplay: string } | null => {
+      if (!candidateId) return null;
+      const found = activeLocById.get(Number(candidateId));
+      return found ? { locId: found.id, locDisplay: found.display } : null;
+    };
+
+    if (explicitLocationOverride && !item.is_ingredient) {
+      return { locId: targetLocationId!, locDisplay: targetLocDisplay };
+    }
+    if (
+      params.kitchenLocationId &&
+      Number.isInteger(Number(params.kitchenLocationId)) &&
+      Number(params.kitchenLocationId) > 0 &&
+      item.is_ingredient
+    ) {
+      return { locId: ingredientLocationId, locDisplay: ingredientLocDisplay };
+    }
+
+    // Prioritas 1: default_location_id eksplisit pada produk/bahan baku atau kategorinya
+    const directDef = pickActive(item.default_location_id) || pickActive(item.category_default_location_id);
+    if (directDef) return directDef;
+
+    // Prioritas 2: Prefix SKU (CCR. -> CCR, RCP. -> RCP, KCH. -> KCH)
+    const skuUpper = String(item.item_code || '').trim().toUpperCase();
+    if ((skuUpper.startsWith('CCR.') || skuUpper.startsWith('CCR-')) && ccrLocId) {
+      const picked = pickActive(ccrLocId);
+      if (picked) return picked;
+    }
+    if ((skuUpper.startsWith('RCP.') || skuUpper.startsWith('RCP-')) && rcpLocId) {
+      const picked = pickActive(rcpLocId);
+      if (picked) return picked;
+    }
+    if ((skuUpper.startsWith('KCH.') || skuUpper.startsWith('KCH-')) && kchLocId) {
+      const picked = pickActive(kchLocId);
+      if (picked) return picked;
+    }
+
+    // Prioritas 3: Konteks menu induk (untuk bahan baku resep Coffee Corner) atau nama kategori
+    if (item.is_ingredient) {
+      const parentDef = pickActive(item.parent_default_location_id);
+      if (parentDef) return parentDef;
+      const parentSku = String(item.parent_item_code || '').trim().toUpperCase();
+      const parentCat = String(item.parent_category_name || '').trim().toUpperCase();
+      if (
+        ccrLocId &&
+        (parentSku.startsWith('CCR.') ||
+          parentSku.startsWith('CCR-') ||
+          /\b(COFFEE|COFFE|KOPI|CCR|CAFE|BARISTA)\b/.test(parentCat))
+      ) {
+        const picked = pickActive(ccrLocId);
+        if (picked) return picked;
+      }
+      return { locId: ingredientLocationId, locDisplay: ingredientLocDisplay };
+    }
+
+    const catUpper = String(item.category_name || '').trim().toUpperCase();
+    if (ccrLocId && /\b(COFFEE|COFFE|KOPI|CCR|CAFE|BARISTA)\b/.test(catUpper)) {
+      const picked = pickActive(ccrLocId);
+      if (picked) return picked;
+    }
+    if (rcpLocId && /\b(MINUMAN|DRINK|BEVERAGE|SNACK|ROKOK|RETAIL)\b/.test(catUpper)) {
+      const picked = pickActive(rcpLocId);
+      if (picked) return picked;
+    }
+
+    return { locId: targetLocationId!, locDisplay: targetLocDisplay };
+  };
+
   // Urutkan berdasarkan product_id menaik untuk mencegah deadlock saat konkurensi tinggi
   const sortedItems = Array.from(aggregatedMap.values()).sort((a, b) => a.product_id - b.product_id);
 
@@ -7800,15 +7939,55 @@ export async function deductStockForPosSale(
   }[] = [];
 
   for (const item of sortedItems) {
-    const itemLoc = item.is_ingredient ? ingredientLocationId : targetLocationId;
-    const itemLocDisplay = item.is_ingredient ? ingredientLocDisplay : targetLocDisplay;
+    const preferred = resolvePreferredLocationForItem(item);
+    let itemLoc = preferred.locId;
+    let itemLocDisplay = preferred.locDisplay;
     const balRes = await client.query(
       `SELECT quantity FROM stock_balances
         WHERE property_id = $1 AND product_id = $2 AND location_id = $3
         FOR UPDATE`,
       [propertyId, item.product_id, itemLoc]
     );
-    const currentBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity) : 0;
+    let currentBalance = balRes.rows.length > 0 ? parseFloat(balRes.rows[0].quantity) : 0;
+
+    // Smart Auto-Fallback antar gudang operasional aktif (KCH / RCP / CCR) bila gudang utama pilihan belum memiliki saldo cukup
+    // (tidak pernah memotong dari ROOM_MINIBAR kamar tamu secara otomatis)
+    if (currentBalance < item.quantity - 0.000001 && !explicitLocationOverride) {
+      const fallbackRes = await client.query(
+        `SELECT sb.location_id, sb.quantity, sl.code, sl.name
+           FROM stock_balances sb
+           JOIN stock_locations sl ON sl.id = sb.location_id AND sl.property_id = sb.property_id
+          WHERE sb.property_id = $1
+            AND sb.product_id = $2
+            AND sb.location_id <> $3
+            AND sl.is_active = TRUE
+            AND sl.location_type <> 'ROOM_MINIBAR'
+            AND sb.quantity >= $4
+          ORDER BY
+            CASE
+              WHEN $5::boolean = TRUE AND (UPPER(BTRIM(COALESCE(sl.code, ''))) = 'KCH' OR sl.location_type = 'KITCHEN') THEN 0
+              WHEN $5::boolean = TRUE AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'CCR' THEN 1
+              WHEN $5::boolean = FALSE AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'RCP' THEN 0
+              WHEN $5::boolean = FALSE AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'CCR' THEN 1
+              WHEN sl.location_type = 'POS_OUTLET' THEN 2
+              WHEN sl.location_type = 'KITCHEN' THEN 3
+              WHEN sl.location_type = 'WAREHOUSE' THEN 4
+              ELSE 5
+            END,
+            sb.quantity DESC,
+            sl.id ASC
+          LIMIT 1
+          FOR UPDATE OF sb`,
+        [propertyId, item.product_id, itemLoc, item.quantity - 0.000001, item.is_ingredient]
+      );
+      if (fallbackRes.rows.length > 0) {
+        const fbRow = fallbackRes.rows[0];
+        itemLoc = Number(fbRow.location_id);
+        itemLocDisplay = fbRow.code ? `${fbRow.code} — ${fbRow.name}` : String(fbRow.name || `#${itemLoc}`);
+        currentBalance = parseFloat(fbRow.quantity);
+      }
+    }
+
     if (currentBalance < item.quantity - 0.000001) {
       const curFormatted = currentBalance.toFixed(3);
       const reqFormatted = item.quantity.toFixed(3);

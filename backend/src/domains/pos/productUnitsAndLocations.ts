@@ -2673,32 +2673,87 @@ export function createStockLocationPatchHandler(deps: ProductMasterMp03cDeps) {
 
         const existing = formatStockLocationRow(existingRes.rows[0]);
 
-        // Immutability guard: location_type & room_id tidak dapat diubah setelah dibuat
+        let nextLocationType = existing.location_type;
         if (Object.prototype.hasOwnProperty.call(body, 'location_type')) {
-          const requestedType =
-            typeof body.location_type === 'string' ? body.location_type.trim().toUpperCase() : '';
-          if (requestedType !== existing.location_type) {
+          const parsedType = parseStockLocationTypeInput(body.location_type);
+          if (!parsedType.ok) {
             if (isDedicatedClient) await client.query('ROLLBACK');
-            return res.status(400).json({
+            return res.status(parsedType.status).json({
               status: 'ERROR',
-              code: 'IMMUTABLE_LOCATION_IDENTITY',
-              message: 'Identitas struktural lokasi (location_type) bersifat tetap dan tidak dapat diubah setelah lokasi dibuat',
+              code: parsedType.code,
+              message: parsedType.error,
             });
           }
+          nextLocationType = parsedType.value;
         }
 
-        if (Object.prototype.hasOwnProperty.call(body, 'room_id')) {
-          const requestedRoomId =
-            body.room_id === null || body.room_id === '' || body.room_id === undefined
-              ? null
-              : Number(body.room_id);
-          if (requestedRoomId !== existing.room_id) {
+        const hasRoomIdField = Object.prototype.hasOwnProperty.call(body, 'room_id');
+        const rawRoomIdVal =
+          !hasRoomIdField || body.room_id === null || body.room_id === '' || body.room_id === undefined
+            ? null
+            : Number(body.room_id);
+
+        let nextRoomId: number | null =
+          nextLocationType === 'ROOM_MINIBAR'
+            ? hasRoomIdField
+              ? rawRoomIdVal
+              : existing.room_id
+            : null;
+        let nextRoomNumber: string | null =
+          nextLocationType === 'ROOM_MINIBAR' && nextRoomId === existing.room_id
+            ? existing.room_number
+            : null;
+
+        if (nextLocationType !== 'ROOM_MINIBAR' && hasRoomIdField && rawRoomIdVal !== null) {
+          if (isDedicatedClient) await client.query('ROLLBACK');
+          return res.status(400).json({
+            status: 'ERROR',
+            code: 'ROOM_ID_FORBIDDEN_FOR_NON_MINIBAR',
+            message: `Lokasi bertipe ${nextLocationType} tidak boleh memiliki room_id`,
+          });
+        }
+
+        if (nextLocationType === 'ROOM_MINIBAR') {
+          if (nextRoomId === null || !Number.isInteger(nextRoomId) || nextRoomId <= 0) {
             if (isDedicatedClient) await client.query('ROLLBACK');
             return res.status(400).json({
               status: 'ERROR',
-              code: 'IMMUTABLE_LOCATION_IDENTITY',
-              message: 'Identitas struktural lokasi (room_id) bersifat tetap dan tidak dapat diubah setelah lokasi dibuat',
+              code: 'ROOM_ID_REQUIRED_FOR_MINIBAR',
+              message: 'Lokasi bertipe ROOM_MINIBAR wajib menyertakan room_id yang valid',
             });
+          }
+
+          if (nextRoomId !== existing.room_id || existing.location_type !== 'ROOM_MINIBAR') {
+            const roomRes = await client.query(
+              `SELECT id, property_id, room_number FROM rooms WHERE id = $1`,
+              [nextRoomId]
+            );
+            if (roomRes.rowCount === 0 || Number(roomRes.rows[0].property_id) !== propertyId) {
+              if (isDedicatedClient) await client.query('ROLLBACK');
+              return res.status(422).json({
+                status: 'ERROR',
+                code: 'ROOM_PROPERTY_MISMATCH',
+                message: `Kamar (room_id=${nextRoomId}) tidak ditemukan atau bukan milik properti ${propertyId}`,
+              });
+            }
+            nextRoomNumber = String(roomRes.rows[0].room_number || '');
+
+            const existingRoomLoc = await client.query(
+              `SELECT id, code FROM stock_locations
+                WHERE property_id = $1
+                  AND room_id = $2
+                  AND location_type = 'ROOM_MINIBAR'`,
+              [propertyId, nextRoomId]
+            );
+            const conflictRow = existingRoomLoc.rows.find((r: any) => Number(r.id) !== locationId);
+            if (conflictRow) {
+              if (isDedicatedClient) await client.query('ROLLBACK');
+              return res.status(409).json({
+                status: 'ERROR',
+                code: 'ROOM_MINIBAR_LOCATION_EXISTS',
+                message: `Kamar ${nextRoomNumber || nextRoomId} sudah memiliki lokasi stok minibar (${conflictRow.code})`,
+              });
+            }
           }
         }
 
@@ -2788,24 +2843,41 @@ export function createStockLocationPatchHandler(deps: ProductMasterMp03cDeps) {
           });
         }
 
-        const updateRes = await client.query(
-          `UPDATE stock_locations
-              SET code = $1,
-                  name = $2,
-                  is_active = $3,
-                  notes = $4,
-                  updated_at = NOW()
-            WHERE id = $5 AND property_id = $6
-            RETURNING id, property_id, code, name, location_type, room_id, is_active, notes, created_at, updated_at`,
-          [nextCode, nextName, nextIsActive, nextNotes, locationId, propertyId]
-        );
+        const isTypeOrRoomChanging =
+          nextLocationType !== existing.location_type || nextRoomId !== existing.room_id;
+
+        const updateRes = isTypeOrRoomChanging
+          ? await client.query(
+              `UPDATE stock_locations
+                  SET code = $1,
+                      name = $2,
+                      is_active = $3,
+                      notes = $4,
+                      location_type = $5,
+                      room_id = $6,
+                      updated_at = NOW()
+                WHERE id = $7 AND property_id = $8
+                RETURNING id, property_id, code, name, location_type, room_id, is_active, notes, created_at, updated_at`,
+              [nextCode, nextName, nextIsActive, nextNotes, nextLocationType, nextRoomId, locationId, propertyId]
+            )
+          : await client.query(
+              `UPDATE stock_locations
+                  SET code = $1,
+                      name = $2,
+                      is_active = $3,
+                      notes = $4,
+                      updated_at = NOW()
+                WHERE id = $5 AND property_id = $6
+                RETURNING id, property_id, code, name, location_type, room_id, is_active, notes, created_at, updated_at`,
+              [nextCode, nextName, nextIsActive, nextNotes, locationId, propertyId]
+            );
 
         if (isDedicatedClient) await client.query('COMMIT');
         return res.json({
           status: 'OK',
           data: formatStockLocationRow({
             ...updateRes.rows[0],
-            room_number: existing.room_number,
+            room_number: nextRoomNumber,
           }),
         });
       } catch (dbErr: any) {

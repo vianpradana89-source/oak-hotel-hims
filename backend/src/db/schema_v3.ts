@@ -1182,10 +1182,8 @@ export async function initializeDatabase(pool: Pool) {
     CREATE OR REPLACE FUNCTION trg_fn_guard_stock_location_identity()
     RETURNS TRIGGER AS $$
     BEGIN
-      IF OLD.property_id IS DISTINCT FROM NEW.property_id
-         OR OLD.location_type IS DISTINCT FROM NEW.location_type
-         OR OLD.room_id IS DISTINCT FROM NEW.room_id THEN
-        RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id, location_type, dan room_id pada stock_locations tidak dapat diubah setelah dibuat';
+      IF OLD.property_id IS DISTINCT FROM NEW.property_id THEN
+        RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id pada stock_locations tidak dapat diubah setelah dibuat';
       END IF;
       RETURN NEW;
     END;
@@ -7142,6 +7140,53 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
 
     INSERT INTO schema_migrations (version)
     VALUES ('transaction_attachments_persistent_storage_v1')
+    ON CONFLICT (version) DO NOTHING;
+
+    -- Migration: pos_stock_location_edit_and_multi_store_routing_v1
+    -- 1. Allow editing location_type and room_id on stock_locations (only property_id remains immutable)
+    CREATE OR REPLACE FUNCTION trg_fn_guard_stock_location_identity()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF OLD.property_id IS DISTINCT FROM NEW.property_id THEN
+        RAISE EXCEPTION 'IMMUTABLE_LOCATION_IDENTITY: property_id pada stock_locations tidak dapat diubah setelah dibuat';
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+
+    -- 2. Auto-correct RCP (Receptionis) if accidentally created as ROOM_MINIBAR
+    UPDATE stock_locations
+       SET location_type = 'POS_OUTLET',
+           room_id = NULL,
+           updated_at = NOW()
+     WHERE UPPER(BTRIM(COALESCE(code, ''))) = 'RCP'
+       AND location_type = 'ROOM_MINIBAR';
+
+    -- 3. Add default_location_id to pos_menu_items and pos_menu_categories for multi-store routing (KCH, RCP, CCR)
+    ALTER TABLE IF EXISTS pos_menu_items
+      ADD COLUMN IF NOT EXISTS default_location_id INTEGER REFERENCES stock_locations(id) ON DELETE SET NULL;
+
+    ALTER TABLE IF EXISTS pos_menu_categories
+      ADD COLUMN IF NOT EXISTS default_location_id INTEGER REFERENCES stock_locations(id) ON DELETE SET NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_pos_menu_items_default_location
+      ON pos_menu_items (property_id, default_location_id);
+
+    -- 4. Backfill default_location_id from SKU prefix (CCR., RCP., KCH.) when unset
+    UPDATE pos_menu_items pmi
+       SET default_location_id = sl.id
+      FROM stock_locations sl
+     WHERE pmi.property_id = sl.property_id
+       AND sl.is_active = TRUE
+       AND pmi.default_location_id IS NULL
+       AND (
+         (UPPER(BTRIM(COALESCE(pmi.item_code, ''))) LIKE 'CCR.%' AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'CCR')
+         OR (UPPER(BTRIM(COALESCE(pmi.item_code, ''))) LIKE 'RCP.%' AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'RCP')
+         OR (UPPER(BTRIM(COALESCE(pmi.item_code, ''))) LIKE 'KCH.%' AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'KCH')
+       );
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('pos_stock_location_edit_and_multi_store_routing_v1')
     ON CONFLICT (version) DO NOTHING;
   `);
 }
