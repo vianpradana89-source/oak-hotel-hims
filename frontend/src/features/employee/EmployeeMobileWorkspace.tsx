@@ -434,9 +434,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                 <button
                   type="button"
                   onClick={requestLogoutConfirm}
-                  className="w-full py-2 px-3 rounded-xl text-xs font-semibold bg-transparent border border-red-300 text-red-700 hover:bg-red-50 transition cursor-pointer"
+                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-white border border-red-300 text-red-700 hover:bg-red-50 transition shadow-2xs flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {EMPLOYEE_MOBILE_LOGOUT_LABEL}
+                  <LogOut className="w-4 h-4" />
+                  <span>{EMPLOYEE_MOBILE_LOGOUT_LABEL} (Logout)</span>
                 </button>
               )}
             </div>
@@ -817,9 +818,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
                 <button
                   type="button"
                   onClick={requestLogoutConfirm}
-                  className="w-full py-2 px-3 rounded-xl text-xs font-semibold bg-transparent border border-red-300 text-red-700 hover:bg-red-50 transition cursor-pointer"
+                  className="w-full py-2.5 px-4 rounded-xl text-xs font-bold bg-white border border-red-300 text-red-700 hover:bg-red-50 transition shadow-2xs flex items-center justify-center gap-2 cursor-pointer"
                 >
-                  {EMPLOYEE_MOBILE_LOGOUT_LABEL}
+                  <LogOut className="w-4 h-4" />
+                  <span>{EMPLOYEE_MOBILE_LOGOUT_LABEL} (Logout)</span>
                 </button>
               )}
             </div>

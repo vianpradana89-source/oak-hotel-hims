@@ -1665,7 +1665,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                   return (
                     <tr
                       key={t.id}
-                      className={`hover:bg-neutral-50/80 transition-colors ${
+                      onClick={() => openTaskDrawer(t)}
+                      className={`hover:bg-neutral-50/80 transition-colors cursor-pointer ${
                         t.priority === 'TURNOVER' ? 'bg-red-50/30' : ''
                       }`}
                     >
@@ -1767,7 +1768,10 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                           )}
                         </td>
                       ) : (
-                        <td className="py-2.5 px-3 text-neutral-800 whitespace-nowrap">
+                        <td
+                          className="py-2.5 px-3 text-neutral-800 whitespace-nowrap"
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           {t.id > 0 ? (
                             <select
                               value={displayPic}
@@ -1821,7 +1825,10 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                       </td>
 
                       {/* Actions (Lucide Icons) */}
-                      <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                      <td
+                        className="py-2.5 px-3 text-right whitespace-nowrap"
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <div className="inline-flex items-center justify-end gap-1">
                           {activeTab === 'history' ? (
                             <>
@@ -1855,7 +1862,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                             </>
                           ) : (
                             <>
-                              {t.status === 'ASSIGNED' && (
+                              {t.status === 'ASSIGNED' && t.task_type !== 'FINAL_INSPECTION' && (
                                 <button
                                   type="button"
                                   onClick={() => handleAcknowledge(t)}
@@ -1866,7 +1873,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                                 </button>
                               )}
 
-                              {(t.status === 'ASSIGNED' || t.status === 'ACKNOWLEDGED') && (
+                              {(t.status === 'ASSIGNED' || t.status === 'ACKNOWLEDGED') && t.task_type !== 'FINAL_INSPECTION' && (
                                 <button
                                   type="button"
                                   onClick={() => handleStart(t)}

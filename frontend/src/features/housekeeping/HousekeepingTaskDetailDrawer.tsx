@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import type {
   HousekeepingTaskRecord,
   HkTaskPriority,
@@ -53,9 +53,24 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  useEffect(() => {
+    setInspectionResult(
+      task.inspection_result || (task.task_type === 'CHECKOUT_ROOM_CHECK' ? 'CLEAR' : 'PASS')
+    );
+    setCompletionNote('');
+    setIssueType(task.issue_type || 'MINIBAR');
+    setIssueNote(task.issue_note || '');
+    setEstimatedCharge(task.estimated_charge ? String(task.estimated_charge) : '');
+    setErrorMsg(null);
+  }, [task.id, task.status, task.task_type, task.inspection_result, task.issue_type, task.issue_note, task.estimated_charge]);
+
   if (!isOpen) return null;
 
   const isComplete = task.status === 'DONE' || task.status === 'VERIFIED' || task.status === 'CANCELLED';
+  const isDirectInspectionTask =
+    task.task_type === 'FINAL_INSPECTION' || task.task_type === 'CHECKOUT_ROOM_CHECK';
+  const canCompleteNow =
+    !isComplete && (task.status === 'IN_PROGRESS' || isDirectInspectionTask);
 
   // Group checklist items by section
   const sections: Record<string, TaskChecklistItem[]> = {};
@@ -113,11 +128,15 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden">
-      <div className="absolute inset-0 bg-neutral-900/40 backdrop-blur-xs transition-opacity" onClick={onClose} />
-
-      <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
-        <div className="w-screen max-w-md bg-white shadow-2xl flex flex-col">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-neutral-900/50 backdrop-blur-xs transition-opacity animate-in fade-in duration-150"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg max-h-[90vh] bg-white shadow-2xl rounded-2xl border border-neutral-200 flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="w-full flex flex-col max-h-[90vh]">
           {/* Header */}
           <div className="px-5 py-4 border-b border-neutral-200 bg-neutral-50 flex items-start justify-between">
             <div>
@@ -290,8 +309,8 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
               </div>
             )}
 
-            {/* In-Progress Operational Actions Form */}
-            {task.status === 'IN_PROGRESS' && (
+            {/* Operational Completion / Inspection Form */}
+            {canCompleteNow && (
               <div className="space-y-4 pt-2 border-t border-neutral-200">
                 <h3 className="text-sm font-bold text-neutral-900">Penyelesaian Tugas</h3>
 
@@ -434,39 +453,39 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-2 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-lg hover:bg-neutral-100"
+              className="px-3 py-2 text-xs font-medium text-neutral-700 bg-white border border-neutral-300 rounded-lg hover:bg-neutral-100 cursor-pointer"
             >
               Tutup
             </button>
 
-            {task.status === 'ASSIGNED' && (
+            {task.status === 'ASSIGNED' && !isDirectInspectionTask && (
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => onAcknowledge(task)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-700 rounded-lg hover:bg-indigo-800 transition-colors"
+                className="px-4 py-2 text-xs font-semibold text-white bg-indigo-700 rounded-lg hover:bg-indigo-800 transition-colors cursor-pointer"
               >
                 {isSubmitting ? 'Memproses...' : 'Terima Tugas (Acknowledge)'}
               </button>
             )}
 
-            {task.status === 'ACKNOWLEDGED' && (
+            {task.status === 'ACKNOWLEDGED' && !isDirectInspectionTask && (
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={() => onStart(task)}
-                className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 rounded-lg hover:bg-blue-800 transition-colors"
+                className="px-4 py-2 text-xs font-semibold text-white bg-blue-700 rounded-lg hover:bg-blue-800 transition-colors cursor-pointer"
               >
                 {isSubmitting ? 'Memproses...' : 'Mulai Pengerjaan'}
               </button>
             )}
 
-            {task.status === 'IN_PROGRESS' && (
+            {canCompleteNow && (
               <button
                 type="button"
                 disabled={isSubmitting}
                 onClick={handleCompleteSubmit}
-                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors"
+                className="px-4 py-2 text-xs font-semibold text-white bg-emerald-700 rounded-lg hover:bg-emerald-800 transition-colors cursor-pointer"
               >
                 {isSubmitting ? 'Menyimpan...' : 'Selesaikan Tugas'}
               </button>

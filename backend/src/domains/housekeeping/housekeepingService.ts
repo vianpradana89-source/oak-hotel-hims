@@ -1665,6 +1665,8 @@ export async function completeHousekeepingTask(
   const updateRes = await client.query(
     `UPDATE housekeeping_tasks
      SET status = $1,
+         acknowledged_at = COALESCE(acknowledged_at, NOW()),
+         started_at = COALESCE(started_at, NOW()),
          completed_at = NOW(),
          completion_note = COALESCE($2, completion_note),
          cleaning_note = COALESCE($3, cleaning_note),

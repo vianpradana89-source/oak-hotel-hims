@@ -63,16 +63,7 @@ export function canShowEmployeeMobileLogout(input: {
   if (input.isPreview === true || !input.hasLogoutHandler) {
     return false;
   }
-  if (input.identityUnlinked) {
-    return true;
-  }
-  if (input.attendanceStateKnown !== true) {
-    return false;
-  }
-  if (input.hasCheckedIn !== false) {
-    return false;
-  }
-  return input.manualLogoutEnabled === true;
+  return true;
 }
 
 export function applyEmployeeMobileLogoutUiEvent(
