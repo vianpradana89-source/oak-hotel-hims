@@ -6575,8 +6575,12 @@ export function resolveGlobalMovementOperationDisplay(params: {
       referenceNo = `POS Order #${meta.pos_order_id}`;
     }
   } else if (opType === 'ROOM_MINIBAR_POSTING') {
-    operationLabel = 'Minibar Kamar';
-    if (meta.reservation_id) {
+    operationLabel = meta.is_complimentary ? 'Complimentary Kamar (HKP)' : 'Minibar Kamar';
+    if (meta.room_number && meta.reservation_id) {
+      referenceNo = `Kamar ${meta.room_number} (Res #${meta.reservation_id})`;
+    } else if (meta.room_number) {
+      referenceNo = `Kamar ${meta.room_number}`;
+    } else if (meta.reservation_id) {
       referenceNo = `Reservasi #${meta.reservation_id}`;
     }
   }
@@ -7834,6 +7838,7 @@ export async function deductStockForPosSale(
   let rcpLocId: number | null = null;
   let ccrLocId: number | null = null;
   let kchLocId: number | null = null;
+  let hkpLocId: number | null = null;
 
   for (const r of allActiveLocsRes.rows) {
     const idNum = Number(r.id);
@@ -7851,6 +7856,9 @@ export async function deductStockForPosSale(
     }
     if (codeStr === 'KCH' || (!kchLocId && typeStr === 'KITCHEN')) {
       kchLocId = idNum;
+    }
+    if (codeStr === 'HKP' || (!hkpLocId && typeStr === 'HK_PANTRY')) {
+      hkpLocId = idNum;
     }
   }
 
@@ -7889,6 +7897,10 @@ export async function deductStockForPosSale(
     }
     if ((skuUpper.startsWith('KCH.') || skuUpper.startsWith('KCH-')) && kchLocId) {
       const picked = pickActive(kchLocId);
+      if (picked) return picked;
+    }
+    if ((skuUpper.startsWith('HKP.') || skuUpper.startsWith('HKP-')) && hkpLocId) {
+      const picked = pickActive(hkpLocId);
       if (picked) return picked;
     }
 

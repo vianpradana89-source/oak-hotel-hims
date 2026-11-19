@@ -507,6 +507,75 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   };
 
   // Submit Checkout Inspection (Clear / Issue)
+  const [mobileMinibarCatalog, setMobileMinibarCatalog] = useState<any[]>([]);
+  const [mobileSelectedMinibarItems, setMobileSelectedMinibarItems] = useState<Array<{
+    menu_item_id: number;
+    name: string;
+    sku: string;
+    quantity: number;
+    unit_price: number;
+    subtotal: number;
+    base_unit_code: string;
+  }>>([]);
+  const [mobileSelectedAddMinibarId, setMobileSelectedAddMinibarId] = useState<string>('');
+
+  const loadMobileMinibarCatalog = async (task: HousekeepingTaskRecord) => {
+    try {
+      const params = new URLSearchParams({
+        property_id: String(propertyId),
+        task_id: String(task.id),
+      });
+      if (task.room_id) params.set('room_id', String(task.room_id));
+      const res = await authenticatedFetch(`/api/housekeeping/minibar-catalog?${params.toString()}`);
+      const json = await res.json();
+      if (res.ok && json?.data) {
+        setMobileMinibarCatalog(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
+      }
+    } catch {
+      // non-fatal
+    }
+  };
+
+  const handleAdjustMobileMinibar = (prod: any, delta: number) => {
+    setMobileSelectedMinibarItems((prev) => {
+      const existing = prev.find((it) => it.menu_item_id === prod.menu_item_id);
+      let next = prev;
+      if (existing) {
+        const nextQty = Math.max(0, existing.quantity + delta);
+        next = prev
+          .map((it) =>
+            it.menu_item_id === prod.menu_item_id
+              ? { ...it, quantity: nextQty, subtotal: nextQty * it.unit_price }
+              : it
+          )
+          .filter((it) => it.quantity > 0);
+      } else if (delta > 0) {
+        next = [
+          ...prev,
+          {
+            menu_item_id: Number(prod.menu_item_id),
+            name: String(prod.name || ''),
+            sku: String(prod.sku || ''),
+            quantity: delta,
+            unit_price: Number(prod.unit_price || 0),
+            subtotal: delta * Number(prod.unit_price || 0),
+            base_unit_code: String(prod.base_unit_code || 'PCS'),
+          },
+        ];
+      }
+      const total = next.reduce((acc, it) => acc + it.subtotal, 0);
+      setFindingPayload((p) => ({
+        ...p,
+        estimated_charge: total > 0 ? String(total) : '',
+        note:
+          next.length > 0
+            ? `Minibar: ${next.map((it) => `${it.quantity}x ${it.name} (@Rp ${it.unit_price.toLocaleString('id-ID')})`).join(', ')}`
+            : p.note,
+      }));
+      return next;
+    });
+  };
+
   const handleSubmitCheckoutInspection = async (
     task: HousekeepingTaskRecord,
     result: 'CLEAR' | 'ISSUE_FOUND',
@@ -527,7 +596,15 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
           inspector_name: crewName,
           issue_type: findingCode,
           issue_note: findingNote,
-          estimated_charge: charge || 0
+          estimated_charge: charge || 0,
+          minibar_items:
+            result === 'ISSUE_FOUND' && findingCode === 'MINIBAR' && mobileSelectedMinibarItems.length > 0
+              ? mobileSelectedMinibarItems.map((it) => ({
+                  menu_item_id: it.menu_item_id,
+                  quantity: it.quantity,
+                  unit_price: it.unit_price,
+                }))
+              : undefined,
         })
       });
       let data: any = {};
@@ -576,6 +653,8 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   // Open Finding Reporter
   const openFindingReporter = (task: HousekeepingTaskRecord) => {
     setSelectedTask(task);
+    setMobileSelectedMinibarItems([]);
+    loadMobileMinibarCatalog(task);
     if (findingTypes.length > 0 && !findingPayload.finding_code) {
       setFindingPayload(p => ({ ...p, finding_code: findingTypes[0].code }));
     }
@@ -1584,6 +1663,66 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
               </div>
 
               {/* Note Input */}
+              {findingPayload.finding_code === 'MINIBAR' && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 space-y-2">
+                  <div className="font-bold text-amber-950 text-xs">
+                    🥤 Pilih Produk Minibar yang Berkurang (Gudang HKP)
+                  </div>
+                  <select
+                    value={mobileSelectedAddMinibarId}
+                    onChange={(e) => {
+                      const pid = Number(e.target.value);
+                      const found = mobileMinibarCatalog.find((c) => Number(c.menu_item_id) === pid);
+                      if (found) handleAdjustMobileMinibar(found, 1);
+                      setMobileSelectedAddMinibarId('');
+                    }}
+                    className="w-full p-2 rounded-xl bg-white border border-amber-300 text-neutral-900 text-xs"
+                  >
+                    <option value="">+ Pilih Produk Minibar yang Berkurang...</option>
+                    {mobileMinibarCatalog.map((c) => (
+                      <option key={c.menu_item_id} value={c.menu_item_id}>
+                        {c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')}
+                      </option>
+                    ))}
+                  </select>
+
+                  {mobileSelectedMinibarItems.length > 0 && (
+                    <div className="bg-white rounded-xl border border-amber-200 divide-y divide-neutral-100">
+                      {mobileSelectedMinibarItems.map((it) => (
+                        <div key={it.menu_item_id} className="p-2 flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex-1">
+                            <div className="font-bold text-neutral-900 truncate">{it.name}</div>
+                            <div className="text-[10px] text-neutral-500 font-mono">
+                              @ Rp {it.unit_price.toLocaleString('id-ID')}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustMobileMinibar(it, -1)}
+                              className="w-6 h-6 rounded border border-neutral-300 bg-neutral-50 font-bold"
+                            >
+                              -
+                            </button>
+                            <span className="w-5 text-center font-bold">{it.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleAdjustMobileMinibar(it, 1)}
+                              className="w-6 h-6 rounded border border-emerald-400 bg-emerald-50 font-bold text-emerald-800"
+                            >
+                              +
+                            </button>
+                          </div>
+                          <div className="w-20 text-right font-mono font-bold">
+                            Rp {it.subtotal.toLocaleString('id-ID')}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block text-neutral-700 font-bold mb-1">
                   Keterangan / Deskripsi {selectedFindingTypeMeta?.note_required && <span className="text-red-600">* (Wajib Diisi)</span>}:

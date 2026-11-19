@@ -42,6 +42,7 @@ import { GuestCrmWorkspace } from './features/guests/GuestCrmWorkspace.tsx';
 import { GuestCommunicationPanel } from './features/guests/GuestCommunicationPanel.tsx';
 import { MessageSquareText, X as LucideX } from 'lucide-react';
 import { HousekeepingWorkspace } from './features/housekeeping/HousekeepingWorkspace.tsx';
+import { MinibarCheckoutConfirmationCard } from './features/housekeeping/MinibarCheckoutConfirmationCard.tsx';
 import { EmployeeMobileWorkspace } from './features/employee/EmployeeMobileWorkspace.tsx';
 import DocumentCenter from './features/documents/DocumentCenter.tsx';
 import { EmployeeMobileManagementWorkspace } from './features/employee/EmployeeMobileManagementWorkspace.tsx';
@@ -4972,6 +4973,20 @@ function AppContent() {
                   ))}
                 </div>
               </div>
+            ) : selectedCheckoutInspection.status === 'DONE' && selectedCheckoutInspection.inspection_result === 'ISSUE_FOUND' ? (
+              <div className="p-3 rounded-xl bg-rose-50/70 border border-rose-200 text-xs space-y-1 text-rose-900">
+                <div className="flex justify-between font-bold">
+                  <span>⚠ Temuan: {selectedCheckoutInspection.issue_type || 'Kendala Kamar'}</span>
+                  {selectedCheckoutInspection.estimated_charge && Number(selectedCheckoutInspection.estimated_charge) > 0 && (
+                    <span className="font-mono text-rose-800">
+                      Rp {Number(selectedCheckoutInspection.estimated_charge).toLocaleString('id-ID')}
+                    </span>
+                  )}
+                </div>
+                {selectedCheckoutInspection.issue_note && (
+                  <div className="text-rose-800">{selectedCheckoutInspection.issue_note}</div>
+                )}
+              </div>
             ) : selectedCheckoutInspection.status === 'DONE' ? (
               <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 flex items-center gap-2">
                 <span className="text-base font-bold text-emerald-700">✓</span>
@@ -4983,6 +4998,39 @@ function AppContent() {
                 </div>
               </div>
             ) : null}
+
+            {/* Konfirmasi & Penagihan Minibar (Front Office) */}
+            {selectedCheckoutInspection.status === 'DONE' &&
+              (selectedCheckoutInspection.issue_type === 'MINIBAR' ||
+                (Array.isArray(selectedCheckoutInspection.minibar_items_json) &&
+                  selectedCheckoutInspection.minibar_items_json.length > 0)) && (
+                <MinibarCheckoutConfirmationCard
+                  propertyId={propertyId || Number(selectedCheckoutInspection.property_id) || 1}
+                  taskId={Number(selectedCheckoutInspection.id)}
+                  reservationId={selectedCheckoutInspection.reservation_id ? Number(selectedCheckoutInspection.reservation_id) : null}
+                  roomNumber={selectedCheckoutInspection.room_number}
+                  initialItems={selectedCheckoutInspection.minibar_items_json}
+                  billingStatus={selectedCheckoutInspection.minibar_billing_status}
+                  billingMeta={selectedCheckoutInspection.minibar_billing_meta}
+                  estimatedCharge={selectedCheckoutInspection.estimated_charge}
+                  issueNote={selectedCheckoutInspection.issue_note}
+                  onConfirmed={async () => {
+                    await fetchOperationsData();
+                    if (propertyId !== null) {
+                      try {
+                        const res = await authFetch(`/api/housekeeping/checkout-inspections?property_id=${propertyId}`);
+                        const list = await res.json();
+                        if (Array.isArray(list)) {
+                          const updated = list.find((item: any) => Number(item.id) === Number(selectedCheckoutInspection.id));
+                          if (updated) setSelectedCheckoutInspection(updated);
+                        }
+                      } catch {
+                        // ignore
+                      }
+                    }
+                  }}
+                />
+              )}
 
             {/* Front Office Guidance banner */}
             <div className="p-3 rounded-xl bg-blue-50/70 border border-blue-200 text-xs text-blue-900 space-y-1">

@@ -3828,7 +3828,9 @@ app.get('/api/reservations/:id', async (req, res) => {
 
     let checkout_inspection: any = null;
     const chkRes = await pool.query(
-      `SELECT id, status, inspection_result, issue_type, issue_note, estimated_charge, created_at, completed_at
+      `SELECT id, status, inspection_result, issue_type, issue_note, estimated_charge,
+              minibar_items_json, minibar_billing_status, minibar_billing_meta,
+              created_at, completed_at
        FROM housekeeping_tasks
        WHERE reservation_id = $1 AND task_type = 'CHECKOUT_ROOM_CHECK'
        ORDER BY id DESC LIMIT 1`,
@@ -3849,6 +3851,9 @@ app.get('/api/reservations/:id', async (req, res) => {
         issue_type: task.issue_type,
         issue_note: task.issue_note,
         estimated_charge: task.estimated_charge !== null && task.estimated_charge !== undefined ? Number(task.estimated_charge) : null,
+        minibar_items_json: Array.isArray(task.minibar_items_json) ? task.minibar_items_json : [],
+        minibar_billing_status: task.minibar_billing_status || 'NONE',
+        minibar_billing_meta: task.minibar_billing_meta || null,
         created_at: task.created_at,
         completed_at: task.completed_at
       };

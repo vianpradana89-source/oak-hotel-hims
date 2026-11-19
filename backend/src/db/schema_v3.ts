@@ -7188,5 +7188,76 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     INSERT INTO schema_migrations (version)
     VALUES ('pos_stock_location_edit_and_multi_store_routing_v1')
     ON CONFLICT (version) DO NOTHING;
+
+    -- Migration: housekeeping_minibar_hkp_workflow_v1
+    -- 1. Ensure room_type_minibar_standard exists and supports item_role ('PAID_MINIBAR' | 'COMPLIMENTARY')
+    CREATE TABLE IF NOT EXISTS room_type_minibar_standard (
+      id            SERIAL PRIMARY KEY,
+      property_id   INTEGER NOT NULL REFERENCES properties(id) ON DELETE RESTRICT,
+      room_type_id  INTEGER NOT NULL REFERENCES room_types(id) ON DELETE RESTRICT,
+      menu_item_id  INTEGER NOT NULL REFERENCES pos_menu_items(id) ON DELETE RESTRICT,
+      standard_qty  INTEGER NOT NULL DEFAULT 0,
+      item_role     VARCHAR(30) NOT NULL DEFAULT 'PAID_MINIBAR',
+      notes         TEXT,
+      is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      CONSTRAINT uq_room_type_minibar_standard UNIQUE (property_id, room_type_id, menu_item_id),
+      CONSTRAINT ck_rt_minibar_std_qty CHECK (standard_qty >= 0)
+    );
+
+    ALTER TABLE IF EXISTS room_type_minibar_standard
+      ADD COLUMN IF NOT EXISTS item_role VARCHAR(30) NOT NULL DEFAULT 'PAID_MINIBAR';
+
+    CREATE INDEX IF NOT EXISTS idx_rt_minibar_std_property ON room_type_minibar_standard (property_id);
+    CREATE INDEX IF NOT EXISTS idx_rt_minibar_std_room_type ON room_type_minibar_standard (room_type_id);
+
+    -- 2. Add structured minibar & complimentary tracking columns to housekeeping_tasks
+    ALTER TABLE IF EXISTS housekeeping_tasks
+      ADD COLUMN IF NOT EXISTS minibar_items_json JSONB DEFAULT '[]'::jsonb,
+      ADD COLUMN IF NOT EXISTS minibar_billing_status VARCHAR(30) DEFAULT 'NONE',
+      ADD COLUMN IF NOT EXISTS minibar_billing_meta JSONB DEFAULT NULL,
+      ADD COLUMN IF NOT EXISTS complimentary_restock_meta JSONB DEFAULT NULL;
+
+    -- 3. Auto-link HKP prefix products to HKP stock location if default_location_id is unset
+    UPDATE pos_menu_items pmi
+       SET default_location_id = sl.id
+      FROM stock_locations sl
+     WHERE pmi.property_id = sl.property_id
+       AND sl.is_active = TRUE
+       AND pmi.default_location_id IS NULL
+       AND UPPER(BTRIM(COALESCE(pmi.item_code, ''))) LIKE 'HKP.%'
+       AND UPPER(BTRIM(COALESCE(sl.code, ''))) = 'HKP';
+
+    -- 4. Auto-seed initial complimentary mineral water standard per room type if room_type_minibar_standard is empty
+    INSERT INTO room_type_minibar_standard (property_id, room_type_id, menu_item_id, standard_qty, item_role, notes, is_active)
+    SELECT rt.property_id, rt.id, pmi.id, 2, 'COMPLIMENTARY', 'Auto-seeded Complimentary Air Mineral Kamar (HKP)', TRUE
+      FROM room_types rt
+      JOIN LATERAL (
+        SELECT id
+          FROM pos_menu_items m
+         WHERE m.property_id = rt.property_id
+           AND COALESCE(m.is_deleted, FALSE) = FALSE
+           AND COALESCE(m.is_active, TRUE) = TRUE
+           AND (
+             UPPER(COALESCE(m.name, '')) LIKE '%AIR MINERAL%'
+             OR UPPER(COALESCE(m.name, '')) LIKE '%MINERAL WATER%'
+             OR UPPER(COALESCE(m.name, '')) LIKE '%AQUA%'
+             OR UPPER(COALESCE(m.name, '')) LIKE '%CLEO%'
+           )
+         ORDER BY
+           CASE WHEN UPPER(COALESCE(m.item_code, '')) LIKE 'HKP.%' THEN 0 ELSE 1 END,
+           m.price ASC,
+           m.id ASC
+         LIMIT 1
+      ) pmi ON TRUE
+     WHERE NOT EXISTS (
+       SELECT 1 FROM room_type_minibar_standard std WHERE std.property_id = rt.property_id
+     )
+    ON CONFLICT (property_id, room_type_id, menu_item_id) DO NOTHING;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('housekeeping_minibar_hkp_workflow_v1')
+    ON CONFLICT (version) DO NOTHING;
   `);
 }

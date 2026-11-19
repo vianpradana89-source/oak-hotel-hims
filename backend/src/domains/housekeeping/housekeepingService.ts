@@ -26,6 +26,12 @@ import {
   UpdateChecklistTemplateItemPayload
 } from './housekeepingTypes';
 import { isFeatureEnabled } from '../features/featureService';
+import {
+  normalizeMinibarItemsList,
+  processCleaningComplimentaryAndRestock,
+  type MinibarConsumedItemInput,
+  type MinibarConsumedItemSnapshot
+} from './minibarWorkflowService';
 
 function hasRows(result: any): boolean {
   return Array.isArray(result?.rows) && result.rows.length > 0;
@@ -1560,6 +1566,8 @@ export async function completeHousekeepingTask(
     issue_type?: HkIssueType | null;
     issue_note?: string | null;
     estimated_charge?: number | null;
+    minibar_items?: MinibarConsumedItemInput[] | null;
+    complimentary_items?: MinibarConsumedItemInput[] | null;
   } = {};
   let actor: { id?: number; name?: string; role?: string } | undefined;
 
@@ -1629,6 +1637,50 @@ export async function completeHousekeepingTask(
   const completionNote = payload.completion_note || cleaningNote || null;
 
   if (task.task_type === 'CHECKOUT_ROOM_CHECK') {
+    let normalizedMinibarItems: MinibarConsumedItemSnapshot[] = [];
+    if (Array.isArray(payload.minibar_items) && payload.minibar_items.length > 0) {
+      await client.query('SAVEPOINT sp_hk_norm_minibar');
+      try {
+        normalizedMinibarItems = await normalizeMinibarItemsList(
+          client,
+          propertyId,
+          payload.minibar_items,
+          'PAID_MINIBAR'
+        );
+        await client.query('RELEASE SAVEPOINT sp_hk_norm_minibar');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_hk_norm_minibar').catch(() => {});
+      }
+    }
+
+    if (normalizedMinibarItems.length > 0) {
+      inspectionResult = 'ISSUE_FOUND';
+      if (!issueType) issueType = 'MINIBAR';
+      const minibarTotal = normalizedMinibarItems.reduce((sum, it) => sum + it.subtotal, 0);
+      const minibarNoteSummary = `Minibar: ${normalizedMinibarItems
+        .map((it) => `${it.quantity}x ${it.name} (@Rp ${it.unit_price.toLocaleString('id-ID')})`)
+        .join(', ')}`;
+      if (!issueNote || issueNote.trim().length === 0) {
+        issueNote = minibarNoteSummary;
+      }
+      if (!estimatedCharge || Number(estimatedCharge) <= 0) {
+        estimatedCharge = minibarTotal;
+      }
+      await client.query('SAVEPOINT sp_hk_save_minibar_json');
+      try {
+        await client.query(
+          `UPDATE housekeeping_tasks
+              SET minibar_items_json = $1::jsonb,
+                  minibar_billing_status = 'PENDING_FO_CONFIRMATION'
+            WHERE id = $2 AND property_id = $3`,
+          [JSON.stringify(normalizedMinibarItems), taskId, propertyId]
+        );
+        await client.query('RELEASE SAVEPOINT sp_hk_save_minibar_json');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_hk_save_minibar_json').catch(() => {});
+      }
+    }
+
     if (!inspectionResult) {
       inspectionResult = 'CLEAR';
     }
@@ -1704,7 +1756,25 @@ export async function completeHousekeepingTask(
   if (task.room_id) {
     const roomId = Number(task.room_id);
 
-    if (task.task_type === 'ROOM_CLEANING' || task.task_type === 'DEEP_CLEAN' || task.task_type === 'VIP_ROOM_PREPARATION') {
+    if (task.task_type === 'ROOM_CLEANING' || task.task_type === 'DEEP_CLEAN' || task.task_type === 'VIP_ROOM_PREPARATION' || task.task_type === 'STAYOVER_CLEANING') {
+      // Automatically process Complimentary Mineral Water & Minibar Restock from HKP
+      await client.query('SAVEPOINT sp_hk_comp_restock');
+      try {
+        await processCleaningComplimentaryAndRestock(client, {
+          propertyId,
+          taskId,
+          roomId,
+          roomNumber: task.room_number || null,
+          explicitComplimentaryItems: payload.complimentary_items !== undefined ? payload.complimentary_items : null,
+          actorUserId: actor?.id ? String(actor.id) : null,
+          actorName: cleaningNoteBy,
+        });
+        await client.query('RELEASE SAVEPOINT sp_hk_comp_restock');
+      } catch (compErr) {
+        await client.query('ROLLBACK TO SAVEPOINT sp_hk_comp_restock').catch(() => {});
+        console.warn(`[Housekeeping] Non-fatal complimentary HKP deduction warning for task #${taskId}:`, compErr);
+      }
+
       // Check if stayover / in-house guest exists
       const inHouseRes = await client.query(
         `SELECT 1 FROM reservations

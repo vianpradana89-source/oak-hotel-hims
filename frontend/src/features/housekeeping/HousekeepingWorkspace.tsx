@@ -1040,6 +1040,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
       issue_type?: HkIssueType;
       issue_note?: string;
       estimated_charge?: number;
+      minibar_items?: Array<{ menu_item_id: number; quantity: number; unit_price?: number }>;
+      complimentary_items?: Array<{ menu_item_id: number; quantity: number }>;
     }
   ) => {
     setIsActionSubmitting(true);

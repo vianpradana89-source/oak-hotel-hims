@@ -8,6 +8,7 @@ import type {
   FindingSeverity
 } from './housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { MinibarStandardsSettingsSection } from './MinibarStandardsSettingsSection';
 
 interface HousekeepingSettingsTabProps {
   propertyId: number;
@@ -1121,6 +1122,8 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
               </div>
             </div>
           </div>
+
+          <MinibarStandardsSettingsSection propertyId={propertyId} />
         </div>
       )}
 

@@ -7,6 +7,8 @@ import type {
   HkIssueType,
   TaskChecklistItem
 } from './housekeepingTypes';
+import { authenticatedFetch as authFetch } from '../../lib/authenticatedFetch';
+import { MinibarCheckoutConfirmationCard, type MinibarItemEntry } from './MinibarCheckoutConfirmationCard';
 
 interface HousekeepingTaskDetailDrawerProps {
   task: HousekeepingTaskRecord;
@@ -25,6 +27,8 @@ interface HousekeepingTaskDetailDrawerProps {
       issue_type?: HkIssueType;
       issue_note?: string;
       estimated_charge?: number;
+      minibar_items?: Array<{ menu_item_id: number; quantity: number; unit_price?: number }>;
+      complimentary_items?: Array<{ menu_item_id: number; quantity: number }>;
     }
   ) => Promise<void>;
   isSubmitting?: boolean;
@@ -53,6 +57,21 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // Minibar & Complimentary HKP state
+  const [catalogItems, setCatalogItems] = useState<any[]>([]);
+  const [minibarDefaults, setMinibarDefaults] = useState<any[]>([]);
+  const [selectedMinibarItems, setSelectedMinibarItems] = useState<MinibarItemEntry[]>([]);
+  const [complimentaryItems, setComplimentaryItems] = useState<MinibarItemEntry[]>([]);
+  const [lastCheckoutConsumption, setLastCheckoutConsumption] = useState<any | null>(null);
+  const [selectedAddMinibarId, setSelectedAddMinibarId] = useState<string>('');
+  const [selectedAddCompId, setSelectedAddCompId] = useState<string>('');
+
+  const isCleaningTask =
+    task.task_type === 'ROOM_CLEANING' ||
+    task.task_type === 'STAYOVER_CLEANING' ||
+    task.task_type === 'DEEP_CLEAN' ||
+    task.task_type === 'VIP_ROOM_PREPARATION';
+
   useEffect(() => {
     setInspectionResult(
       task.inspection_result || (task.task_type === 'CHECKOUT_ROOM_CHECK' ? 'CLEAR' : 'PASS')
@@ -62,7 +81,120 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
     setIssueNote(task.issue_note || '');
     setEstimatedCharge(task.estimated_charge ? String(task.estimated_charge) : '');
     setErrorMsg(null);
+    const existingMb = Array.isArray((task as any).minibar_items_json) ? (task as any).minibar_items_json : [];
+    setSelectedMinibarItems(existingMb);
   }, [task.id, task.status, task.task_type, task.inspection_result, task.issue_type, task.issue_note, task.estimated_charge]);
+
+  useEffect(() => {
+    if (!isOpen || !task.property_id) return;
+    if (!isCleaningTask && task.task_type !== 'CHECKOUT_ROOM_CHECK') return;
+    let cancelled = false;
+    const loadMinibarContext = async () => {
+      try {
+        const params = new URLSearchParams({
+          property_id: String(task.property_id),
+          task_id: String(task.id),
+        });
+        if (task.room_id) params.set('room_id', String(task.room_id));
+        if ((task as any).reservation_id) params.set('reservation_id', String((task as any).reservation_id));
+        const res = await authFetch(`/api/housekeeping/minibar-catalog?${params.toString()}`);
+        const json = await res.json();
+        if (!cancelled && res.ok && json?.data) {
+          setCatalogItems(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
+          setMinibarDefaults(Array.isArray(json.data.minibar_defaults) ? json.data.minibar_defaults : []);
+          setLastCheckoutConsumption(json.data.last_checkout_consumption || null);
+
+          if (isCleaningTask) {
+            const compDefs = Array.isArray(json.data.complimentary_defaults) ? json.data.complimentary_defaults : [];
+            setComplimentaryItems(
+              compDefs.map((d: any) => ({
+                menu_item_id: Number(d.menu_item_id),
+                name: String(d.item_name || d.name || ''),
+                sku: String(d.sku || ''),
+                quantity: Number(d.standard_qty || 2),
+                unit_price: 0,
+                subtotal: 0,
+                base_unit_code: String(d.base_unit_code || 'PCS'),
+              }))
+            );
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    };
+    loadMinibarContext();
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, task.id, task.property_id, task.room_id, task.task_type, isCleaningTask]);
+
+  const handleAdjustMinibarItem = (prod: { menu_item_id: number; name: string; sku?: string; unit_price: number; base_unit_code?: string }, delta: number) => {
+    setSelectedMinibarItems((prev) => {
+      const existing = prev.find((it) => it.menu_item_id === prod.menu_item_id);
+      let next: MinibarItemEntry[];
+      if (existing) {
+        const nextQty = Math.max(0, existing.quantity + delta);
+        next = prev
+          .map((it) =>
+            it.menu_item_id === prod.menu_item_id
+              ? { ...it, quantity: nextQty, subtotal: nextQty * it.unit_price }
+              : it
+          )
+          .filter((it) => it.quantity > 0);
+      } else if (delta > 0) {
+        next = [
+          ...prev,
+          {
+            menu_item_id: prod.menu_item_id,
+            name: prod.name,
+            sku: prod.sku || '',
+            quantity: delta,
+            unit_price: Number(prod.unit_price || 0),
+            subtotal: delta * Number(prod.unit_price || 0),
+            base_unit_code: prod.base_unit_code || 'PCS',
+          },
+        ];
+      } else {
+        next = prev;
+      }
+
+      const sumTotal = next.reduce((acc, it) => acc + it.subtotal, 0);
+      setEstimatedCharge(sumTotal > 0 ? String(sumTotal) : '');
+      if (next.length > 0) {
+        setIssueNote(
+          `Minibar: ${next.map((it) => `${it.quantity}x ${it.name} (@Rp ${it.unit_price.toLocaleString('id-ID')})`).join(', ')}`
+        );
+      }
+      return next;
+    });
+  };
+
+  const handleAdjustCompItem = (prod: { menu_item_id: number; name: string; sku?: string; base_unit_code?: string }, delta: number) => {
+    setComplimentaryItems((prev) => {
+      const existing = prev.find((it) => it.menu_item_id === prod.menu_item_id);
+      if (existing) {
+        const nextQty = Math.max(0, existing.quantity + delta);
+        return prev
+          .map((it) => (it.menu_item_id === prod.menu_item_id ? { ...it, quantity: nextQty } : it))
+          .filter((it) => it.quantity > 0);
+      } else if (delta > 0) {
+        return [
+          ...prev,
+          {
+            menu_item_id: prod.menu_item_id,
+            name: prod.name,
+            sku: prod.sku || '',
+            quantity: delta,
+            unit_price: 0,
+            subtotal: 0,
+            base_unit_code: prod.base_unit_code || 'PCS',
+          },
+        ];
+      }
+      return prev;
+    });
+  };
 
   if (!isOpen) return null;
 
@@ -89,7 +221,24 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
         inspection_result: inspectionResult,
         issue_type: inspectionResult === 'ISSUE_FOUND' ? issueType : undefined,
         issue_note: inspectionResult === 'ISSUE_FOUND' ? issueNote : undefined,
-        estimated_charge: chargeNum
+        estimated_charge: chargeNum,
+        minibar_items:
+          task.task_type === 'CHECKOUT_ROOM_CHECK' &&
+          inspectionResult === 'ISSUE_FOUND' &&
+          issueType === 'MINIBAR' &&
+          selectedMinibarItems.length > 0
+            ? selectedMinibarItems.map((it) => ({
+                menu_item_id: it.menu_item_id,
+                quantity: it.quantity,
+                unit_price: it.unit_price,
+              }))
+            : undefined,
+        complimentary_items: isCleaningTask
+          ? complimentaryItems.map((it) => ({
+              menu_item_id: it.menu_item_id,
+              quantity: it.quantity,
+            }))
+          : undefined,
       });
     } catch (err: any) {
       setErrorMsg(err.message || 'Gagal menyelesaikan tugas');
@@ -390,7 +539,7 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                     </div>
 
                     {inspectionResult === 'ISSUE_FOUND' && (
-                      <div className="space-y-2 pt-1">
+                      <div className="space-y-2.5 pt-1">
                         <div>
                           <label className="text-xs font-medium text-neutral-700 block mb-1">Tipe Temuan</label>
                           <select
@@ -406,6 +555,115 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                             <option value="OTHER">Lainnya</option>
                           </select>
                         </div>
+
+                        {issueType === 'MINIBAR' && (
+                          <div className="p-3 rounded-xl bg-white border border-amber-300 space-y-2.5 text-xs">
+                            <div className="flex items-center justify-between">
+                              <span className="font-bold text-amber-950">
+                                🥤 Pilih Produk Minibar yang Berkurang (Gudang HKP)
+                              </span>
+                              <span className="text-[10px] font-mono text-amber-800">
+                                Otomatis hitung harga
+                              </span>
+                            </div>
+
+                            {minibarDefaults.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5">
+                                {minibarDefaults.map((std: any) => (
+                                  <button
+                                    key={std.menu_item_id}
+                                    type="button"
+                                    onClick={() =>
+                                      handleAdjustMinibarItem(
+                                        {
+                                          menu_item_id: std.menu_item_id,
+                                          name: std.item_name,
+                                          sku: std.sku,
+                                          unit_price: std.unit_price,
+                                          base_unit_code: std.base_unit_code,
+                                        },
+                                        1
+                                      )
+                                    }
+                                    className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 font-semibold text-[11px] cursor-pointer"
+                                  >
+                                    + {std.item_name} (Rp {Number(std.unit_price || 0).toLocaleString('id-ID')})
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+
+                            <select
+                              value={selectedAddMinibarId}
+                              onChange={(e) => {
+                                const pid = Number(e.target.value);
+                                const found = catalogItems.find((c) => Number(c.menu_item_id) === pid);
+                                if (found) {
+                                  handleAdjustMinibarItem(
+                                    {
+                                      menu_item_id: found.menu_item_id,
+                                      name: found.name,
+                                      sku: found.sku,
+                                      unit_price: found.unit_price,
+                                      base_unit_code: found.base_unit_code,
+                                    },
+                                    1
+                                  );
+                                }
+                                setSelectedAddMinibarId('');
+                              }}
+                              className="w-full text-xs bg-neutral-50 border border-neutral-300 rounded-lg px-2.5 py-1.5 text-neutral-800 cursor-pointer"
+                            >
+                              <option value="">+ Cari / Pilih Produk Minibar yang Berkurang...</option>
+                              {catalogItems.map((c) => (
+                                <option key={c.menu_item_id} value={c.menu_item_id}>
+                                  {c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')} (Stok HKP: {c.hkp_stock_balance} {c.base_unit_code})
+                                </option>
+                              ))}
+                            </select>
+
+                            {selectedMinibarItems.length > 0 && (
+                              <div className="border border-neutral-200 rounded-lg divide-y divide-neutral-100 overflow-hidden">
+                                {selectedMinibarItems.map((it) => (
+                                  <div
+                                    key={it.menu_item_id}
+                                    className="px-2.5 py-1.5 flex items-center justify-between gap-2 bg-neutral-50/60"
+                                  >
+                                    <div className="min-w-0 flex-1">
+                                      <div className="font-bold text-neutral-900 truncate">{it.name}</div>
+                                      <div className="text-[10px] text-neutral-500 font-mono">
+                                        @ Rp {Number(it.unit_price || 0).toLocaleString('id-ID')}
+                                      </div>
+                                    </div>
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdjustMinibarItem(it, -1)}
+                                        className="w-6 h-6 rounded border border-neutral-300 bg-white font-bold text-neutral-700 cursor-pointer"
+                                      >
+                                        -
+                                      </button>
+                                      <span className="w-6 text-center font-bold text-neutral-900">
+                                        {it.quantity}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleAdjustMinibarItem(it, 1)}
+                                        className="w-6 h-6 rounded border border-emerald-400 bg-emerald-50 font-bold text-emerald-800 cursor-pointer"
+                                      >
+                                        +
+                                      </button>
+                                    </div>
+                                    <div className="w-20 text-right font-mono font-bold text-neutral-900">
+                                      Rp {Number(it.subtotal || 0).toLocaleString('id-ID')}
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        )}
+
                         <div>
                           <label className="text-xs font-medium text-neutral-700 block mb-1">Rincian Temuan</label>
                           <textarea
@@ -431,6 +689,115 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                   </div>
                 )}
 
+                {/* Complimentary & Minibar Restock Section for Cleaning Tasks */}
+                {isCleaningTask && (
+                  <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <div className="font-bold text-emerald-950">
+                          💧 Pengisian Complimentary & Restock Minibar Kamar (Gudang HKP)
+                        </div>
+                        <p className="text-[11px] text-emerald-800 mt-0.5">
+                          Air mineral complimentary otomatis memotong stok gudang HKP saat kamar selesai dibersihkan.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Recent Checkout Minibar Consumed Alert (Restock Info) */}
+                    {lastCheckoutConsumption &&
+                      Array.isArray(lastCheckoutConsumption.items) &&
+                      lastCheckoutConsumption.items.length > 0 && (
+                        <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 space-y-1">
+                          <div className="font-bold text-amber-950 text-[11px]">
+                            🔄 Perlu Diisi Ulang ke Kulkas Minibar Kamar (Berkurang Saat Checkout):
+                          </div>
+                          <ul className="list-disc list-inside text-[11px] text-amber-900 font-semibold">
+                            {lastCheckoutConsumption.items.map((it: any, idx: number) => (
+                              <li key={idx}>
+                                {it.quantity}x {it.name}
+                              </li>
+                            ))}
+                          </ul>
+                          <p className="text-[10px] text-amber-800">
+                            Catatan: Stok HKP untuk minibar berbayar di atas dipotong melalui konfirmasi tagihan checkout Front Office.
+                          </p>
+                        </div>
+                      )}
+
+                    {/* Complimentary Items List */}
+                    <div className="bg-white rounded-lg border border-emerald-200 overflow-hidden">
+                      <div className="px-2.5 py-1.5 bg-emerald-100/60 border-b border-emerald-200 font-bold text-[11px] text-emerald-950 flex justify-between">
+                        <span>Produk Complimentary Kamar (Gratis Tamu)</span>
+                        <span>Qty Diisi dari HKP</span>
+                      </div>
+                      {complimentaryItems.length === 0 ? (
+                        <div className="p-2.5 text-center text-neutral-500 text-[11px]">
+                          Tidak ada produk complimentary yang dipilih.
+                        </div>
+                      ) : (
+                        <div className="divide-y divide-neutral-100">
+                          {complimentaryItems.map((it) => (
+                            <div
+                              key={it.menu_item_id}
+                              className="px-2.5 py-2 flex items-center justify-between gap-2"
+                            >
+                              <div className="font-bold text-neutral-800 truncate flex-1">{it.name}</div>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustCompItem(it, -1)}
+                                  className="w-6 h-6 rounded border border-neutral-300 bg-neutral-50 font-bold text-neutral-700 cursor-pointer"
+                                >
+                                  -
+                                </button>
+                                <span className="w-6 text-center font-bold text-emerald-900">
+                                  {it.quantity}
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => handleAdjustCompItem(it, 1)}
+                                  className="w-6 h-6 rounded border border-emerald-400 bg-emerald-50 font-bold text-emerald-800 cursor-pointer"
+                                >
+                                  +
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="p-2 bg-neutral-50 border-t border-neutral-200">
+                        <select
+                          value={selectedAddCompId}
+                          onChange={(e) => {
+                            const pid = Number(e.target.value);
+                            const found = catalogItems.find((c) => Number(c.menu_item_id) === pid);
+                            if (found) {
+                              handleAdjustCompItem(
+                                {
+                                  menu_item_id: found.menu_item_id,
+                                  name: found.name,
+                                  sku: found.sku,
+                                  base_unit_code: found.base_unit_code,
+                                },
+                                1
+                              );
+                            }
+                            setSelectedAddCompId('');
+                          }}
+                          className="w-full text-[11px] bg-white border border-neutral-300 rounded-lg px-2 py-1 text-neutral-700 cursor-pointer"
+                        >
+                          <option value="">+ Tambah Produk Complimentary Lain dari HKP...</option>
+                          {catalogItems.map((c) => (
+                            <option key={c.menu_item_id} value={c.menu_item_id}>
+                              {c.name} (Stok HKP: {c.hkp_stock_balance} {c.base_unit_code})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 {/* Standard Task Notes */}
                 {task.task_type !== 'FINAL_INSPECTION' && task.task_type !== 'CHECKOUT_ROOM_CHECK' && (
                   <div>
@@ -446,6 +813,25 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                 )}
               </div>
             )}
+
+            {/* If CHECKOUT_ROOM_CHECK is already DONE and has Minibar issue, show FO Confirmation Card */}
+            {isComplete &&
+              task.task_type === 'CHECKOUT_ROOM_CHECK' &&
+              task.inspection_result === 'ISSUE_FOUND' &&
+              (task.issue_type === 'MINIBAR' || selectedMinibarItems.length > 0) && (
+                <MinibarCheckoutConfirmationCard
+                  propertyId={task.property_id}
+                  taskId={task.id}
+                  roomId={task.room_id}
+                  roomNumber={task.room_number}
+                  reservationId={(task as any).reservation_id}
+                  initialItems={selectedMinibarItems}
+                  initialBillingStatus={(task as any).minibar_billing_status}
+                  initialBillingMeta={(task as any).minibar_billing_meta}
+                  estimatedCharge={task.estimated_charge}
+                  issueNote={task.issue_note}
+                />
+              )}
           </div>
 
           {/* Footer Actions */}

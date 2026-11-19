@@ -43,6 +43,12 @@ import {
   reconcileDuplicateActiveCleaningTasks,
   ensureDirtyRoomCleaningTask
 } from './housekeepingService';
+import {
+  getMinibarCatalogAndRoomContext,
+  upsertRoomMinibarStandard,
+  deleteRoomMinibarStandard,
+  confirmCheckoutMinibarBilling
+} from './minibarWorkflowService';
 import { authorizeHousekeepingChecklistMutation } from './assignedCrewChecklistAccess';
 import {
   assertRoomTypeBelongsToProperty,
@@ -874,7 +880,9 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
           inspection_result: req.body.inspection_result,
           issue_type: req.body.issue_type,
           issue_note: req.body.issue_note,
-          estimated_charge: req.body.estimated_charge
+          estimated_charge: req.body.estimated_charge,
+          minibar_items: req.body.minibar_items,
+          complimentary_items: req.body.complimentary_items
         },
         actor
       );
@@ -956,6 +964,127 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
   router.post('/tasks/:id/complete', completeTaskHandler);
   router.patch('/checkout-inspections/:id/submit', completeTaskHandler);
   router.post('/checkout-inspections/:id/submit', completeTaskHandler);
+
+  // 8a-MB. Minibar & Complimentary Catalog + Standards + FO Checkout Confirmation
+  router.get('/minibar-catalog', async (req: Request, res: Response) => {
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId);
+      await assertPropertyExists(propertyId);
+      const roomId = req.query.room_id ? Number(req.query.room_id) : null;
+      const reservationId = req.query.reservation_id ? Number(req.query.reservation_id) : null;
+      const taskId = req.query.task_id ? Number(req.query.task_id) : null;
+      const data = await getMinibarCatalogAndRoomContext(pool, propertyId, {
+        roomId: Number.isInteger(roomId) && (roomId ?? 0) > 0 ? roomId : null,
+        reservationId: Number.isInteger(reservationId) && (reservationId ?? 0) > 0 ? reservationId : null,
+        taskId: Number.isInteger(taskId) && (taskId ?? 0) > 0 ? taskId : null,
+      });
+      res.json({ status: 'OK', success: true, data });
+    } catch (err: any) {
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    }
+  });
+
+  router.post('/minibar-standards', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+      await client.query('BEGIN');
+      const rows = await upsertRoomMinibarStandard(client, propertyId, {
+        room_type_id: req.body.room_type_id ? Number(req.body.room_type_id) : null,
+        apply_all_room_types: Boolean(req.body.apply_all_room_types),
+        menu_item_id: Number(req.body.menu_item_id),
+        standard_qty: Number(req.body.standard_qty),
+        item_role: req.body.item_role,
+        notes: req.body.notes || null,
+      });
+      await client.query('COMMIT');
+      res.json({ status: 'OK', success: true, data: rows });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.delete('/minibar-standards/:id', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.query.property_id || req.query.propertyId || req.body?.property_id);
+      await assertPropertyExists(propertyId);
+      const standardId = Number(req.params.id);
+      await client.query('BEGIN');
+      const result = await deleteRoomMinibarStandard(
+        client,
+        propertyId,
+        standardId,
+        req.query.all_room_types !== 'false'
+      );
+      await client.query('COMMIT');
+      res.json({ status: 'OK', success: true, data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.post('/checkout-inspections/:id/confirm-minibar', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+      const taskId = Number(req.params.id);
+
+      await client.query('BEGIN');
+      const result = await confirmCheckoutMinibarBilling(client, {
+        propertyId,
+        taskId,
+        reservationId: req.body.reservation_id ? Number(req.body.reservation_id) : null,
+        settlementMode: req.body.settlement_mode || 'FOLIO',
+        paymentMethod: req.body.payment_method || 'CASH',
+        items: Array.isArray(req.body.items) ? req.body.items : null,
+        notes: req.body.notes || null,
+        actorUserId: req.body.actor_user_id || req.body.actor_id ? String(req.body.actor_user_id || req.body.actor_id) : null,
+        actorName: req.body.actor_name || 'Front Office',
+        actorRole: req.body.actor_role || 'Receptionist',
+      });
+      await client.query('COMMIT');
+
+      if (broadcastEvent && result.reservation_id) {
+        try {
+          broadcastEvent(
+            'CheckoutInspectionUpdated',
+            {
+              reservation_id: Number(result.reservation_id),
+              task_id: taskId,
+              clearance_state: 'ISSUE_FOUND',
+              inspection_result: 'ISSUE_FOUND',
+              minibar_billing_status: result.minibar_billing_status,
+              source: 'FO_MINIBAR_CONFIRMED',
+              timestamp: new Date().toISOString(),
+            },
+            propertyId
+          );
+        } catch {
+          // non-fatal broadcast error
+        }
+      }
+
+      res.json({ status: 'OK', success: true, data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
 
   // 8b. Legacy/Direct Status Update Compatibility (Supports PATCH and POST)
   const statusUpdateHandler = async (req: Request, res: Response) => {

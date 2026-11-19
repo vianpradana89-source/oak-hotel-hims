@@ -6,6 +6,7 @@ import { RoomMoveModal } from './RoomMoveModal';
 import { AddStayChargeModal } from './AddStayChargeModal';
 import { AddRoomToBookingModal } from './AddRoomToBookingModal';
 import { MaintenanceIssuesModal } from '../housekeeping/MaintenanceIssuesModal';
+import { MinibarCheckoutConfirmationCard } from '../housekeeping/MinibarCheckoutConfirmationCard';
 import IdentityExtractionModal, { type ExtractedIdentityData } from '../booking/IdentityExtractionModal';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
 import { IDENTITY_DOCUMENT_MISSING_MESSAGE } from '../identity/identityDocumentUi';
@@ -1975,6 +1976,28 @@ export default function ReservationDetailDrawer({
                       )}
                     </div>
                   )}
+
+                  {data.checkout_inspection.clearance_state === 'ISSUE_FOUND' &&
+                    (data.checkout_inspection.issue_type === 'MINIBAR' ||
+                      (Array.isArray(data.checkout_inspection.minibar_items_json) &&
+                        data.checkout_inspection.minibar_items_json.length > 0)) && (
+                      <MinibarCheckoutConfirmationCard
+                        propertyId={Number(data.property_id || propertyId || 1)}
+                        taskId={Number(data.checkout_inspection.task_id)}
+                        reservationId={Number(data.id)}
+                        roomNumber={data.room_number}
+                        initialItems={data.checkout_inspection.minibar_items_json}
+                        billingStatus={data.checkout_inspection.minibar_billing_status}
+                        billingMeta={data.checkout_inspection.minibar_billing_meta}
+                        estimatedCharge={data.checkout_inspection.estimated_charge}
+                        issueNote={data.checkout_inspection.issue_note}
+                        onConfirmed={() => {
+                          void loadFullReservation(data.id);
+                          void loadFolio(data.id);
+                          onRefresh();
+                        }}
+                      />
+                    )}
 
                   {data.checkout_inspection.clearance_state === 'CLEAR' && (
                     <div className="p-2.5 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 font-semibold flex items-center gap-1.5">
