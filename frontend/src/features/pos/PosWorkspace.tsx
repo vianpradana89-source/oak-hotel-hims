@@ -3633,7 +3633,7 @@ export default function PosWorkspace({
     const statusLabel = String(order.status || 'OPEN').toUpperCase();
     const confirmMsg =
       statusLabel === 'PAID' || statusLabel === 'BILLED_TO_ROOM'
-        ? `Hapus order ${displayRef} (${statusLabel})?\nData penjualan/folio terkait akan dibatalkan dan stok produk otomatis dikembalikan ke gudang.`
+        ? `Hapus order ${displayRef} (${statusLabel})?\nData penjualan/folio terkait akan dibatalkan, kuota complimentary (jika ada) otomatis dikembalikan, dan stok produk dikembalikan ke gudang.`
         : `Hapus order ${displayRef} (${statusLabel})?\nOrder ini akan dihapus dari daftar riwayat.`;
     if (typeof window !== 'undefined' && typeof window.confirm === 'function') {
       if (!window.confirm(confirmMsg)) return;

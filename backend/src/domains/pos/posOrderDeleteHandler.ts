@@ -192,6 +192,17 @@ export function createPosOrderDeleteHandler(deps: PosOrderDeleteDeps) {
         [actorUserId, actorName, propertyId, String(orderId)]
       );
 
+      // 3b. Bila order menggunakan kuota complimentary, kembalikan kuota dengan membatalkan usage di pos_complimentary_usages
+      const compUsageRes = await client.query(
+        `UPDATE pos_complimentary_usages
+            SET status = 'CANCELLED'
+          WHERE pos_order_id = $1
+            AND property_id = $2
+            AND status = 'ACTIVE'
+          RETURNING id, employee_id, amount`,
+        [orderId, propertyId]
+      );
+
       // 4. Tandai pos_orders menjadi VOIDED
       const updateRes = await client.query(
         `UPDATE pos_orders
@@ -211,6 +222,8 @@ export function createPosOrderDeleteHandler(deps: PosOrderDeleteDeps) {
         new_status: 'VOIDED',
         stock_restored_count: stockRestore.items_restored.length,
         stock_restored_items: stockRestore.items_restored,
+        complimentary_restored_count: compUsageRes.rowCount ?? 0,
+        complimentary_restored_usages: compUsageRes.rows,
         actor_name: actorName,
         actor_user_id: actorUserId,
       });

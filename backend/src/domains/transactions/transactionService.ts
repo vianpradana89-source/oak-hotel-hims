@@ -740,6 +740,15 @@ export async function projectPosOrderToTransaction(
   const status = String(order.status || '').toUpperCase();
 
   if (['VOIDED', 'CANCELLED', 'REFUNDED'].includes(status)) {
+    await client.query(
+      `UPDATE pos_complimentary_usages
+       SET status = 'CANCELLED'
+       WHERE pos_order_id = $1
+         AND property_id = $2
+         AND status = 'ACTIVE'`,
+      [orderId, propertyId]
+    );
+
     const origTxRes = await client.query(
       `SELECT * FROM transactions 
        WHERE property_id = $1 AND source_type IN ('POS_ORDER', 'POS') AND source_id = $2 AND reversal_of_transaction_id IS NULL
@@ -4287,6 +4296,20 @@ export async function voidTransaction(
        RETURNING *`,
       [options.reason.trim(), tx.id]
     );
+
+    if (tx.source_type === 'POS_ORDER' || tx.source_type === 'POS') {
+      const posOrderId = Number(tx.source_id);
+      if (Number.isInteger(posOrderId) && posOrderId > 0) {
+        await client.query(
+          `UPDATE pos_complimentary_usages
+              SET status = 'CANCELLED'
+            WHERE pos_order_id = $1
+              AND property_id = $2
+              AND status = 'ACTIVE'`,
+          [posOrderId, propertyId]
+        );
+      }
+    }
 
     await client.query(
       `INSERT INTO audit_logs (

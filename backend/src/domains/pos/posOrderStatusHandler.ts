@@ -268,6 +268,16 @@ export function createPosOrderStatusHandler(deps: PosOrderStatusDeps) {
         return;
       }
 
+      // Bila order tercatat kuota komplimentari, batalkan penggunaan kuota
+      await client.query(
+        `UPDATE pos_complimentary_usages
+         SET status = 'CANCELLED'
+         WHERE pos_order_id = $1
+           AND property_id = $2
+           AND status = 'ACTIVE'`,
+        [orderId, propertyId]
+      );
+
       // Audit void — satu row, actor dari req.user (token terautentikasi)
       const auditPayload = JSON.stringify({
         property_id: propertyId,
