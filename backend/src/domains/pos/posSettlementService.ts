@@ -831,11 +831,13 @@ export async function payPosOrder(
       }
 
       const usageQ = await poolClient.query(
-        `SELECT COALESCE(SUM(amount), 0)::numeric AS used_amount
-         FROM pos_complimentary_usages
-         WHERE employee_id = $1
-           AND usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
-           AND status = 'ACTIVE'`,
+        `SELECT COALESCE(SUM(cu.amount), 0)::numeric AS used_amount
+         FROM pos_complimentary_usages cu
+         LEFT JOIN pos_orders po ON po.id = cu.pos_order_id
+         WHERE cu.employee_id = $1
+           AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
+           AND cu.status = 'ACTIVE'
+           AND (po.id IS NULL OR po.status NOT IN ('VOIDED', 'CANCELLED'))`,
         [empId]
       );
       const usedAmount = Number(usageQ.rows[0]?.used_amount || 0);

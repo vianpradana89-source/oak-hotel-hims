@@ -8,6 +8,7 @@ import {
   updateHrdRolePolicies,
   getAvailableRolesForHrd,
   getEmployees,
+  getEmployeeComplimentaryUsages,
   createEmployeeAccount,
   updateEmployeeAccount,
   deactivateEmployeeAccount,
@@ -356,6 +357,26 @@ export function createHrdRouter(pool: Pool): Router {
 
   router.delete('/employees/:id', handleDeactivate);
   router.post('/employees/:id/deactivate', handleDeactivate);
+
+
+  // 7c. Get Employee Complimentary Usages History (Bulan Berjalan / Spesifik)
+  router.get('/employees/:id/complimentary-usages', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId((req as any).user?.property_id || req.query.property_id || req.query.propertyId);
+      const employeeId = Number(req.params.id);
+      if (isNaN(employeeId) || employeeId <= 0) {
+        return res.status(400).json({ status: 'ERROR', code: 'INVALID_ID', message: 'ID Karyawan tidak valid' });
+      }
+      const month = typeof req.query.month === 'string' ? req.query.month : undefined;
+      const usages = await getEmployeeComplimentaryUsages(client, propertyId, employeeId, month);
+      res.json({ status: 'OK', data: usages });
+    } catch (err: any) {
+      res.status(err.statusCode || 500).json({ status: 'ERROR', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
 
   // 7b. Reactivate Employee Personnel Record
   router.post('/employees/:id/reactivate', async (req: Request, res: Response) => {

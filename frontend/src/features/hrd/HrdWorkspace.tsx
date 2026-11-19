@@ -90,6 +90,21 @@ interface DiagnosisData {
   mismatch_reasons: string[];
 }
 
+
+interface ComplimentaryUsageItem {
+  id: number;
+  pos_order_id: number | null;
+  order_number: string | null;
+  order_status: string | null;
+  amount: number;
+  category: string;
+  guest_name_or_note: string | null;
+  usage_month: string;
+  status: 'ACTIVE' | 'CANCELLED';
+  created_at: string;
+  items?: Array<{ name: string; quantity: number; price: number }>;
+}
+
 interface HrdWorkspaceProps {
   propertyId: number;
   propertyName?: string;
@@ -141,6 +156,27 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
   const [showAddModal, setShowAddModal] = useState(false);
 
   const [editingEmployee, setEditingEmployee] = useState<HrEmployee | null>(null);
+  const [complimentaryUsages, setComplimentaryUsages] = useState<ComplimentaryUsageItem[]>([]);
+  const [loadingComplimentaryUsages, setLoadingComplimentaryUsages] = useState(false);
+  const [showUsagesDropdown, setShowUsagesDropdown] = useState(true);
+
+  const loadComplimentaryUsages = async (employeeId: number) => {
+    try {
+      setLoadingComplimentaryUsages(true);
+      const res = await fetch(`/api/hrd/employees/${employeeId}/complimentary-usages?property_id=${propertyId}`, {
+        headers: getAuthHeaders(),
+      });
+      const data = await res.json();
+      if (data.status === 'OK' && Array.isArray(data.data)) {
+        setComplimentaryUsages(data.data);
+      }
+    } catch (err) {
+      console.error('Failed to load complimentary usages', err);
+    } finally {
+      setLoadingComplimentaryUsages(false);
+    }
+  };
+
   const [submitting, setSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
 
@@ -350,6 +386,10 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
       complimentary_pin: emp.complimentary_pin || ''
     });
     setEditingEmployee(emp);
+    setComplimentaryUsages([]);
+    if (emp.complimentary_quota_enabled || (emp.complimentary_quota_used && emp.complimentary_quota_used > 0)) {
+      loadComplimentaryUsages(emp.id);
+    }
     setShowAddModal(true);
   };
 
@@ -1552,16 +1592,98 @@ export const HrdWorkspace: React.FC<HrdWorkspaceProps> = ({ propertyId, property
                     </div>
 
                     {editingEmployee && (
-                      <div className="p-2 rounded bg-amber-100/70 border border-amber-300 text-[11px] text-amber-900 space-y-0.5 font-medium">
-                        <div className="flex justify-between">
-                          <span>Terpakai Bulan Ini:</span>
-                          <strong>Rp {Number(editingEmployee.complimentary_quota_used || 0).toLocaleString('id-ID')}</strong>
+                      <div className="space-y-2">
+                        <div className="p-2 rounded bg-amber-100/70 border border-amber-300 text-[11px] text-amber-900 space-y-0.5 font-medium">
+                          <div className="flex justify-between">
+                            <span>Terpakai Bulan Ini:</span>
+                            <strong>Rp {Number(editingEmployee.complimentary_quota_used || 0).toLocaleString('id-ID')}</strong>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Sisa Kuota Bulan Ini:</span>
+                            <strong className={Number(editingEmployee.complimentary_quota_remaining || 0) <= 0 ? 'text-red-700' : 'text-emerald-800'}>
+                              Rp {Number(editingEmployee.complimentary_quota_remaining ?? formPayload.complimentary_quota_limit).toLocaleString('id-ID')}
+                            </strong>
+                          </div>
                         </div>
-                        <div className="flex justify-between">
-                          <span>Sisa Kuota Bulan Ini:</span>
-                          <strong className={Number(editingEmployee.complimentary_quota_remaining || 0) <= 0 ? 'text-red-700' : 'text-emerald-800'}>
-                            Rp {Number(editingEmployee.complimentary_quota_remaining ?? formPayload.complimentary_quota_limit).toLocaleString('id-ID')}
-                          </strong>
+
+                        {/* Rincian Pemakaian Transaksi Bulan Ini */}
+                        <div className="rounded-lg border border-amber-200 bg-white/95 overflow-hidden shadow-xs">
+                          <button
+                            type="button"
+                            onClick={() => setShowUsagesDropdown(!showUsagesDropdown)}
+                            className="w-full px-2.5 py-1.5 flex items-center justify-between text-[11px] font-bold text-amber-900 bg-amber-50 hover:bg-amber-100/80 transition cursor-pointer"
+                          >
+                            <span className="flex items-center gap-1.5">
+                              <span>📋 Rincian Transaksi Bulan Ini</span>
+                              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-amber-200 text-amber-900 font-semibold">
+                                {complimentaryUsages.length}
+                              </span>
+                            </span>
+                            <span className="text-amber-700 text-xs">
+                              {showUsagesDropdown ? '▲ Tutup' : '▼ Lihat'}
+                            </span>
+                          </button>
+
+                          {showUsagesDropdown && (
+                            <div className="p-2 max-h-48 overflow-y-auto space-y-2 text-[11px]">
+                              {loadingComplimentaryUsages ? (
+                                <p className="text-stone-500 italic text-center py-2 text-[10px]">Memuat rincian transaksi...</p>
+                              ) : complimentaryUsages.length === 0 ? (
+                                <p className="text-stone-400 italic text-center py-2 text-[10px]">Belum ada transaksi komplimentari tercatat bulan ini.</p>
+                              ) : (
+                                complimentaryUsages.map(usage => {
+                                  const isCancelled = usage.status === 'CANCELLED' || usage.order_status === 'VOIDED' || usage.order_status === 'CANCELLED';
+                                  const formattedDate = usage.created_at ? new Date(usage.created_at).toLocaleString('id-ID', {
+                                    day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit'
+                                  }) : '-';
+
+                                  return (
+                                    <div
+                                      key={usage.id}
+                                      className={`p-2 rounded border transition ${
+                                        isCancelled
+                                          ? 'bg-stone-50/90 border-stone-200 text-stone-400'
+                                          : 'bg-amber-50/40 border-amber-200/80 text-stone-800'
+                                      }`}
+                                    >
+                                      <div className="flex items-start justify-between gap-1">
+                                        <div>
+                                          <div className="flex items-center gap-1.5">
+                                            <span className={`font-mono font-bold text-[10px] ${isCancelled ? 'line-through text-stone-400' : 'text-stone-800'}`}>
+                                              {usage.order_number || `POS-#${usage.pos_order_id}`}
+                                            </span>
+                                            {isCancelled ? (
+                                              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-stone-200 text-stone-600">
+                                                Dibatalkan (Saldo Kembali)
+                                              </span>
+                                            ) : (
+                                              <span className="px-1.5 py-0.2 rounded text-[9px] font-bold bg-emerald-100 text-emerald-800">
+                                                Aktif
+                                              </span>
+                                            )}
+                                          </div>
+                                          <div className="text-[10px] text-stone-500 mt-0.5">
+                                            {formattedDate} • {usage.category || 'Operasional'}
+                                            {usage.guest_name_or_note && ` • ${usage.guest_name_or_note}`}
+                                          </div>
+                                          {usage.items && usage.items.length > 0 && (
+                                            <div className="text-[9.5px] text-stone-500 italic mt-0.5">
+                                              Item: {usage.items.map(it => `${it.name} (${it.quantity}x)`).join(', ')}
+                                            </div>
+                                          )}
+                                        </div>
+                                        <div className="text-right shrink-0">
+                                          <span className={`font-bold ${isCancelled ? 'line-through text-stone-400' : 'text-stone-900'}`}>
+                                            Rp {usage.amount.toLocaleString('id-ID')}
+                                          </span>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                })
+                              )}
+                            </div>
+                          )}
                         </div>
                       </div>
                     )}

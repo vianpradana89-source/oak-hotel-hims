@@ -1,5 +1,5 @@
 import crypto from 'crypto';
-import type { PoolClient } from 'pg';
+import type { PoolClient, Pool } from 'pg';
 import { hashPassword } from '../auth/authService';
 import {
   type HrEmployee,
@@ -375,6 +375,18 @@ export async function getAvailableRolesForHrd(
   return roles;
 }
 
+
+export async function syncVoidedComplimentaryUsages(client: PoolClient | Pool): Promise<void> {
+  await client.query(`
+    UPDATE pos_complimentary_usages cu
+    SET status = 'CANCELLED'
+    FROM pos_orders po
+    WHERE cu.pos_order_id = po.id
+      AND po.status IN ('VOIDED', 'CANCELLED')
+      AND cu.status = 'ACTIVE'
+  `);
+}
+
 export async function getEmployees(
   client: PoolClient,
   propertyId: number,
@@ -399,9 +411,11 @@ export async function getEmployees(
            COALESCE((
              SELECT SUM(cu.amount)
              FROM pos_complimentary_usages cu
+             LEFT JOIN pos_orders po ON po.id = cu.pos_order_id
              WHERE cu.employee_id = e.id
                AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
                AND cu.status = 'ACTIVE'
+               AND (po.id IS NULL OR po.status NOT IN ('VOIDED', 'CANCELLED'))
            ), 0)::numeric AS complimentary_quota_used
     FROM hr_employees e
     LEFT JOIN hr_departments d ON d.id = e.department_id
@@ -4434,9 +4448,11 @@ export async function getComplimentaryEligibleEmployees(
            COALESCE((
              SELECT SUM(cu.amount)
              FROM pos_complimentary_usages cu
+             LEFT JOIN pos_orders po ON po.id = cu.pos_order_id
              WHERE cu.employee_id = e.id
                AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')
                AND cu.status = 'ACTIVE'
+               AND (po.id IS NULL OR po.status NOT IN ('VOIDED', 'CANCELLED'))
            ), 0)::numeric AS complimentary_quota_used
     FROM hr_employees e
     WHERE e.property_id = $1
@@ -4461,4 +4477,98 @@ export async function getComplimentaryEligibleEmployees(
       has_pin: Boolean(row.complimentary_pin && row.complimentary_pin.trim().length > 0),
     };
   });
+}
+
+export interface EmployeeComplimentaryUsageRow {
+  id: number;
+  pos_order_id: number | null;
+  order_number: string | null;
+  order_status: string | null;
+  amount: number;
+  category: string;
+  guest_name_or_note: string | null;
+  usage_month: string;
+  status: 'ACTIVE' | 'CANCELLED';
+  created_at: string;
+  items: Array<{ name: string; quantity: number; price: number }>;
+}
+
+export async function getEmployeeComplimentaryUsages(
+  client: PoolClient | Pool,
+  propertyId: number,
+  employeeId: number,
+  month?: string
+): Promise<EmployeeComplimentaryUsageRow[]> {
+  await syncVoidedComplimentaryUsages(client).catch(() => {});
+
+  const targetMonth = month && /^\d{4}-\d{2}$/.test(month) ? month : null;
+  let sql = `
+    SELECT cu.id,
+           cu.pos_order_id,
+           cu.amount,
+           cu.category,
+           cu.guest_name_or_note,
+           cu.usage_month,
+           cu.status,
+           cu.created_at,
+           po.order_number,
+           po.status AS order_status
+    FROM pos_complimentary_usages cu
+    LEFT JOIN pos_orders po ON po.id = cu.pos_order_id
+    WHERE cu.employee_id = $1 AND cu.property_id = $2
+  `;
+  const params: any[] = [employeeId, propertyId];
+
+  if (targetMonth) {
+    params.push(targetMonth);
+    sql += ` AND cu.usage_month = $${params.length}`;
+  } else {
+    sql += ` AND cu.usage_month = to_char(CURRENT_DATE, 'YYYY-MM')`;
+  }
+
+  sql += ` ORDER BY cu.created_at DESC`;
+
+  const res = await client.query(sql, params);
+
+  const orderIds = res.rows
+    .map((r: any) => r.pos_order_id)
+    .filter((id: any) => id !== null && id !== undefined && Number(id) > 0);
+
+  const itemsByOrder: Record<number, Array<{ name: string; quantity: number; price: number }>> = {};
+  if (orderIds.length > 0) {
+    const itemsRes = await client.query(
+      `SELECT poi.order_id, poi.quantity, poi.unit_price, pmi.name
+       FROM pos_order_items poi
+       LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+       WHERE poi.order_id = ANY($1::int[])`,
+      [orderIds]
+    );
+    for (const item of itemsRes.rows) {
+      const oId = Number(item.order_id);
+      if (!itemsByOrder[oId]) {
+        itemsByOrder[oId] = [];
+      }
+      itemsByOrder[oId].push({
+        name: item.name || 'Item POS',
+        quantity: Number(item.quantity || 1),
+        price: Number(item.unit_price || 0),
+      });
+    }
+  }
+
+  return res.rows.map((row: any) => ({
+    id: Number(row.id),
+    pos_order_id: row.pos_order_id ? Number(row.pos_order_id) : null,
+    order_number: row.order_number || (row.pos_order_id ? `POS-${String(row.pos_order_id).padStart(6, '0')}` : null),
+    order_status: row.order_status || null,
+    amount: Number(row.amount || 0),
+    category: row.category || 'Operasional',
+    guest_name_or_note: row.guest_name_or_note || null,
+    usage_month: row.usage_month,
+    status: (row.status === 'CANCELLED' || row.order_status === 'VOIDED' || row.order_status === 'CANCELLED')
+      ? 'CANCELLED'
+      : 'ACTIVE',
+    created_at: row.created_at,
+    items: row.pos_order_id ? (itemsByOrder[Number(row.pos_order_id)] || []) : [],
+  }));
 }
