@@ -165,7 +165,11 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const [bankPopoverPos, setBankPopoverPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const [bankCopiedField, setBankCopiedField] = useState<string | null>(null);
   const [selectedSummaryPayable, setSelectedSummaryPayable] = useState<AccountingPayableItem | null>(null);
-  const [selectedProofModal, setSelectedProofModal] = useState<{ filePath: string; title: string } | null>(null);
+  const [selectedProofModal, setSelectedProofModal] = useState<{
+    filePath: string | null;
+    title: string;
+    uploadId?: string | number | null;
+  } | null>(null);
 
   const handleCopyText = async (fieldKey: string, text: string) => {
     try {
@@ -961,6 +965,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                     item.payment_proof_attachment!.id
                                   ),
                                   title: `Bukti Bayar — ${item.transaction_no}`,
+                                  uploadId: item.id,
                                 })
                               }
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
@@ -978,6 +983,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                 setSelectedProofModal({
                                   filePath: item.proof_url!,
                                   title: `Bukti Bayar — ${item.transaction_no}`,
+                                  uploadId: item.id,
                                 })
                               }
                               className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
@@ -987,6 +993,21 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                               </svg>
                               <span>Bukti</span>
+                            </button>
+                          ) : item.status === 'PAID' ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedProofModal({
+                                  filePath: null,
+                                  title: `Bukti Bayar — ${item.transaction_no}`,
+                                  uploadId: item.id,
+                                })
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-50 text-slate-600 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200 transition-colors cursor-pointer"
+                              title="Unggah Bukti Bayar"
+                            >
+                              <span>+ Bukti</span>
                             </button>
                           ) : (
                             <span className="text-slate-400 text-xs">—</span>
@@ -2177,6 +2198,9 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
         <PaymentProofModal
           filePath={selectedProofModal.filePath}
           title={selectedProofModal.title}
+          uploadId={selectedProofModal.uploadId}
+          propertyId={propertyId}
+          onUploaded={() => onRetry?.()}
           onClose={() => setSelectedProofModal(null)}
         />
       )}

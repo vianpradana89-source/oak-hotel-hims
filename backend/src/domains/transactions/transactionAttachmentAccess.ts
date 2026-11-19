@@ -73,5 +73,20 @@ export async function getScopedTransactionAttachment(
     return { transactionFound: true, attachment: null };
   }
 
-  return { transactionFound: true, attachment: attRes.rows[0] as ScopedTransactionAttachment };
+  const row = attRes.rows[0] as ScopedTransactionAttachment;
+  if (!row.file_data) {
+    const fallbackRes = await pool.query(
+      `SELECT id, transaction_id, property_id, mime_type, original_name, file_name, storage_path, file_data
+       FROM transaction_attachments
+       WHERE transaction_id = $1 AND property_id = $2 AND file_data IS NOT NULL
+       ORDER BY id DESC
+       LIMIT 1`,
+      [transactionId, propertyId]
+    );
+    if ((fallbackRes.rowCount ?? 0) > 0) {
+      return { transactionFound: true, attachment: fallbackRes.rows[0] as ScopedTransactionAttachment };
+    }
+  }
+
+  return { transactionFound: true, attachment: row };
 }

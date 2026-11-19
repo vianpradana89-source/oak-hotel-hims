@@ -7126,10 +7126,10 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
 
     -- Migration: transaction_attachments_persistent_storage_v1
     -- Persistent binary storage for Cloud Run stateless containers + retroactive purchase workflow sync
-    ALTER TABLE transaction_attachments
+    ALTER TABLE IF EXISTS transaction_attachments
       ADD COLUMN IF NOT EXISTS file_data BYTEA;
 
-    ALTER TABLE accounting_manual_payables
+    ALTER TABLE IF EXISTS accounting_manual_payables
       ADD COLUMN IF NOT EXISTS proof_data BYTEA,
       ADD COLUMN IF NOT EXISTS proof_mime_type VARCHAR(100);
 

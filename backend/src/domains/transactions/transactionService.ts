@@ -5688,6 +5688,32 @@ export async function addTransactionAttachment(
 
   const purpose: AttachmentPurpose = attachment.attachmentPurpose || 'RECEIPT';
 
+  if (purpose === 'PAYMENT_PROOF' && attachment.fileData) {
+    await pool.query(
+      `UPDATE transaction_attachments
+       SET file_name = $3,
+           original_name = $4,
+           mime_type = $5,
+           file_size = $6,
+           storage_path = $7,
+           file_data = $8
+       WHERE property_id = $1
+         AND transaction_id = $2
+         AND attachment_purpose = 'PAYMENT_PROOF'
+         AND file_data IS NULL`,
+      [
+        propertyId,
+        transactionId,
+        attachment.fileName,
+        attachment.originalName,
+        attachment.mimeType,
+        attachment.fileSize,
+        attachment.storagePath,
+        attachment.fileData,
+      ]
+    );
+  }
+
   const insertRes = await pool.query(
     `INSERT INTO transaction_attachments (
       property_id, transaction_id, file_name, original_name,

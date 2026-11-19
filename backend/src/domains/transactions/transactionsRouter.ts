@@ -800,31 +800,37 @@ export function createTransactionsRouter(pool: Pool): Router {
 
       const mimeType = scoped.attachment.mime_type || 'application/octet-stream';
       const downloadName = scoped.attachment.original_name || scoped.attachment.file_name || 'attachment';
-      res.setHeader('Content-Type', mimeType);
-      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(downloadName)}"`);
-      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
-      res.setHeader('Pragma', 'no-cache');
-      res.setHeader('Expires', '0');
 
       if (safePath && fs.existsSync(safePath)) {
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(downloadName)}"`);
+        res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         return res.sendFile(safePath);
       }
 
       if (scoped.attachment.file_data && Buffer.isBuffer(scoped.attachment.file_data)) {
         if (safePath) {
           try {
+            fs.mkdirSync(TRANSACTION_ATTACHMENT_UPLOAD_DIR, { recursive: true });
             fs.writeFileSync(safePath, scoped.attachment.file_data);
           } catch {
             // non-fatal cache write
           }
         }
+        res.setHeader('Content-Type', mimeType);
+        res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(downloadName)}"`);
+        res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Expires', '0');
         return res.send(scoped.attachment.file_data);
       }
 
       return res.status(404).json({
         status: 'ERROR',
         code: 'FILE_NOT_FOUND',
-        message: 'File lampiran tidak ditemukan.'
+        message: 'File lampiran tidak ditemukan. Silakan unggah ulang bukti bayar.'
       });
     } catch (err: any) {
       const statusCode = err.statusCode || 500;

@@ -261,7 +261,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // EXPENSE-1D: expandable operational detail row (mirrors Purchase pattern)
   const [expandedExpenseIds, setExpandedExpenseIds] = useState<Set<number | string>>(new Set());
-  const [paymentProofModal, setPaymentProofModal] = useState<{ filePath: string; title: string } | null>(null);
+  const [paymentProofModal, setPaymentProofModal] = useState<{
+    filePath: string | null;
+    title: string;
+    uploadId?: string | number | null;
+  } | null>(null);
   const [expenseDetailCache, setExpenseDetailCache] = useState<Map<number | string, TransactionRecord>>(new Map());
   const [expenseLoadingIds, setExpenseLoadingIds] = useState<Set<number | string>>(new Set());
   const [expenseExpandErrors, setExpenseExpandErrors] = useState<Map<number | string, string>>(new Map());
@@ -3247,6 +3251,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                   setPaymentProofModal({
                                     filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
                                     title: `Bukti Bayar — ${t.transaction_no}`,
+                                    uploadId: `HIMS-PUR-${t.id}`,
                                   });
                                 }
                               }}
@@ -3257,6 +3262,21 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
                               </svg>
                               <span>Bukti</span>
+                            </button>
+                          ) : t.payment_status === 'PAID' ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setPaymentProofModal({
+                                  filePath: null,
+                                  title: `Bukti Bayar — ${t.transaction_no}`,
+                                  uploadId: `HIMS-PUR-${t.id}`,
+                                });
+                              }}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-50 text-slate-600 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-700 hover:border-emerald-200 transition-colors cursor-pointer"
+                              title="Unggah Bukti Bayar"
+                            >
+                              <span>+ Bukti</span>
                             </button>
                           ) : (
                             <span className="text-slate-400 text-xs">—</span>
@@ -4531,6 +4551,9 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         <PaymentProofModal
           filePath={paymentProofModal.filePath}
           title={paymentProofModal.title}
+          uploadId={paymentProofModal.uploadId}
+          propertyId={propertyId}
+          onUploaded={() => void loadTransactions()}
           onClose={() => setPaymentProofModal(null)}
         />
       )}
