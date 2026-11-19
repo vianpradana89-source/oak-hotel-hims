@@ -994,16 +994,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                           </button>
                         )}
 
-                        {isApproved && (
-                          <button
-                            type="button"
-                            onClick={() => onOpenCreateInvoiceForPo(po)}
-                            className="px-2.5 py-1 rounded-lg text-[10px] font-bold bg-blue-700 hover:bg-blue-800 text-white cursor-pointer"
-                            title="Catat Tagihan / Nota Supplier berdasarkan PO ini"
-                          >
-                            Catat Tagihan/Nota
-                          </button>
-                        )}
+
 
                         {!isFullyReceived && po.status !== 'CANCELLED' && (
                           <button
@@ -1131,17 +1122,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                       >
                         Lihat Penerimaan
                       </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const poRef = selectedPo;
-                          setSelectedPo(null);
-                          onOpenCreateInvoiceForPo(poRef);
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-blue-700 hover:bg-blue-800 text-white font-bold cursor-pointer"
-                      >
-                        Catat Tagihan / Nota
-                      </button>
+
                       {Array.isArray(selectedPo.linked_invoices) && selectedPo.linked_invoices.length > 0 && (
                         <button
                           type="button"

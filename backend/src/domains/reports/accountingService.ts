@@ -127,6 +127,14 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
 
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_url TEXT NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_filename TEXT NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100) NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_account VARCHAR(100) NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_holder VARCHAR(100) NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS supplier_email VARCHAR(160) NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS warehouse_code VARCHAR(40) NULL;
+
       CREATE TABLE IF NOT EXISTS accounting_manual_receivables (
         id SERIAL PRIMARY KEY,
         property_id INT NOT NULL DEFAULT 1,
@@ -297,7 +305,10 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
               paid_amount::numeric(16,2) AS paid_amount,
               to_char(due_date, 'YYYY-MM-DD') AS due_date,
               status, notes,
-              to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date
+              to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date,
+              bank_name, bank_account, bank_holder, supplier_email,
+              COALESCE(warehouse_code, '—') AS warehouse_code,
+              proof_url, proof_filename
        FROM accounting_manual_payables
        WHERE property_id = $1
        ORDER BY created_at DESC, id DESC`,
@@ -318,9 +329,38 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            END::numeric(16,2) AS paid_amount,
            NULL::text AS due_date,
            COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Cash') AS payment_method,
-           UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status
+           UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status,
+           s.bank_name,
+           s.bank_account,
+           s.bank_holder,
+           s.email AS supplier_email,
+           COALESCE(
+             sl_po.code,
+             (
+               SELECT sl_gr.code
+               FROM pos_goods_receipts gr
+               JOIN stock_locations sl_gr ON sl_gr.id = gr.location_id
+               WHERE (gr.transaction_id = t.id OR (t.po_id IS NOT NULL AND gr.po_id = t.po_id))
+               LIMIT 1
+             ),
+             '—'
+           ) AS warehouse_code,
+           (
+             SELECT json_build_object(
+               'id', ta.id,
+               'original_name', ta.original_name,
+               'file_name', ta.file_name,
+               'mime_type', ta.mime_type
+             )
+             FROM transaction_attachments ta
+             WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
+             ORDER BY CASE WHEN ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT') THEN 0 ELSE 1 END, ta.id DESC
+             LIMIT 1
+           ) AS payment_proof_attachment
          FROM transactions t
          LEFT JOIN suppliers s ON s.id = t.supplier_id
+         LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
+         LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.default_location_id AND sl_po.property_id = t.property_id
          LEFT JOIN LATERAL (
            SELECT COALESCE(SUM(pt.amount), 0)::numeric(16,2) AS total_paid
            FROM payment_transactions pt
@@ -349,9 +389,16 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            END::numeric(16,2) AS paid_amount,
            NULL::text AS due_date,
            'Cash' AS payment_method,
-           CASE WHEN ppo.status = 'COMPLETED' THEN 'PAID' ELSE 'UNPAID' END AS payment_status
+           CASE WHEN ppo.status = 'COMPLETED' THEN 'PAID' ELSE 'UNPAID' END AS payment_status,
+           ps.bank_name,
+           ps.bank_account,
+           ps.bank_holder,
+           ps.email AS supplier_email,
+           COALESCE(sl_ppo.code, '—') AS warehouse_code,
+           NULL::json AS payment_proof_attachment
          FROM pos_purchase_orders ppo
          LEFT JOIN pos_suppliers ps ON ps.id = ppo.supplier_id AND ps.property_id = ppo.property_id
+         LEFT JOIN stock_locations sl_ppo ON sl_ppo.id = ppo.default_location_id AND sl_ppo.property_id = ppo.property_id
          WHERE ppo.property_id = $1
            AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
            AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
@@ -494,6 +541,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     status: 'UNPAID' | 'PARTIAL' | 'PAID';
     notes: string | null;
     payment_method?: string;
+    bank_name?: string | null;
+    bank_account?: string | null;
+    bank_holder?: string | null;
+    supplier_email?: string | null;
+    warehouse_code?: string | null;
+    proof_url?: string | null;
+    payment_proof_attachment?: any;
   }> = [];
 
   for (const p of himsPurchasesRes.rows) {
@@ -502,6 +556,9 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     const remaining = Math.max(0, total - paid);
     const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
       remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+    const proofUrl = p.payment_proof_attachment
+      ? `/api/transactions/${p.id}/attachments/${p.payment_proof_attachment.id}/file`
+      : null;
     payablesItems.push({
       id: `HIMS-PUR-${p.id}`,
       source: 'HIMS_PURCHASE',
@@ -516,6 +573,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       status,
       notes: p.notes ? String(p.notes) : null,
       payment_method: String(p.payment_method || 'Cash'),
+      bank_name: p.bank_name || null,
+      bank_account: p.bank_account || null,
+      bank_holder: p.bank_holder || null,
+      supplier_email: p.supplier_email || null,
+      warehouse_code: p.warehouse_code || '—',
+      proof_url: proofUrl,
+      payment_proof_attachment: p.payment_proof_attachment || null,
     });
   }
 
@@ -542,6 +606,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       remaining_amount: status === 'PAID' ? 0 : remaining,
       status,
       notes: mp.notes ? String(mp.notes) : null,
+      bank_name: mp.bank_name || null,
+      bank_account: mp.bank_account || null,
+      bank_holder: mp.bank_holder || null,
+      supplier_email: mp.supplier_email || null,
+      warehouse_code: mp.warehouse_code || '—',
+      proof_url: mp.proof_url || null,
+      payment_proof_attachment: mp.proof_filename ? { id: mp.id, original_name: mp.proof_filename, file_name: mp.proof_filename, mime_type: null } : null,
     });
   }
 

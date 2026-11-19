@@ -172,6 +172,11 @@ export interface TransactionRecord {
   supplier_bank_account?: string | null;
   supplier_bank_holder?: string | null;
   supplier_address?: string | null;
+  payment_proof_attachment?: {
+    id: number;
+    file_path: string;
+    original_name?: string;
+  } | null;
   /** EXPENSE-1B: recipient bank snapshot (manual per-transaction, independent of Supplier Master) */
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;

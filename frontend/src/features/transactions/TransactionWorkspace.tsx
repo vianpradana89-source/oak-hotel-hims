@@ -45,6 +45,8 @@ import { useAuth } from '../auth/AuthContext';
 import { getPosAccess } from '../pos/posPermissions';
 import POSOrderPanel from '../pos/POSOrderPanel';
 import { formatPosOrderDisplayRef } from '../pos/posFormatUtils';
+import { PaymentProofModal } from './PaymentProofModal';
+import { buildTransactionAttachmentFilePath } from '../common/securePrivateMedia';
 
 interface TransactionWorkspaceProps {
   propertyId: number;
@@ -135,7 +137,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     }
     return 'SALE';
   });
-  const [showVendorSupplierMaster, setShowVendorSupplierMaster] = useState<boolean>(false);
+  const [showVendorSupplierMaster, setShowVendorSupplierMaster] = useState<boolean>(isStandaloneSupplier);
 
   // LEVEL 2 — DATE PERIOD (default: this_month for all 4 categories)
   const [datePreset, setDatePreset] = useState<'today' | 'yesterday' | 'this_month' | 'last_month' | 'all_time' | 'custom'>('this_month');
@@ -259,6 +261,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
   // EXPENSE-1D: expandable operational detail row (mirrors Purchase pattern)
   const [expandedExpenseIds, setExpandedExpenseIds] = useState<Set<number | string>>(new Set());
+  const [paymentProofModal, setPaymentProofModal] = useState<{ filePath: string; title: string } | null>(null);
   const [expenseDetailCache, setExpenseDetailCache] = useState<Map<number | string, TransactionRecord>>(new Map());
   const [expenseLoadingIds, setExpenseLoadingIds] = useState<Set<number | string>>(new Set());
   const [expenseExpandErrors, setExpenseExpandErrors] = useState<Map<number | string, string>>(new Map());
@@ -2024,18 +2027,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     );
   }
 
-  if (isStandaloneSupplier) {
-    return (
-      <div className="space-y-4">
-        <VendorSupplierMasterPage
-          propertyId={propertyId}
-          currentStaffName={currentStaffName}
-          onBack={onNavigateToPurchaseOrders}
-        />
-      </div>
-    );
-  }
-
   if (isStandalonePo) {
     return (
       <div className="space-y-4">
@@ -2043,12 +2034,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm px-6 py-5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
+              <div className="text-[11px] uppercase tracking-wider text-emerald-800 font-bold mb-0.5">
+                Manajemen Pengadaan &amp; Pembelian
+              </div>
               <div className="flex items-center gap-2.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-600" />
                 <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-                  Daftar Purchase Order (PO)
+                  Daftar Purchase Order (PO) &amp; Otorisasi Pengadaan
                 </h1>
               </div>
+              <p className="text-xs text-slate-500 mt-1">
+                Pengadaan baru wajib dimulai dari PO yang disetujui. Penerimaan barang (GRN) dan pencatatan tagihan/nota berjalan pada batas kuantitas kumulatif yang sama.
+              </p>
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
@@ -2080,12 +2077,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 type="button"
                 onClick={() => setShowVendorSupplierMaster(true)}
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-                title="Buka direktori master supplier"
+                title="Buka direktori master vendor & supplier"
               >
                 <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
-                <span>Supplier</span>
+                <span>Vendor &amp; Supplier</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setInitialPoIdForInvoice(null);
+                  setActiveEditor('PURCHASE');
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-sm cursor-pointer"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>+ Catat Tagihan / Nota PO</span>
               </button>
             </div>
           </div>
@@ -2215,12 +2226,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <button
               onClick={() => setShowVendorSupplierMaster(true)}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-              title="Buka direktori master supplier"
+              title="Buka direktori master vendor & supplier"
             >
               <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
-              <span>Supplier</span>
+              <span>Vendor &amp; Supplier</span>
             </button>
 
             {activeTab === 'SALE' && (
@@ -2887,6 +2898,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-2 text-center bg-slate-50">Otorisasi PO</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Penerimaan Barang</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Pelunasan</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Bukti Bayar</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Pemeriksaan Tagihan</th>
                         <th className="py-3 px-3 text-right min-w-[156px] bg-slate-50">Aksi</th>
                       </tr>
@@ -3213,6 +3225,32 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             );
                           })()}
                         </td>
+                        {/* Bukti Bayar */}
+                        <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                          {t.payment_proof_attachment ? (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const attach = t.payment_proof_attachment;
+                                if (attach) {
+                                  setPaymentProofModal({
+                                    filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
+                                    title: `Bukti Bayar — ${t.transaction_no}`,
+                                  });
+                                }
+                              }}
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
+                              title="Lihat Bukti Bayar"
+                            >
+                              <svg className="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                              </svg>
+                              <span>Bukti</span>
+                            </button>
+                          ) : (
+                            <span className="text-slate-400 text-xs">—</span>
+                          )}
+                        </td>
                         <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                           {renderVerificationBadge(t.verification_status || 'UNVERIFIED')}
                         </td>
@@ -3222,16 +3260,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             const isMenuOpen = purchaseActionMenuTx?.id === t.id;
                             return (
                               <div className="inline-flex items-center justify-end gap-1.5">
-                                {actionState.primaryAction === 'PAYMENT' && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openDetailDrawer(t.id)}
-                                    className="px-2.5 py-1 text-[10px] font-bold text-amber-900 bg-amber-50 hover:bg-amber-100 border border-amber-300 rounded-lg transition-colors cursor-pointer whitespace-nowrap focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-                                    title="Catat Pembayaran atas Tagihan"
-                                  >
-                                    Catat Pembayaran
-                                  </button>
-                                )}
                                 {actionState.primaryAction === 'RECEIVE' && (
                                   <button
                                     type="button"
@@ -4271,7 +4299,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   </button>
                 )}
 
-                {state.canRecordPayment && state.primaryAction !== 'PAYMENT' && (
+                {state.canRecordPayment && (
                   <button
                     type="button"
                     role="menuitem"
@@ -4486,6 +4514,14 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         >
           {bankToastMessage}
         </div>
+      )}
+      {/* Payment Proof Modal */}
+      {paymentProofModal && (
+        <PaymentProofModal
+          filePath={paymentProofModal.filePath}
+          title={paymentProofModal.title}
+          onClose={() => setPaymentProofModal(null)}
+        />
       )}
     </div>
   );

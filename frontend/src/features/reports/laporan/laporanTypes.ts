@@ -354,6 +354,18 @@ export interface AccountingPayableItem {
   remaining_amount: number;
   status: 'UNPAID' | 'PARTIAL' | 'PAID';
   notes: string | null;
+  bank_name?: string | null;
+  bank_account?: string | null;
+  bank_holder?: string | null;
+  supplier_email?: string | null;
+  warehouse_code?: string | null;
+  proof_url?: string | null;
+  proof_filename?: string | null;
+  payment_proof_attachment?: {
+    id: number;
+    file_path: string;
+    original_name?: string;
+  } | null;
 }
 
 export interface AccountingReceivableItem {

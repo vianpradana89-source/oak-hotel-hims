@@ -354,10 +354,10 @@ export const VendorSupplierFormModal: React.FC<VendorSupplierFormModalProps> = (
               </div>
 
               <div>
-                <label className="block font-semibold text-stone-700 mb-1">Email Tagihan / Faktur</label>
+                <label className="block font-semibold text-stone-700 mb-1">Email Rekanan / Supplier</label>
                 <input
                   type="email"
-                  placeholder="Contoh: invoice@vendor.com"
+                  placeholder="Contoh: info@supplier.com atau finance@vendor.com"
                   value={formData.email || ''}
                   onChange={(e) => setFormData({ ...formData, email: e.target.value })}
                   className="w-full px-3 py-2 bg-white border border-stone-300 rounded-lg focus:outline-none focus:ring-1 focus:ring-[#1b4332]"

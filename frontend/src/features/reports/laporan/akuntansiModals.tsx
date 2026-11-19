@@ -1625,6 +1625,8 @@ export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
   const remaining = Math.max(0, Number(item.remaining_amount || 0));
   const [payAmount, setPayAmount] = useState(String(remaining));
   const [paymentMethod, setPaymentMethod] = useState('CASH');
+  const [proofFile, setProofFile] = useState<File | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -1645,15 +1647,28 @@ export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
       const endpoint = isPayable
         ? `/api/reports/accounting/payables/${encodeURIComponent(item.id)}/settle`
         : `/api/reports/accounting/receivables/${encodeURIComponent(item.id)}/settle`;
-      const res = await authenticatedFetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          property_id: propertyId,
-          amount: numAmt,
-          payment_method: paymentMethod,
-        }),
-      });
+      let res: Response;
+      if (isPayable && proofFile) {
+        const formData = new FormData();
+        formData.append('property_id', String(propertyId));
+        formData.append('amount', String(numAmt));
+        formData.append('payment_method', paymentMethod);
+        formData.append('file', proofFile);
+        res = await authenticatedFetch(endpoint, {
+          method: 'POST',
+          body: formData,
+        });
+      } else {
+        res = await authenticatedFetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            amount: numAmt,
+            payment_method: paymentMethod,
+          }),
+        });
+      }
       const json = await res.json();
       if (!res.ok || json.status === 'ERROR') {
         throw new Error(json.message || 'Gagal memproses pembayaran');
@@ -1729,6 +1744,52 @@ export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
               <option value="QRIS">QRIS</option>
             </select>
           </div>
+
+          {isPayable && (
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+                Upload Bukti Bayar <span className="text-slate-400 font-normal">(Opsional - Foto / PDF)</span>
+              </label>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,application/pdf"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] || null;
+                  setProofFile(file);
+                }}
+                className="hidden"
+                id="settle-proof-file"
+              />
+              {proofFile ? (
+                <div className="flex items-center justify-between p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs">
+                  <div className="flex items-center gap-2 truncate text-emerald-800 font-medium">
+                    <span className="shrink-0 font-bold text-emerald-700">✓</span>
+                    <span className="truncate">{proofFile.name}</span>
+                    <span className="shrink-0 text-[10px] text-emerald-600">({(proofFile.size / 1024).toFixed(0)} KB)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setProofFile(null);
+                      if (fileInputRef.current) fileInputRef.current.value = '';
+                    }}
+                    className="shrink-0 ml-2 text-rose-600 hover:text-rose-800 text-[11px] font-semibold cursor-pointer"
+                  >
+                    Hapus
+                  </button>
+                </div>
+              ) : (
+                <label
+                  htmlFor="settle-proof-file"
+                  className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl border border-dashed border-slate-300 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium cursor-pointer transition-colors"
+                >
+                  <Upload className="w-4 h-4 text-slate-400" />
+                  <span>Pilih file bukti transfer / kwitansi</span>
+                </label>
+              )}
+            </div>
+          )}
 
           <button
             type="submit"

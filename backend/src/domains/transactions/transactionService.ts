@@ -4613,7 +4613,19 @@ export async function getTransactions(
             pos_ord.pos_table_number AS pos_table_number,
             pos_ord.pos_order_items AS pos_order_items,
             COALESCE(pmt.total_paid, 0) AS paid_amount,
-            GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount
+            GREATEST(0, t.net_amount - COALESCE(pmt.total_paid, 0)) AS outstanding_amount,
+            (
+              SELECT json_build_object(
+                'id', ta.id,
+                'original_name', ta.original_name,
+                'file_name', ta.file_name,
+                'mime_type', ta.mime_type
+              )
+              FROM transaction_attachments ta
+              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
+              ORDER BY CASE WHEN ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT') THEN 0 ELSE 1 END, ta.id DESC
+              LIMIT 1
+            ) AS payment_proof_attachment
      FROM transactions t
      LEFT JOIN suppliers s ON s.id = t.supplier_id
      LEFT JOIN pos_purchase_orders po_ref ON po_ref.id = t.po_id AND po_ref.property_id = t.property_id

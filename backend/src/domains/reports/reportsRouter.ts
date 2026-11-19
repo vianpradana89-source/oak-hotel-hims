@@ -1,12 +1,42 @@
 import { Router, Request, Response } from 'express';
 import { Pool } from 'pg';
+import path from 'path';
+import fs from 'fs';
+import multer from 'multer';
 import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate';
 import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
-import { getTransactions, settleTransactionPayment } from '../transactions/transactionService';
+import { getTransactions, settleTransactionPayment, addTransactionAttachment } from '../transactions/transactionService';
 import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
+import { TRANSACTION_ATTACHMENT_UPLOAD_DIR } from '../transactions/transactionAttachmentAccess';
+
+const payablesStorage = multer.diskStorage({
+  destination: (_req: any, _file: any, cb: (error: Error | null, destination: string) => void) => {
+    fs.mkdirSync(TRANSACTION_ATTACHMENT_UPLOAD_DIR, { recursive: true });
+    cb(null, TRANSACTION_ATTACHMENT_UPLOAD_DIR);
+  },
+  filename: (_req: any, file: any, cb: (error: Error | null, filename: string) => void) => {
+    const ext = path.extname(file.originalname || '').toLowerCase();
+    const safeExt = ['.jpg', '.jpeg', '.png', '.webp', '.pdf'].includes(ext) ? ext : '.jpg';
+    const safeName = `tx-att-${Date.now()}-${Math.round(Math.random() * 1e9)}${safeExt}`;
+    cb(null, safeName);
+  },
+});
+
+const uploadPayableProof = multer({
+  storage: payablesStorage,
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req: any, file: any, cb: any) => {
+    const allowed = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Format berkas tidak didukung. Hanya JPG, PNG, WEBP, dan PDF yang diperbolehkan.'));
+    }
+  },
+});
 
 function parsePositiveInt(value: any): number | null {
   const n = Number(value);
@@ -2520,7 +2550,7 @@ export function createReportsRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/accounting/payables/:id/settle', async (req: Request, res: Response) => {
+  router.post('/accounting/payables/:id/settle', uploadPayableProof.single('file'), async (req: Request, res: Response) => {
     try {
       const rawId = String(req.params.id || '');
       const propertyId = parsePositiveInt(req.body.property_id) || 1;
@@ -2537,10 +2567,23 @@ export function createReportsRouter(pool: Pool): Router {
         const currentPaid = Number(row.paid_amount || 0);
         const newPaid = payAmount !== null && payAmount > 0 ? Math.min(total, currentPaid + payAmount) : total;
         const newStatus = newPaid >= total ? 'PAID' : newPaid > 0 ? 'PARTIAL' : 'UNPAID';
-        await pool.query(
-          `UPDATE accounting_manual_payables SET paid_amount = $2, status = $3, updated_at = NOW() WHERE id = $1`,
-          [id, newPaid, newStatus]
-        );
+
+        const proofUrl = req.file ? `/uploads/transactions/${req.file.filename}` : null;
+        const proofFilename = req.file ? req.file.originalname : null;
+
+        if (proofUrl) {
+          await pool.query(
+            `UPDATE accounting_manual_payables
+             SET paid_amount = $2, status = $3, proof_url = $4, proof_filename = $5, updated_at = NOW()
+             WHERE id = $1`,
+            [id, newPaid, newStatus, proofUrl, proofFilename]
+          );
+        } else {
+          await pool.query(
+            `UPDATE accounting_manual_payables SET paid_amount = $2, status = $3, updated_at = NOW() WHERE id = $1`,
+            [id, newPaid, newStatus]
+          );
+        }
         return res.json({ status: 'SUCCESS' });
       } else if (rawId.startsWith('HIMS-PUR-')) {
         const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
@@ -2577,11 +2620,174 @@ export function createReportsRouter(pool: Pool): Router {
             [txId]
           );
         }
+
+        // Upload payment proof if provided
+        if (req.file) {
+          const storagePath = `/uploads/transactions/${req.file.filename}`;
+          await addTransactionAttachment(pool, propId, txId, {
+            fileName: req.file.filename,
+            originalName: req.file.originalname,
+            mimeType: req.file.mimetype,
+            fileSize: req.file.size,
+            storagePath,
+            uploadedBy: 'Akuntansi',
+            attachmentPurpose: 'PAYMENT_PROOF',
+          });
+        }
+
         return res.json({ status: 'SUCCESS' });
       }
       return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal melunasi hutang' });
+    }
+  });
+
+  router.get('/accounting/payables/:id/items', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      if (rawId.startsWith('HIMS-PUR-')) {
+        const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
+        if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi pembelian tidak valid' });
+
+        const txRes = await pool.query(
+          `SELECT t.id, t.transaction_no, to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
+                  COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
+                  t.description, t.net_amount, t.payment_status,
+                  t.po_id, ppo.po_number,
+                  COALESCE(
+                    sl_po.code,
+                    (
+                      SELECT sl_gr.code
+                      FROM pos_goods_receipts gr
+                      JOIN stock_locations sl_gr ON sl_gr.id = gr.location_id
+                      WHERE (gr.transaction_id = t.id OR (t.po_id IS NOT NULL AND gr.po_id = t.po_id))
+                      LIMIT 1
+                    ),
+                    '—'
+                  ) AS warehouse_code
+           FROM transactions t
+           LEFT JOIN suppliers s ON s.id = t.supplier_id
+           LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
+           LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.default_location_id AND sl_po.property_id = t.property_id
+           WHERE t.id = $1`,
+          [txId]
+        );
+        if (!txRes.rowCount) {
+          return res.status(404).json({ status: 'ERROR', message: 'Transaksi tidak ditemukan' });
+        }
+        const tx = txRes.rows[0];
+
+        // 1. Check transaction_lines
+        const linesRes = await pool.query(
+          `SELECT tl.id, tl.description_snapshot AS item_name, tl.quantity, tl.unit, tl.unit_price, tl.line_total
+           FROM transaction_lines tl
+           WHERE tl.transaction_id = $1
+           ORDER BY tl.sort_order ASC, tl.id ASC`,
+          [txId]
+        );
+
+        let items: any[] = [];
+        if (linesRes.rowCount && linesRes.rowCount > 0) {
+          items = linesRes.rows.map((r: any) => ({
+            id: r.id,
+            item_name: r.item_name,
+            quantity: Number(r.quantity || 1),
+            unit: r.unit || 'PCS',
+            unit_price: Number(r.unit_price || 0),
+            line_total: Number(r.line_total || 0),
+          }));
+        } else if (tx.po_id) {
+          // 2. Check pos_purchase_order_items
+          const poItemsRes = await pool.query(
+            `SELECT poi.id, mi.name AS item_name, poi.ordered_qty AS quantity,
+                    COALESCE(uom.code, 'PCS') AS unit,
+                    poi.unit_cost AS unit_price,
+                    ROUND(poi.ordered_qty * poi.unit_cost) AS line_total
+             FROM pos_purchase_order_items poi
+             JOIN pos_menu_items mi ON mi.id = poi.product_id
+             LEFT JOIN pos_product_uoms uom ON uom.id = poi.uom_id
+             WHERE poi.po_id = $1
+             ORDER BY poi.id ASC`,
+            [tx.po_id]
+          );
+          if (poItemsRes.rowCount && poItemsRes.rowCount > 0) {
+            items = poItemsRes.rows.map((r: any) => ({
+              id: r.id,
+              item_name: r.item_name,
+              quantity: Number(r.quantity || 1),
+              unit: r.unit || 'PCS',
+              unit_price: Number(r.unit_price || 0),
+              line_total: Number(r.line_total || 0),
+            }));
+          }
+        }
+
+        // 3. Fallback to transaction description
+        if (items.length === 0) {
+          items = [
+            {
+              id: 1,
+              item_name: tx.description || 'Pembelian Operasional / Barang',
+              quantity: 1,
+              unit: 'PAKET',
+              unit_price: Number(tx.net_amount || 0),
+              line_total: Number(tx.net_amount || 0),
+            },
+          ];
+        }
+
+        return res.json({
+          status: 'SUCCESS',
+          data: {
+            transaction_no: tx.transaction_no,
+            supplier_name: tx.supplier_name,
+            tx_date: tx.tx_date,
+            total_amount: Number(tx.net_amount || 0),
+            warehouse_code: tx.warehouse_code,
+            notes: tx.description,
+            items,
+          },
+        });
+      } else if (rawId.startsWith('MANUAL-AP-')) {
+        const id = parsePositiveInt(rawId.replace('MANUAL-AP-', ''));
+        if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID hutang manual tidak valid' });
+
+        const cur = await pool.query(
+          `SELECT id, supplier_name, transaction_no, total_amount, paid_amount, notes,
+                  to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date,
+                  COALESCE(warehouse_code, '—') AS warehouse_code
+           FROM accounting_manual_payables
+           WHERE id = $1`,
+          [id]
+        );
+        if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Hutang tidak ditemukan' });
+        const row = cur.rows[0];
+        return res.json({
+          status: 'SUCCESS',
+          data: {
+            transaction_no: row.transaction_no,
+            supplier_name: row.supplier_name,
+            tx_date: row.tx_date,
+            total_amount: Number(row.total_amount || 0),
+            warehouse_code: row.warehouse_code,
+            notes: row.notes,
+            items: [
+              {
+                id: 1,
+                item_name: row.notes || 'Pencatatan Hutang Usaha Manual',
+                quantity: 1,
+                unit: 'LOT',
+                unit_price: Number(row.total_amount || 0),
+                line_total: Number(row.total_amount || 0),
+              },
+            ],
+          },
+        });
+      }
+      return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memuat rincian pembelian' });
     }
   });
 

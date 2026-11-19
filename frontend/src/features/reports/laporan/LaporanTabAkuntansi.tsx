@@ -1,6 +1,9 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { CheckCircle2, Image as ImageIcon, Pencil, Trash2 } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, CheckCircle2, Copy, Image as ImageIcon, Pencil, Trash2 } from 'lucide-react';
 import { authenticatedFetch } from '../../../lib/authenticatedFetch';
+import { PaymentProofModal } from '../../transactions/PaymentProofModal';
+import { PurchaseItemsSummaryModal } from '../../transactions/PurchaseItemsSummaryModal';
+import { buildTransactionAttachmentFilePath } from '../../common/securePrivateMedia';
 import {
   EmptyState,
   ErrorState,
@@ -154,6 +157,49 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     mode: 'PAYABLE' | 'RECEIVABLE';
     item: AccountingPayableItem | AccountingReceivableItem;
   } | null>(null);
+
+  // Payables extras: Popover, Summary modal, Proof modal
+  const [activeBankPopoverPayable, setActiveBankPopoverPayable] = useState<AccountingPayableItem | null>(null);
+  const [bankPopoverPos, setBankPopoverPos] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
+  const [bankCopiedField, setBankCopiedField] = useState<string | null>(null);
+  const [selectedSummaryPayable, setSelectedSummaryPayable] = useState<AccountingPayableItem | null>(null);
+  const [selectedProofModal, setSelectedProofModal] = useState<{ filePath: string; title: string } | null>(null);
+
+  const handleCopyText = async (fieldKey: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setBankCopiedField(fieldKey);
+      setTimeout(() => setBankCopiedField(null), 2000);
+    } catch {
+      // ignore
+    }
+  };
+
+  const handleOpenBankPopover = (item: AccountingPayableItem, e: React.MouseEvent<HTMLElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const popoverWidth = 280;
+    let left = rect.left + window.scrollX;
+    if (left + popoverWidth > window.innerWidth - 16) {
+      left = window.innerWidth - popoverWidth - 16;
+    }
+    setBankPopoverPos({
+      top: rect.bottom + window.scrollY + 6,
+      left: Math.max(16, left),
+    });
+    setActiveBankPopoverPayable(item);
+  };
+
+  useEffect(() => {
+    if (!activeBankPopoverPayable) return;
+    const handleDown = (e: MouseEvent) => {
+      const el = document.getElementById('payable-bank-popover');
+      if (el && !el.contains(e.target as Node)) {
+        setActiveBankPopoverPayable(null);
+      }
+    };
+    document.addEventListener('mousedown', handleDown);
+    return () => document.removeEventListener('mousedown', handleDown);
+  }, [activeBankPopoverPayable]);
 
   // Confirm delete modal state
   const [confirmDeleteState, setConfirmDeleteState] = useState<{
@@ -813,11 +859,14 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Rekening Supplier</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Lokasi Gudang</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Jatuh Tempo</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Bukti Bayar</th>
                     <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Status</th>
                     <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
                   </tr>
@@ -825,30 +874,113 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPayables.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="py-10 text-center text-slate-400">
+                      <td colSpan={11} className="py-10 text-center text-slate-400">
                         Tidak ada data hutang pada filter ini.
                       </td>
                     </tr>
                   ) : (
                     filteredPayables.map((item) => (
                       <tr key={item.id} className="hover:bg-emerald-50/30 transition">
+                        {/* 1. Supplier */}
                         <td className="py-3 px-4 font-bold text-slate-900">
                           {item.supplier_name}
                           <div className="text-[10px] font-normal text-slate-400">
                             {item.source === 'HIMS_PURCHASE' ? 'Pembelian HIMS' : 'Hutang Manual'}
                           </div>
                         </td>
-                        <td className="py-3 px-4 font-semibold text-emerald-800">{item.transaction_no}</td>
+                        {/* 2. Rekening Supplier (kiri Transaksi) */}
+                        <td className="py-3 px-3 text-center">
+                          <button
+                            type="button"
+                            onClick={(e) => handleOpenBankPopover(item, e)}
+                            onMouseEnter={(e) => handleOpenBankPopover(item, e)}
+                            className="inline-flex items-center justify-center p-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100 transition-colors cursor-pointer"
+                            title="Lihat Rekening, Kontak & Salin Info Supplier"
+                          >
+                            <IconCreditCard className="w-4 h-4" />
+                          </button>
+                        </td>
+                        {/* 3. Transaksi (klik untuk popup rincian pembelian) */}
+                        <td className="py-3 px-4 font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSummaryPayable(item)}
+                            className="text-emerald-800 hover:text-emerald-950 hover:underline font-bold text-left cursor-pointer transition-colors"
+                            title="Klik untuk melihat ringkasan item pembelian"
+                          >
+                            {item.transaction_no}
+                          </button>
+                        </td>
+                        {/* 4. Lokasi Gudang (kanan Transaksi, hanya kode) */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          {item.warehouse_code ? (
+                            <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                              {item.warehouse_code}
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-xs">—</span>
+                          )}
+                        </td>
+                        {/* 5. Total */}
                         <td className="py-3 px-4 text-right font-bold text-slate-800">
                           {formatIdr(item.total_amount)}
                         </td>
+                        {/* 6. Sudah Bayar */}
                         <td className="py-3 px-4 text-right font-semibold text-emerald-700">
                           {formatIdr(item.paid_amount)}
                         </td>
+                        {/* 7. Sisa */}
                         <td className="py-3 px-4 text-right font-bold text-rose-600">
                           {formatIdr(item.remaining_amount)}
                         </td>
-                        <td className="py-3 px-4 text-slate-600">{formatMediumDateId(item.due_date)}</td>
+                        {/* 8. Jatuh Tempo */}
+                        <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
+                          {formatMediumDateId(item.due_date)}
+                        </td>
+                        {/* 9. Bukti Bayar (kanan Jatuh Tempo, kiri Status) */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          {item.payment_proof_attachment ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedProofModal({
+                                  filePath: buildTransactionAttachmentFilePath(
+                                    item.raw_id,
+                                    item.payment_proof_attachment!.id
+                                  ),
+                                  title: `Bukti Bayar — ${item.transaction_no}`,
+                                })
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
+                              title="Lihat Bukti Bayar"
+                            >
+                              <svg className="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                              </svg>
+                              <span>Bukti</span>
+                            </button>
+                          ) : item.proof_url ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedProofModal({
+                                  filePath: item.proof_url!,
+                                  title: `Bukti Bayar — ${item.transaction_no}`,
+                                })
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 transition-colors cursor-pointer"
+                              title="Lihat Bukti Bayar"
+                            >
+                              <svg className="w-3 h-3 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+                              </svg>
+                              <span>Bukti</span>
+                            </button>
+                          ) : (
+                            <span className="text-slate-400 text-xs">—</span>
+                          )}
+                        </td>
+                        {/* 10. Status */}
                         <td className="py-3 px-4 text-center">
                           <span
                             className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
@@ -866,6 +998,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                               : 'Belum Bayar'}
                           </span>
                         </td>
+                        {/* 11. Aksi */}
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
@@ -902,7 +1035,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 </tbody>
                 <tfoot>
                   <tr className="bg-emerald-950/5 font-extrabold text-slate-900 border-t border-slate-200">
-                    <td colSpan={2} className="py-3 px-4">
+                    <td colSpan={4} className="py-3 px-4">
                       Total ({filteredPayables.length} transaksi)
                     </td>
                     <td className="py-3 px-4 text-right">
@@ -914,7 +1047,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <td className="py-3 px-4 text-right text-rose-600">
                       Belum dibayar: {formatIdr(filteredPayables.reduce((s, i) => s + i.remaining_amount, 0))}
                     </td>
-                    <td colSpan={3} />
+                    <td colSpan={4} />
                   </tr>
                 </tfoot>
               </table>
@@ -1910,6 +2043,129 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           busy={deleteBusy}
           onCancel={() => setConfirmDeleteState(null)}
           onConfirm={executeConfirmDelete}
+        />
+      )}
+
+      {/* Popover Rekening & Info Supplier */}
+      {activeBankPopoverPayable && (
+        <div
+          id="payable-bank-popover"
+          style={{
+            position: 'absolute',
+            top: `${bankPopoverPos.top}px`,
+            left: `${bankPopoverPos.left}px`,
+            zIndex: 60,
+          }}
+          className="bg-white rounded-xl shadow-xl border border-slate-200 p-3.5 w-72 text-xs text-slate-800 animate-in fade-in zoom-in-95 duration-100"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+            <div className="font-bold text-slate-900 truncate">
+              {activeBankPopoverPayable.supplier_name}
+            </div>
+            <button
+              type="button"
+              onClick={() => setActiveBankPopoverPayable(null)}
+              className="text-slate-400 hover:text-slate-600 p-0.5 rounded cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+
+          <div className="space-y-2.5">
+            <div>
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">Rekening Bank</span>
+              {activeBankPopoverPayable.bank_account ? (
+                <div className="mt-0.5">
+                  <div className="font-medium text-slate-800">
+                    {activeBankPopoverPayable.bank_name || 'Bank'}
+                    {activeBankPopoverPayable.bank_holder ? ` a.n ${activeBankPopoverPayable.bank_holder}` : ''}
+                  </div>
+                  <div className="flex items-center justify-between gap-1.5 mt-1 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                    <span className="font-mono font-bold text-slate-900 text-xs">
+                      {activeBankPopoverPayable.bank_account}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => handleCopyText('bank', activeBankPopoverPayable.bank_account!)}
+                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                        bankCopiedField === 'bank'
+                          ? 'bg-emerald-600 text-white'
+                          : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                      }`}
+                    >
+                      {bankCopiedField === 'bank' ? (
+                        <>
+                          <Check className="w-3 h-3" />
+                          <span>Tersalin</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span>Salin</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <span className="text-slate-400 italic text-[11px]">Belum diatur</span>
+              )}
+            </div>
+
+            <div>
+              <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">Email Supplier</span>
+              {activeBankPopoverPayable.supplier_email ? (
+                <div className="flex items-center justify-between gap-1.5 mt-1 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                  <span className="font-medium text-slate-800 text-xs truncate max-w-[170px]" title={activeBankPopoverPayable.supplier_email}>
+                    {activeBankPopoverPayable.supplier_email}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => handleCopyText('email', activeBankPopoverPayable.supplier_email!)}
+                    className={`px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                      bankCopiedField === 'email'
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                    }`}
+                  >
+                    {bankCopiedField === 'email' ? (
+                      <>
+                        <Check className="w-3 h-3" />
+                        <span>Tersalin</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3 h-3" />
+                        <span>Salin</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              ) : (
+                <span className="text-slate-400 italic text-[11px]">Belum diatur</span>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Ringkasan Item Transaksi */}
+      {selectedSummaryPayable && (
+        <PurchaseItemsSummaryModal
+          payableId={selectedSummaryPayable.id}
+          transactionNo={selectedSummaryPayable.transaction_no}
+          supplierName={selectedSummaryPayable.supplier_name}
+          onClose={() => setSelectedSummaryPayable(null)}
+        />
+      )}
+
+      {/* Modal Preview Bukti Bayar */}
+      {selectedProofModal && (
+        <PaymentProofModal
+          filePath={selectedProofModal.filePath}
+          title={selectedProofModal.title}
+          onClose={() => setSelectedProofModal(null)}
         />
       )}
     </div>
