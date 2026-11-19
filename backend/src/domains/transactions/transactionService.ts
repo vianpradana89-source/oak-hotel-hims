@@ -4644,11 +4644,11 @@ export async function getTransactions(
               JSON_BUILD_OBJECT(
                 'id', poi.id,
                 'menu_item_id', poi.menu_item_id,
-                'item_name', COALESCE(NULLIF(BTRIM(poi.item_name_snapshot), ''), pmi.name, 'Item POS'),
-                'item_code', COALESCE(NULLIF(BTRIM(poi.item_code_snapshot), ''), pmi.item_code, ''),
+                'item_name', COALESCE(pmi.name, 'Item POS'),
+                'item_code', COALESCE(pmi.item_code, ''),
                 'quantity', poi.quantity,
                 'unit_price', poi.unit_price,
-                'discount_amount', COALESCE(poi.discount_amount, 0),
+                'discount_amount', 0,
                 'notes', poi.notes
               ) ORDER BY poi.id ASC
             )
@@ -5448,11 +5448,11 @@ export async function getTransactionById(
         const poiRes = await pool.query(
           `SELECT poi.id,
                   poi.menu_item_id,
-                  COALESCE(NULLIF(BTRIM(poi.item_name_snapshot), ''), pmi.name, 'Item POS') AS item_name,
-                  COALESCE(NULLIF(BTRIM(poi.item_code_snapshot), ''), pmi.item_code, '') AS item_code,
+                  COALESCE(pmi.name, 'Item POS') AS item_name,
+                  COALESCE(pmi.item_code, '') AS item_code,
                   poi.quantity,
                   poi.unit_price,
-                  COALESCE(poi.discount_amount, 0) AS discount_amount,
+                  0 AS discount_amount,
                   poi.notes
            FROM pos_order_items poi
            JOIN pos_orders po ON po.id = poi.order_id

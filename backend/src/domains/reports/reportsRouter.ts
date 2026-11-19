@@ -2669,7 +2669,7 @@ export function createReportsRouter(pool: Pool): Router {
            FROM transactions t
            LEFT JOIN suppliers s ON s.id = t.supplier_id
            LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
-           LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.default_location_id AND sl_po.property_id = t.property_id
+           LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.destination_location_id AND sl_po.property_id = t.property_id
            WHERE t.id = $1`,
           [txId]
         );

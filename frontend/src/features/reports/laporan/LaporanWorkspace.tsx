@@ -316,6 +316,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({
             financials={financials}
             financialsError={financialsError}
             analytics={analytics}
+            analyticsError={analyticsError}
             loading={loadingAll}
             onRetry={onRetry}
             subView={akuntansiSubView}

@@ -360,7 +360,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          FROM transactions t
          LEFT JOIN suppliers s ON s.id = t.supplier_id
          LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
-         LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.default_location_id AND sl_po.property_id = t.property_id
+         LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.destination_location_id AND sl_po.property_id = t.property_id
          LEFT JOIN LATERAL (
            SELECT COALESCE(SUM(pt.amount), 0)::numeric(16,2) AS total_paid
            FROM payment_transactions pt
@@ -390,15 +390,16 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            NULL::text AS due_date,
            'Cash' AS payment_method,
            CASE WHEN ppo.status = 'COMPLETED' THEN 'PAID' ELSE 'UNPAID' END AS payment_status,
-           ps.bank_name,
-           ps.bank_account,
-           ps.bank_holder,
-           ps.email AS supplier_email,
+           s_pos.bank_name,
+           s_pos.bank_account,
+           s_pos.bank_holder,
+           COALESCE(s_pos.email, ps.email) AS supplier_email,
            COALESCE(sl_ppo.code, '—') AS warehouse_code,
            NULL::json AS payment_proof_attachment
          FROM pos_purchase_orders ppo
          LEFT JOIN pos_suppliers ps ON ps.id = ppo.supplier_id AND ps.property_id = ppo.property_id
-         LEFT JOIN stock_locations sl_ppo ON sl_ppo.id = ppo.default_location_id AND sl_ppo.property_id = ppo.property_id
+         LEFT JOIN suppliers s_pos ON s_pos.id = COALESCE(ppo.canonical_supplier_id, ps.canonical_supplier_id)
+         LEFT JOIN stock_locations sl_ppo ON sl_ppo.id = ppo.destination_location_id AND sl_ppo.property_id = ppo.property_id
          WHERE ppo.property_id = $1
            AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
            AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'

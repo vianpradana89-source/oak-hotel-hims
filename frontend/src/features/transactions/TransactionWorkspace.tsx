@@ -2027,6 +2027,17 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     );
   }
 
+  if (isStandaloneSupplier) {
+    return (
+      <div className="space-y-4">
+        <VendorSupplierMasterPage
+          propertyId={propertyId}
+          currentStaffName={currentStaffName}
+        />
+      </div>
+    );
+  }
+
   if (isStandalonePo) {
     return (
       <div className="space-y-4">

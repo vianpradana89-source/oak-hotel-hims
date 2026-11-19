@@ -91,6 +91,7 @@ export interface LaporanTabAkuntansiProps {
   financials: FinancialsData | null;
   financialsError: { endpoint: string; message: string } | null;
   analytics: AnalyticsHubData | null;
+  analyticsError?: { endpoint: string; message: string } | null;
   loading: boolean;
   onRetry: () => void;
   subView: AkuntansiSubView;
@@ -117,6 +118,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   financials,
   financialsError,
   analytics,
+  analyticsError,
   loading,
   onRetry,
   subView,
@@ -372,10 +374,20 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     assetSortBy,
   ]);
 
-  if (loading && !analytics && !financials) {
+  const isAnalyticsDependent = ['transaksi', 'neraca', 'laba_rugi', 'arus_kas', 'jurnal', 'data_ppn', 'data_service_charge'].includes(subView);
+
+  if (loading && !analytics && !financials && isAnalyticsDependent) {
     return <LoadingState label="Memuat data akuntansi OAK HIMS..." />;
   }
-  if (!analytics && (dailyOpsError || financialsError)) {
+  if (isAnalyticsDependent && analyticsError) {
+    return (
+      <ErrorState
+        message={analyticsError.message}
+        onRetry={onRetry}
+      />
+    );
+  }
+  if (isAnalyticsDependent && !analytics && (dailyOpsError || financialsError)) {
     return (
       <ErrorState
         message={(dailyOpsError || financialsError)!.message}
@@ -383,7 +395,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
       />
     );
   }
-  if (!analytics) {
+  if (isAnalyticsDependent && !analytics) {
     return <EmptyState title="Belum ada data akuntansi" message="Pilih periode untuk memuat laporan akuntansi." />;
   }
 
@@ -492,9 +504,9 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     ]);
   };
 
-  const pl = analytics.accounting_statements?.profit_loss;
-  const bs = analytics.accounting_statements?.balance_sheet;
-  const cf = analytics.accounting_statements?.cash_flow;
+  const pl = analytics?.accounting_statements?.profit_loss;
+  const bs = analytics?.accounting_statements?.balance_sheet;
+  const cf = analytics?.accounting_statements?.cash_flow;
 
   return (
     <div className="space-y-5">
