@@ -2839,7 +2839,7 @@ export function createReportsRouter(pool: Pool): Router {
     }
   });
 
-  router.post('/accounting/receivables/:id/settle', async (req: Request, res: Response) => {
+  router.post('/accounting/receivables/:id/settle', uploadPayableProof.single('file'), async (req: Request, res: Response) => {
     try {
       const rawId = String(req.params.id || '');
       const propertyId = parsePositiveInt(req.body.property_id) || 1;

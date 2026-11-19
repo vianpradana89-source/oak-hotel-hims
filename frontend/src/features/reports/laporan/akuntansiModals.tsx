@@ -1648,7 +1648,7 @@ export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
         ? `/api/reports/accounting/payables/${encodeURIComponent(item.id)}/settle`
         : `/api/reports/accounting/receivables/${encodeURIComponent(item.id)}/settle`;
       let res: Response;
-      if (isPayable && proofFile) {
+      if (proofFile) {
         const formData = new FormData();
         formData.append('property_id', String(propertyId));
         formData.append('amount', String(numAmt));
@@ -1745,51 +1745,52 @@ export const SettlePaymentModal: React.FC<SettlePaymentModalProps> = ({
             </select>
           </div>
 
-          {isPayable && (
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Upload Bukti Bayar <span className="text-slate-400 font-normal">(Opsional - Foto / PDF)</span>
-              </label>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/jpeg,image/png,image/webp,application/pdf"
-                onChange={(e) => {
-                  const file = e.target.files?.[0] || null;
-                  setProofFile(file);
-                }}
-                className="hidden"
-                id="settle-proof-file"
-              />
-              {proofFile ? (
-                <div className="flex items-center justify-between p-2.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs">
-                  <div className="flex items-center gap-2 truncate text-emerald-800 font-medium">
-                    <span className="shrink-0 font-bold text-emerald-700">✓</span>
-                    <span className="truncate">{proofFile.name}</span>
-                    <span className="shrink-0 text-[10px] text-emerald-600">({(proofFile.size / 1024).toFixed(0)} KB)</span>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setProofFile(null);
-                      if (fileInputRef.current) fileInputRef.current.value = '';
-                    }}
-                    className="shrink-0 ml-2 text-rose-600 hover:text-rose-800 text-[11px] font-semibold cursor-pointer"
-                  >
-                    Hapus
-                  </button>
+          {/* Upload Bukti Pembayaran / Kwitansi */}
+          <div>
+            <label className="block text-xs font-semibold text-slate-700 mb-1.5">
+              Upload Bukti Bayar <span className="text-slate-400 font-normal">(Opsional - Foto / PDF)</span>
+            </label>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp,application/pdf"
+              onChange={(e) => {
+                const file = e.target.files?.[0] || null;
+                setProofFile(file);
+              }}
+              className="hidden"
+              id="settle-proof-file"
+            />
+            {proofFile ? (
+              <div className="flex items-center justify-between p-2.5 bg-emerald-50 border border-emerald-300 rounded-xl text-xs">
+                <div className="flex items-center gap-2 truncate text-emerald-900 font-semibold">
+                  <span className="shrink-0 font-bold text-emerald-700">✓</span>
+                  <span className="truncate">{proofFile.name}</span>
+                  <span className="shrink-0 text-[10px] text-emerald-600 font-normal">
+                    ({(proofFile.size / 1024).toFixed(0)} KB)
+                  </span>
                 </div>
-              ) : (
-                <label
-                  htmlFor="settle-proof-file"
-                  className="flex items-center justify-center gap-2 px-3.5 py-2.5 rounded-xl border border-dashed border-slate-300 bg-white hover:bg-slate-50 text-slate-600 text-xs font-medium cursor-pointer transition-colors"
+                <button
+                  type="button"
+                  onClick={() => {
+                    setProofFile(null);
+                    if (fileInputRef.current) fileInputRef.current.value = '';
+                  }}
+                  className="shrink-0 ml-2 text-rose-600 hover:text-rose-800 text-[11px] font-bold cursor-pointer"
                 >
-                  <Upload className="w-4 h-4 text-slate-400" />
-                  <span>Pilih file bukti transfer / kwitansi</span>
-                </label>
-              )}
-            </div>
-          )}
+                  Hapus
+                </button>
+              </div>
+            ) : (
+              <label
+                htmlFor="settle-proof-file"
+                className="flex items-center justify-center gap-2 px-3.5 py-3 rounded-xl border-2 border-dashed border-emerald-800/25 bg-emerald-50/30 hover:bg-emerald-50/60 text-slate-700 text-xs font-semibold cursor-pointer transition-colors"
+              >
+                <Upload className="w-4 h-4 text-emerald-800" />
+                <span>Pilih file bukti transfer / kwitansi</span>
+              </label>
+            )}
+          </div>
 
           <button
             type="submit"
