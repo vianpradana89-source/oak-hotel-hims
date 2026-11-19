@@ -3265,46 +3265,186 @@ export default function PosWorkspace({
   }, [handleSaveOrder]);
 
   /**
-   * "Bayar" — kombinasi: simpan order, lalu (hanya bila sukses
-   * dan order masih OPEN) segera buka modal pembayaran CASH dari dalam
-   * PosWorkspace.
+   * "Bayar" — Buka modal pembayaran CASH/QRIS/DEBIT/COMPLIM dari dalam PosWorkspace
+   * SECARA LANGSUNG SEBAGAI DRAFT tanpa menyimpan order ke database terlebih dahulu.
    *
    * Alur:
-   *  1. `handleSaveOrder()` → POST /api/pos/orders dengan idempotency key.
-   *     Mengembalikan `PosSaveOrderResult` — hasil sukses membawa
-   *     order tervalidasi + context pembayaran; hasil gagal tidak
-   *     membawa context.
-   *  2. Sukses + order.status === 'OPEN' → `onOpenCashPayment(payContext)`
-   *     → App membuka PosPayCashModal.
-   *  3. Sukses + order.status === 'PAID' (replay order sudah dibayar)
-   *     → tampilkan indikator "sudah dibayar", TIDAK buka modal.
-   *  4. Status terminal lainnya (VOIDED, CANCELLED, dsb.) → TIDAK buka modal.
-   *  5. Gagal (4xx, 5xx, network) → modal pembayaran TIDAK dibuka.
-   *     Draft tetap ada untuk retry.
+   *  1. Validasi cart & pricing. Jangan simpan ke database dan jangan hapus cart.
+   *  2. Buat draft context lengkap dengan draftPayload & callback onDraftPaidSuccess.
+   *  3. Buka modal pembayaran (PosPayCashModal) dengan isDraft: true.
+   *  4. Bila user membatalkan (klik "Batal" atau close di modal), tidak ada order
+   *     yang tersimpan di DB dan keranjang (cart) tetap utuh di PosWorkspace.
+   *  5. Order baru disimpan ke DB dan diselesaikan (status: PAID) saat kasir menekan
+   *     "Konfirmasi Pembayaran" di dalam PosPayCashModal.
+   *  6. Setelah pembayaran terverifikasi sukses, callback onDraftPaidSuccess dipanggil:
+   *     cart dibersihkan, status lokal menjadi PAID, dan receipt ditampilkan.
    */
-  const handleSaveAndPay = useCallback(async () => {
-    const result = await handleSaveOrder();
-    if (!result.ok) return;
+  const handleSaveAndPay = useCallback(() => {
+    if (!canEditPos || !canSaveDraft || cart.length === 0 || saving || busy || billingToRoom) {
+      return;
+    }
+    if (pricingSettingsBlocked && !idempotencySnapshotRef.current?.unresolved) {
+      setSaveResult({
+        ok: false,
+        message:
+          'Pengaturan pricing properti belum siap — submit diblokir. ' +
+          'Muat ulang pengaturan pricing lalu simpan ulang.',
+      });
+      return;
+    }
 
-    if (result.order.status === 'OPEN') {
-      if (onOpenCashPayment) {
-        onOpenCashPayment(result.payContext);
+    if (!propertyId || propertyId <= 0) {
+      setSaveResult({ ok: false, message: 'Properti tidak valid.' });
+      return;
+    }
+
+    const estimatedTotal = draftPreview.value?.total;
+    if (estimatedTotal === undefined || estimatedTotal <= 0) {
+      setSaveResult({ ok: false, message: 'Total pesanan harus lebih besar dari 0.' });
+      return;
+    }
+
+    const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;
+    const effRoomNo =
+      effectiveResId != null
+        ? (reservationId != null ? roomNumberInitial : pickedGuest?.room_number) ?? null
+        : null;
+    const effGuestName =
+      (effectiveResId != null
+        ? (reservationId != null ? guestNameInitial : pickedGuest?.guest_name) ?? null
+        : null) || (pickedGuest ? pickedGuest.guest_name || '' : guestName) || 'Guest';
+
+    const psSvcOn = pricingSettings.status === 'ready' ? pricingSettings.data.service_charge_enabled : false;
+    const psTaxOn = pricingSettings.status === 'ready' ? pricingSettings.data.tax_enabled : false;
+    const effectiveSvcToggle = svcToggleOn && psSvcOn;
+    const effectiveTaxToggle = taxToggleOn && psTaxOn;
+
+    let payload: any;
+    try {
+      payload = buildPosOrderDraft(cart, {
+        propertyId,
+        reservationId: effectiveResId,
+        tableNumber,
+        guestName: pickedGuest ? pickedGuest.guest_name || '' : guestName,
+        guestPhone,
+        notes: orderNotes,
+        discountType: orderDiscountType,
+        discountInput: orderDiscountInput,
+        discountReason,
+        serviceChargeEnabled: effectiveSvcToggle,
+        taxEnabled: effectiveTaxToggle,
+        expectedTotal: pricingSettings.status === 'ready' && estimatedTotal !== undefined
+          ? estimatedTotal
+          : undefined,
+        locationId: stockLocationId ? Number(stockLocationId) : null,
+      }, canDiscountPos);
+    } catch (err) {
+      setSaveResult({ ok: false, message: err instanceof Error ? err.message : 'Periksa data pesanan.' });
+      return;
+    }
+
+    const onDraftPaidSuccess = (createdOrder: any) => {
+      cartRef.current = [];
+      setCart([]);
+      setGuestPhone('');
+      setOrderNotes('');
+      setOrderDiscountType('PERCENT');
+      setOrderDiscountInput('');
+      setDiscountReason('');
+      const redeemedPts = posPointsToRedeem;
+      const redeemedGuestId = activeCrmGuest?.id ?? null;
+      setPosPointsToRedeem(0);
+      setPosRedeemPointsInput('');
+
+      if (redeemedPts > 0 && redeemedGuestId && propertyId !== null) {
+        const fetcher = authFetch ?? authenticatedFetch;
+        Promise.resolve(
+          fetcher('/api/guests/loyalty-ledger', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              property_id: propertyId,
+              guest_id: redeemedGuestId,
+              entry_type: 'REDEEM',
+              points: redeemedPts,
+              description: `Redeem Poin di POS Resto (${createdOrder.order_number})`,
+              reference_no: createdOrder.order_number,
+            }),
+          })
+        )
+          .then(() => fetchPosCrmData())
+          .catch(() => {});
       }
-    } else if (result.order.status === 'PAID') {
-      // Replay: order sudah dibayar sebelumnya. Tampilkan status,
-      // jangan buka modal pembayaran.
+
+      ambiguousRef.current = false;
+      idempotencySnapshotRef.current = null;
+      reportUnresolvedToParent();
+      reportDirtyToParent();
+
       setSaveResult({
         ok: true,
-        message: `Order ${result.order.order_number} sudah dibayar (PAID).`,
-        order: result.order,
+        message: `Order ${createdOrder.order_number || formatPosOrderDisplayRef(createdOrder.id)} LUNAS (pembayaran terverifikasi).`,
+        order: { ...createdOrder, status: 'PAID' },
       });
-      setLocalPaidOrderId(result.order.id);
-      appliedPaidOrderIdRef.current = result.order.id;
+      setLocalPaidOrderId(createdOrder.id);
+      appliedPaidOrderIdRef.current = createdOrder.id;
+
+      try {
+        onOrderCreated?.(createdOrder);
+        onRefresh?.();
+      } catch (cbErr) {
+        console.error('[PosWorkspace] onDraftPaidSuccess callback failed:', cbErr);
+      }
+    };
+
+    const onDraftCreated = (createdOrder: any) => {
+      cartRef.current = [];
+      setCart([]);
+      ambiguousRef.current = false;
+      idempotencySnapshotRef.current = null;
+      reportUnresolvedToParent();
+      reportDirtyToParent();
+
+      setSaveResult({
+        ok: true,
+        message: `Order ${createdOrder.order_number || formatPosOrderDisplayRef(createdOrder.id)} tersimpan (OPEN). Menunggu pembayaran.`,
+        order: createdOrder,
+      });
+
+      try {
+        onOrderCreated?.(createdOrder);
+        onRefresh?.();
+      } catch (cbErr) {
+        console.error('[PosWorkspace] onDraftCreated callback failed:', cbErr);
+      }
+    };
+
+    const draftPayContext: PosPayCashOrderContext = {
+      orderId: 0,
+      propertyId: propertyId!,
+      orderNumber: 'Draft Pesanan',
+      totalAmount: estimatedTotal,
+      guestName: effGuestName,
+      roomNumber: effRoomNo,
+      reservationId: effectiveResId,
+      isDraft: true,
+      draftPayload: payload,
+      draftKey: generateUUIDv4(),
+      onDraftPaidSuccess,
+      onDraftCreated,
+    };
+
+    if (onOpenCashPayment) {
+      onOpenCashPayment(draftPayContext);
     }
-    // Status terminal lainnya (VOIDED, CANCELLED, dsb.) → tidak ada aksi
-    // pembayaran; saveResult sudah menampilkan status order dari
-    // handleSaveOrder.
-  }, [handleSaveOrder, onOpenCashPayment]);
+  }, [
+    canEditPos, canSaveDraft, cart, saving, busy, billingToRoom, pricingSettingsBlocked,
+    draftPreview, reservationId, pickedGuest, roomNumberInitial, guestNameInitial, guestName,
+    pricingSettings, svcToggleOn, taxToggleOn, propertyId, tableNumber, guestPhone,
+    orderNotes, orderDiscountType, orderDiscountInput, discountReason, stockLocationId,
+    canDiscountPos, onOpenCashPayment, posPointsToRedeem, activeCrmGuest, authFetch,
+    fetchPosCrmData, onOrderCreated, onRefresh, reportDirtyToParent, reportUnresolvedToParent
+  ]);
 
   const handleSaveAndBillToRoom = useCallback(async () => {
     const effectiveResId = reservationId ?? pickedGuest?.reservation_id ?? null;

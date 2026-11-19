@@ -10,6 +10,11 @@ export interface PosPayCashOrderContext {
   guestName?: string | null;
   roomNumber?: string | null;
   reservationId?: number | null;
+  isDraft?: boolean;
+  draftPayload?: any;
+  draftKey?: string;
+  onDraftPaidSuccess?: (createdOrder: any) => void;
+  onDraftCreated?: (createdOrder: any) => void;
 }
 
 import {
@@ -41,6 +46,7 @@ interface Props {
     sale: SaleRecord;
     created: boolean;
     replayed: boolean;
+    orderId?: number;
   }) => void;
   /** Refresh daftar order terkait (dipanggil setelah sukses terverifikasi). */
   onRefresh?: () => void;
@@ -73,6 +79,13 @@ function generateKey(): string {
 
 /** Validasi konteks order untuk pengajuan pembayaran. */
 function isOrderContextValid(ctx: PosPayCashOrderContext): boolean {
+  if (ctx.isDraft) {
+    return (
+      Number.isInteger(ctx.propertyId) && ctx.propertyId > 0 &&
+      Number.isFinite(Number(ctx.totalAmount)) && Number(ctx.totalAmount) > 0 &&
+      Boolean(ctx.draftPayload)
+    );
+  }
   return (
     Number.isInteger(ctx.orderId) && ctx.orderId > 0 &&
     Number.isInteger(ctx.propertyId) && ctx.propertyId > 0 &&
@@ -118,6 +131,21 @@ export default function PosPayCashModal({
   const [alreadyPaid, setAlreadyPaid] = useState(false);
   const [method, setMethod] = useState<PosPaymentMethod>('CASH');
   const [cashInput, setCashInput] = useState(String(order.totalAmount));
+
+  // Active order state (handles draft conversion to created order upon payment confirmation)
+  const [activeOrderId, setActiveOrderId] = useState<number>(order.orderId);
+  const [activeOrderNumber, setActiveOrderNumber] = useState<string>(order.orderNumber || 'Draft Pesanan');
+  const activeOrderIdRef = useRef<number>(order.orderId);
+  const activeOrderNumberRef = useRef<string>(order.orderNumber || 'Draft Pesanan');
+  const isDraftRef = useRef<boolean>(Boolean(order.isDraft));
+
+  useEffect(() => {
+    setActiveOrderId(order.orderId);
+    setActiveOrderNumber(order.orderNumber || 'Draft Pesanan');
+    activeOrderIdRef.current = order.orderId;
+    activeOrderNumberRef.current = order.orderNumber || 'Draft Pesanan';
+    isDraftRef.current = Boolean(order.isDraft);
+  }, [order]);
   const [reference, setReference] = useState('');
   const [verified, setVerified] = useState(false);
   const [config, setConfig] = useState<PosPaymentConfig | null>(null);
@@ -303,14 +331,82 @@ export default function PosPayCashModal({
     if (!canEditPos || !contextValid) return;
     if (submittingRef.current) return;
 
-    const orderId = order.orderId;
+    let targetOrderId = activeOrderIdRef.current;
+    let targetOrderNumber = activeOrderNumberRef.current;
     const propertyId = order.propertyId;
 
     // Guard: cegah pembayaran baru untuk order yang sama selama modal
     // masih menampilkan receipt sukses (fase "success" dengan data).
-    if (receiptOrderIdRef.current === orderId) return;
+    if (targetOrderId > 0 && receiptOrderIdRef.current === targetOrderId) return;
 
-    // ── Blok pemilihan snapshot ───────────────────────────────────────────
+    // ── Mark pending sinkron (sebelum await) ───────────────────────────────
+    submittingRef.current = true;
+    pendingRef.current = true;
+    setPhase('pending');
+    setFailMessage(null);
+    setAlreadyPaid(false);
+    onRequestPending?.(true);
+
+    let createdOrder: any = null;
+
+    // ── JIKA MASIH DRAFT: Simpan order ke DB dulu sebelum bayar ───────────
+    if (isDraftRef.current && targetOrderId === 0) {
+      try {
+        const createRes = await authFetch('/api/pos/orders', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Idempotency-Key': order.draftKey || generateKey(),
+          },
+          body: JSON.stringify(order.draftPayload),
+        });
+
+        const createJson = await createRes.json().catch(() => ({}));
+        if (!createRes.ok || (createRes.status !== 200 && createRes.status !== 201)) {
+          submittingRef.current = false;
+          pendingRef.current = false;
+          onRequestPending?.(false);
+          setPhase('failed');
+          setFailMessage(createJson.message || `Gagal menyimpan pesanan (HTTP ${createRes.status}).`);
+          return;
+        }
+
+        createdOrder = createJson.data;
+        if (!createdOrder || !createdOrder.id) {
+          submittingRef.current = false;
+          pendingRef.current = false;
+          onRequestPending?.(false);
+          setPhase('failed');
+          setFailMessage('Respon server tidak lengkap saat menyimpan pesanan.');
+          return;
+        }
+
+        targetOrderId = Number(createdOrder.id);
+        targetOrderNumber = createdOrder.order_number || `POS-${targetOrderId}`;
+        activeOrderIdRef.current = targetOrderId;
+        activeOrderNumberRef.current = targetOrderNumber;
+        setActiveOrderId(targetOrderId);
+        setActiveOrderNumber(targetOrderNumber);
+        isDraftRef.current = false;
+
+        if (order.onDraftCreated) {
+          try {
+            order.onDraftCreated(createdOrder);
+          } catch (e) {
+            console.error('[PosPayCashModal] onDraftCreated error:', e);
+          }
+        }
+      } catch (createErr) {
+        submittingRef.current = false;
+        pendingRef.current = false;
+        onRequestPending?.(false);
+        setPhase('failed');
+        setFailMessage('Gagal menyimpan pesanan: terjadi kendala jaringan.');
+        return;
+      }
+    }
+
+    // ── Blok pemilihan snapshot pembayaran ────────────────────────────────
     // Guard context: bila unresolved, snapshot wajib ada. Context order prop
     // tidak boleh berbeda dari snapshot — kalau berbeda, TOLAK tindakan
     // dengan pesan (bukan jalur pengajuan baru).
@@ -324,9 +420,12 @@ export default function PosPayCashModal({
         // Anomali: unresolved tanpa snapshot — tolak, jangan buat key baru.
         setFailMessage('Konteks pembayaran berubah — hasil sebelumnya belum diketahui.');
         setPhase('ambiguous');
+        submittingRef.current = false;
+        pendingRef.current = false;
+        onRequestPending?.(false);
         return;
       }
-      if (snap.orderId !== orderId || snap.propertyId !== propertyId) {
+      if (snap.orderId !== targetOrderId || snap.propertyId !== propertyId) {
         // Context order prop BERBEDA dari snapshot — TOLAK.
         // Jangan buat key, jangan ganti snapshot, jangan lepas unresolved.
         setFailMessage(
@@ -334,12 +433,15 @@ export default function PosPayCashModal({
           'selesaikan dulu sebelum melanjutkan.',
         );
         setPhase('ambiguous');
+        submittingRef.current = false;
+        pendingRef.current = false;
+        onRequestPending?.(false);
         return;
       }
       // Context cocok → retry memakai snapshot persis.
       key = snap.key;
       bodyJson = snap.bodyJson;
-    } else if (snap !== null && (snap.orderId === orderId && snap.propertyId === propertyId)) {
+    } else if (snap !== null && (snap.orderId === targetOrderId && snap.propertyId === propertyId)) {
       // Snapshot ada, tidak unresolved, context cocok → reuse.
       key = snap.key;
       bodyJson = snap.bodyJson;
@@ -348,7 +450,7 @@ export default function PosPayCashModal({
       key = generateKey();
       try {
         const created = createPaySnapshot({
-          orderId, propertyId, key, amount: order.totalAmount,
+          orderId: targetOrderId, propertyId, key, amount: order.totalAmount,
           method, cashInput, reference, config: activeConfig, qrisImageLoaded, verified,
           locationId: selectedLocationId ? Number(selectedLocationId) : undefined,
           complimentaryEmployeeId: method === 'COMPLIMENTARY' && selectedCompEmployeeId ? Number(selectedCompEmployeeId) : undefined,
@@ -361,6 +463,9 @@ export default function PosPayCashModal({
       } catch (err) {
         setFailMessage(err instanceof Error ? err.message : 'Periksa data pembayaran.');
         setPhase('failed');
+        submittingRef.current = false;
+        pendingRef.current = false;
+        onRequestPending?.(false);
         return;
       }
       // Pengajuan baru: unresolved di-reset.
@@ -368,16 +473,8 @@ export default function PosPayCashModal({
       onUnresolvedChange?.(false);
     }
 
-    // ── Mark pending sinkron (sebelum await) ───────────────────────────────
-    submittingRef.current = true;
-    pendingRef.current = true;
-    setPhase('pending');
-    setFailMessage(null);
-    setAlreadyPaid(false);
-    onRequestPending?.(true);
-
     // ── Build path dari snapshot (bukan dari order prop yang bisa berubah) ─
-    const payPath = `/api/pos/orders/${snapshotRef.current!.orderId}/pay`;
+    const payPath = `/api/pos/orders/${targetOrderId}/pay`;
 
     try {
       const res = await authFetch(payPath, {
@@ -400,6 +497,7 @@ export default function PosPayCashModal({
             sale: json.data!.sale!,
             created: json.data!.created!,
             replayed: json.data!.replayed!,
+            orderId: targetOrderId,
           };
           setResult(r);
           setPhase('success');
@@ -408,26 +506,35 @@ export default function PosPayCashModal({
           onUnresolvedChange?.(false);
           // Bersihkan snapshot (siklus selesai).
           snapshotRef.current = null;
-           // Simpan orderId yang sedang menampilkan receipt (untuk guard
+          // Simpan orderId yang sedang menampilkan receipt (untuk guard
           // pembayaran ulang pada order yang sama).
-          receiptOrderIdRef.current = orderId;
+          receiptOrderIdRef.current = targetOrderId;
+
+          if (order.onDraftPaidSuccess && createdOrder) {
+            try {
+              order.onDraftPaidSuccess(createdOrder);
+            } catch (cbErr) {
+              console.error('[PosPayCashModal] onDraftPaidSuccess failed:', cbErr);
+            }
+          }
+
           // Callback onPaid & onRefresh TERPISAH — kegagalan satu tidak
-           // melompat ke yang lain. Kegagalan callback TIDAK mengubah
-           // pembayaran sukses menjadi ambigu.
-           if (onPaid) {
-             try {
-               onPaid(r);
-             } catch (cbErr) {
-               console.error('[PosPayCashModal] onPaid failed (pembayaran tetap valid):', cbErr);
-             }
-           }
-           if (onRefresh) {
-             try {
-               onRefresh();
-             } catch (cbErr) {
-               console.error('[PosPayCashModal] onRefresh failed (pembayaran tetap valid):', cbErr);
-             }
-           }
+          // melompat ke yang lain. Kegagalan callback TIDAK mengubah
+          // pembayaran sukses menjadi ambigu.
+          if (onPaid) {
+            try {
+              onPaid(r);
+            } catch (cbErr) {
+              console.error('[PosPayCashModal] onPaid failed (pembayaran tetap valid):', cbErr);
+            }
+          }
+          if (onRefresh) {
+            try {
+              onRefresh();
+            } catch (cbErr) {
+              console.error('[PosPayCashModal] onRefresh failed (pembayaran tetap valid):', cbErr);
+            }
+          }
         } else {
           // Respons sukses tapi MALFORMED → hasil belum diketahui.
           // Tandai unresolved sinkron SEBELUM pending dilepas.
@@ -672,7 +779,7 @@ export default function PosPayCashModal({
               Bayar
             </span>
             <h3 className="text-sm font-black text-stone-900 truncate">
-              {order.orderNumber}
+              {activeOrderId > 0 ? activeOrderNumber : 'Draft Pesanan'}
             </h3>
           </div>
           <button
@@ -701,7 +808,7 @@ export default function PosPayCashModal({
             <div className="flex items-center justify-between">
               <span className="text-stone-500">Nomor Order</span>
               <span className="font-mono font-semibold text-stone-900">
-                {order.orderNumber}
+                {activeOrderId > 0 ? activeOrderNumber : 'Draft (Belum Disimpan)'}
               </span>
             </div>
 
@@ -1059,7 +1166,7 @@ export default function PosPayCashModal({
 
         {/* Footer — tombol aksi */}
         <div className="shrink-0 px-4 py-3 bg-stone-50 border-t border-stone-200 flex items-center justify-end gap-2">
-          {phase === 'success' && result !== null && contextValid && receiptOrderIdRef.current === order.orderId && (
+          {phase === 'success' && result !== null && contextValid && receiptOrderIdRef.current === activeOrderId && (
             <button
               type="button"
               onClick={() => setReceiptOpen(true)}
@@ -1104,7 +1211,7 @@ export default function PosPayCashModal({
       <PosThermalReceiptModal
         isOpen={receiptOpen}
         onClose={() => setReceiptOpen(false)}
-        orderId={order.orderId}
+        orderId={activeOrderId}
         propertyId={order.propertyId}
         authFetch={authFetch}
       />

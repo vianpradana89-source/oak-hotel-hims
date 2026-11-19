@@ -4853,7 +4853,8 @@ function AppContent() {
             // untuk diteruskan ke PosWorkspace → status lokal PAID.
             const ctx = posCashPaymentContext;
             if (ctx) {
-              setPaidPosOrder({ propertyId: ctx.propertyId, orderId: ctx.orderId });
+              const effectiveOrderId = (result as any)?.orderId || (result as any)?.settlement?.pos_order_id || ctx.orderId;
+              setPaidPosOrder({ propertyId: ctx.propertyId, orderId: effectiveOrderId });
             }
             // Refresh panel reservasi sesuai reservationId pada context pembayaran.
             const resId = ctx?.reservationId ?? null;
