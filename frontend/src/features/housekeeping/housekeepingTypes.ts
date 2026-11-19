@@ -115,6 +115,10 @@ export interface HousekeepingTaskRecord {
   archived_at?: string | null;
   archived_by?: string | null;
   archive_reason?: string | null;
+  cleaned_by_name?: string | null;
+  inspected_by_name?: string | null;
+  last_cleaned_at?: string | null;
+  last_inspected_at?: string | null;
   created_at: string;
   updated_at: string;
 

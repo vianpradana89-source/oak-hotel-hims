@@ -519,10 +519,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   );
 
   return (
-    <div className="min-h-screen bg-stone-50 text-neutral-900 flex flex-col justify-between max-w-md mx-auto select-none shadow-xl">
+    <div className="h-screen h-[100dvh] max-h-[100dvh] bg-stone-50 text-neutral-900 flex flex-col max-w-md mx-auto select-none shadow-xl overflow-hidden">
       {/* Mode Pratinjau Banner */}
       {isPreview && (
-        <div className="bg-amber-500 text-neutral-950 px-3 py-1.5 text-[11px] font-bold text-center flex items-center justify-between border-b border-amber-600 shadow-xs">
+        <div className="shrink-0 bg-amber-500 text-neutral-950 px-3 py-1.5 text-[11px] font-bold text-center flex items-center justify-between border-b border-amber-600 shadow-xs">
           <div className="flex items-center gap-1.5">
             <span className="bg-black/20 px-1.5 py-0.5 rounded text-[9px] uppercase tracking-wider font-extrabold">MODE PRATINJAU</span>
             <span>Pratinjau Manajemen (Tidak Mengubah Status Absensi)</span>
@@ -540,7 +540,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       )}
 
       {/* Compact Top Header (Dark Charcoal with Gold/Green Accent) */}
-      <header className="sticky top-0 z-40 bg-[#1c2321] border-b border-neutral-800 px-3.5 py-2.5 shadow-xs">
+      <header className="shrink-0 z-40 bg-[#1c2321] border-b border-neutral-800 px-3.5 py-2.5 shadow-xs">
         <div className="flex items-center justify-between gap-2">
           {/* Left: Brand & Department Title */}
           <div className="flex items-center gap-2 min-w-0">
@@ -591,7 +591,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       </header>
 
       {/* Main Tab Content */}
-      <main className="flex-1 p-3.5 overflow-y-auto">
+      <main className="flex-1 p-3.5 overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch]">
         {activeTab === 'HOME' && (
           <div className="space-y-3.5 pb-20">
             {/* Welcome Summary Card (White Surface) */}
@@ -892,7 +892,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       )}
 
       {/* Bottom 5-Tab Touch-friendly Navigation (Compact Charcoal Bar) */}
-      <nav className="sticky bottom-0 z-40 bg-[#1c2321] border-t border-neutral-800 px-2 py-1.5 shadow-2xl">
+      <nav className="shrink-0 z-40 bg-[#1c2321] border-t border-neutral-800 px-2 py-1.5 shadow-2xl">
         <div className="grid grid-cols-5 gap-1">
           <button
             type="button"

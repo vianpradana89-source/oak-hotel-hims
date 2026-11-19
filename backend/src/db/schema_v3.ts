@@ -7107,5 +7107,21 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     INSERT INTO schema_migrations (version)
     VALUES ('pos_complimentary_quota_v1')
     ON CONFLICT (version) DO NOTHING;
+
+    -- Migration: hk_personnel_tracking_v1
+    -- Separate Room Attendant (cleaning) and Room Inspector (readiness verification)
+    ALTER TABLE rooms
+      ADD COLUMN IF NOT EXISTS last_cleaned_by_name VARCHAR(150),
+      ADD COLUMN IF NOT EXISTS last_cleaned_at TIMESTAMP WITHOUT TIME ZONE,
+      ADD COLUMN IF NOT EXISTS last_inspected_by_name VARCHAR(150),
+      ADD COLUMN IF NOT EXISTS last_inspected_at TIMESTAMP WITHOUT TIME ZONE;
+
+    ALTER TABLE housekeeping_tasks
+      ADD COLUMN IF NOT EXISTS cleaned_by_name VARCHAR(150),
+      ADD COLUMN IF NOT EXISTS inspected_by_name VARCHAR(150);
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('hk_personnel_tracking_v1')
+    ON CONFLICT (version) DO NOTHING;
   `);
 }

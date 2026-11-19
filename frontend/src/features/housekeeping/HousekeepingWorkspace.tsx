@@ -815,7 +815,14 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                 priority: 'NORMAL',
                 status: isReadyRoom ? ('DONE' as HkTaskStatus) : ('ASSIGNED' as HkTaskStatus),
                 assigned_department: 'Housekeeping',
-                assigned_user_name_snapshot: currentUserName,
+                assigned_user_name_snapshot: isReadyRoom
+                  ? (r.last_cleaned_by_name || r.last_inspected_by_name || null)
+                  : currentUserName,
+                cleaned_by_name: r.last_cleaned_by_name || null,
+                inspected_by_name: r.last_inspected_by_name || null,
+                last_cleaned_at: r.last_cleaned_at || null,
+                last_inspected_at: r.last_inspected_at || null,
+                source_type: 'ROOM',
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString()
               } as HousekeepingTaskRecord);
@@ -1618,7 +1625,16 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                   <th className="py-2.5 px-3">Checklist</th>
                   <th className="py-2.5 px-3">Status Tugas</th>
                   <th className="py-2.5 px-3">Prioritas</th>
-                  <th className="py-2.5 px-3">Petugas (PIC)</th>
+                  {metricFilter === 'READY' ? (
+                    <>
+                      <th className="py-2.5 px-3 text-emerald-800">Room Attendant</th>
+                      <th className="py-2.5 px-3 text-amber-800">Room Inspector</th>
+                    </>
+                  ) : metricFilter === 'CLEANING' || metricFilter === 'WAITING_INSPECTION' || metricFilter === 'CHECKOUT_CHECK' || activeTab === 'checkout_inspection' ? (
+                    <th className="py-2.5 px-3">Room Attendant</th>
+                  ) : (
+                    <th className="py-2.5 px-3">Room Attendant / PIC</th>
+                  )}
                   <th className="py-2.5 px-3">Durasi</th>
                   <th className="py-2.5 px-3">Next Arrival</th>
                   <th className="py-2.5 px-3 text-right">Aksi</th>
@@ -1627,9 +1643,23 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
               <tbody className="divide-y divide-neutral-100 text-neutral-800">
                 {filteredTasks.map((t) => {
                   const durationStr = getRunningDuration(t.started_at);
+                  const isReadyView = metricFilter === 'READY';
+                  const isWaitingInspView = metricFilter === 'WAITING_INSPECTION';
+
+                  const targetRoom = t.room_id ? dailyRooms.find((r) => Number(r.id) === Number(t.room_id)) : undefined;
                   const rawPic = t.assigned_user_name_snapshot?.trim() || '';
                   const isGenericPic = !rawPic || ['HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM', 'SYSTEM (DIRTY EVENT)', 'SYSTEM (CHECKOUT TRIGGER)'].includes(rawPic.toUpperCase());
                   const displayPic = isGenericPic ? currentUserName : rawPic;
+
+                  // Attendant & Inspector Resolution
+                  const roomAttendant = (t.cleaned_by_name && t.cleaned_by_name.trim())
+                    || (targetRoom?.last_cleaned_by_name && targetRoom.last_cleaned_by_name.trim())
+                    || (!isReadyView && !isGenericPic ? rawPic : (isReadyView ? '-' : currentUserName));
+
+                  const roomInspector = (t.inspected_by_name && t.inspected_by_name.trim())
+                    || (targetRoom?.last_inspected_by_name && targetRoom.last_inspected_by_name.trim())
+                    || (t.task_type === 'FINAL_INSPECTION' && t.status === 'DONE' && !isGenericPic ? rawPic : '-');
+
                   const activeBlockForRoom = t.room_id ? activeRoomBlocks.find((b) => Number(b.room_id) === Number(t.room_id)) : undefined;
 
                   return (
@@ -1704,31 +1734,64 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                         {getPriorityBadge(t.priority)}
                       </td>
 
-                      {/* PIC Assignee (Real User Name + Inline Selector) */}
-                      <td className="py-2.5 px-3 text-neutral-800 whitespace-nowrap">
-                        {t.id > 0 ? (
-                          <select
-                            value={displayPic}
-                            onChange={(e) => handleAssignPic(t, e.target.value)}
-                            className="text-xs font-semibold text-neutral-800 bg-neutral-50 hover:bg-white border border-neutral-200 rounded-md px-2 py-1 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-                            title="Pilih / Ubah Petugas (PIC)"
-                          >
-                            <option value={displayPic}>{displayPic}</option>
-                            {currentUserName !== displayPic && (
-                              <option value={currentUserName}>{currentUserName} (Saya)</option>
+                      {/* Attendant & Inspector / PIC Assignee */}
+                      {isReadyView ? (
+                        <>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            {roomAttendant !== '-' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold text-xs">
+                                <span>🧹</span> {roomAttendant}
+                              </span>
+                            ) : (
+                              <span className="text-neutral-400 italic text-xs">-</span>
                             )}
-                            {staffList
-                              .filter((st) => st.name !== displayPic && st.name !== currentUserName)
-                              .map((st, idx) => (
-                                <option key={`${st.name}-${idx}`} value={st.name}>
-                                  {st.name}
-                                </option>
-                              ))}
-                          </select>
-                        ) : (
-                          <span className="font-semibold text-neutral-800">{displayPic}</span>
-                        )}
-                      </td>
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap">
+                            {roomInspector !== '-' ? (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-xs">
+                                <span>🔍</span> {roomInspector}
+                              </span>
+                            ) : (
+                              <span className="text-neutral-400 italic text-xs">-</span>
+                            )}
+                          </td>
+                        </>
+                      ) : isWaitingInspView ? (
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          {roomAttendant !== '-' ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold text-xs">
+                              <span>🧹</span> {roomAttendant}
+                            </span>
+                          ) : (
+                            <span className="font-semibold text-neutral-800">{displayPic}</span>
+                          )}
+                        </td>
+                      ) : (
+                        <td className="py-2.5 px-3 text-neutral-800 whitespace-nowrap">
+                          {t.id > 0 ? (
+                            <select
+                              value={displayPic}
+                              onChange={(e) => handleAssignPic(t, e.target.value)}
+                              className="text-xs font-semibold text-neutral-800 bg-neutral-50 hover:bg-white border border-neutral-200 rounded-md px-2 py-1 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
+                              title="Pilih / Ubah Petugas (Room Attendant)"
+                            >
+                              <option value={displayPic}>{displayPic}</option>
+                              {currentUserName !== displayPic && (
+                                <option value={currentUserName}>{currentUserName} (Saya)</option>
+                              )}
+                              {staffList
+                                .filter((st) => st.name !== displayPic && st.name !== currentUserName)
+                                .map((st, idx) => (
+                                  <option key={`${st.name}-${idx}`} value={st.name}>
+                                    {st.name}
+                                  </option>
+                                ))}
+                            </select>
+                          ) : (
+                            <span className="font-semibold text-neutral-800">{displayPic}</span>
+                          )}
+                        </td>
+                      )}
 
                       {/* Duration */}
                       <td className="py-2.5 px-3 text-neutral-600 whitespace-nowrap font-mono">

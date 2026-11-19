@@ -1892,6 +1892,16 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
         `UPDATE housekeeping_tasks
          SET assigned_user_name_snapshot = $1,
              assigned_user_id = COALESCE($2, assigned_user_id),
+             cleaned_by_name = CASE
+               WHEN task_type IN ('ROOM_CLEANING', 'DEEP_CLEAN', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'CHECKOUT_ROOM_CHECK')
+               THEN COALESCE($1, cleaned_by_name)
+               ELSE cleaned_by_name
+             END,
+             inspected_by_name = CASE
+               WHEN task_type = 'FINAL_INSPECTION'
+               THEN COALESCE($1, inspected_by_name)
+               ELSE inspected_by_name
+             END,
              updated_at = NOW()
          WHERE id = $3 AND property_id = $4
          RETURNING *`,

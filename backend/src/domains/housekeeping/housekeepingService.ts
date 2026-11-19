@@ -584,7 +584,8 @@ export async function getHousekeepingDailyOperations(
 ): Promise<{ metrics: HousekeepingDailyMetrics; tasks: HousekeepingTaskRecord[]; rooms?: any[] }> {
   // 1. Query active rooms for property
   const roomsRes = await client.query(
-    `SELECT r.id, r.room_number, r.status, r.room_type_id, COALESCE(rt.name, r.name) as room_type_name
+    `SELECT r.id, r.room_number, r.status, r.room_type_id, COALESCE(rt.name, r.name) as room_type_name,
+            r.last_cleaned_by_name, r.last_cleaned_at, r.last_inspected_by_name, r.last_inspected_at
      FROM rooms r
      LEFT JOIN room_types rt ON rt.id = r.room_type_id
      WHERE r.property_id = $1
@@ -593,6 +594,62 @@ export async function getHousekeepingDailyOperations(
     [propertyId]
   );
   const rooms = roomsRes.rows;
+
+  // Backfill recent cleaner & inspector for rooms where columns are null
+  try {
+    const recentCleaningRes = await client.query(
+      `SELECT DISTINCT ON (room_id) room_id,
+              COALESCE(cleaned_by_name, cleaning_note_by, assigned_user_name_snapshot) AS cleaner,
+              completed_at
+       FROM housekeeping_tasks
+       WHERE property_id = $1
+         AND task_type IN ('ROOM_CLEANING', 'DEEP_CLEAN', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION')
+         AND status IN ('DONE', 'VERIFIED')
+         AND room_id IS NOT NULL
+       ORDER BY room_id, completed_at DESC NULLS LAST, id DESC`,
+      [propertyId]
+    );
+    const recentCleanerByRoom = new Map<number, any>();
+    for (const c of recentCleaningRes.rows) {
+      if (c.cleaner && !['HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM', 'SYSTEM (DIRTY EVENT)', 'SYSTEM (CHECKOUT TRIGGER)'].includes(String(c.cleaner).trim().toUpperCase())) {
+        recentCleanerByRoom.set(Number(c.room_id), c);
+      }
+    }
+
+    const recentInspRes = await client.query(
+      `SELECT DISTINCT ON (room_id) room_id,
+              COALESCE(inspected_by_name, assigned_user_name_snapshot) AS inspector,
+              completed_at
+       FROM housekeeping_tasks
+       WHERE property_id = $1
+         AND task_type = 'FINAL_INSPECTION'
+         AND status IN ('DONE', 'VERIFIED')
+         AND room_id IS NOT NULL
+       ORDER BY room_id, completed_at DESC NULLS LAST, id DESC`,
+      [propertyId]
+    );
+    const recentInspectorByRoom = new Map<number, any>();
+    for (const ins of recentInspRes.rows) {
+      if (ins.inspector && !['HOUSEKEEPING STAFF', 'STAFF', 'SYSTEM'].includes(String(ins.inspector).trim().toUpperCase())) {
+        recentInspectorByRoom.set(Number(ins.room_id), ins);
+      }
+    }
+
+    for (const r of rooms) {
+      const rid = Number(r.id);
+      if (!r.last_cleaned_by_name && recentCleanerByRoom.has(rid)) {
+        r.last_cleaned_by_name = recentCleanerByRoom.get(rid).cleaner;
+        r.last_cleaned_at = recentCleanerByRoom.get(rid).completed_at;
+      }
+      if (!r.last_inspected_by_name && recentInspectorByRoom.has(rid)) {
+        r.last_inspected_by_name = recentInspectorByRoom.get(rid).inspector;
+        r.last_inspected_at = recentInspectorByRoom.get(rid).completed_at;
+      }
+    }
+  } catch (backfillErr) {
+    // Non-fatal if legacy migration is in progress
+  }
+
   const roomMap = new Map<number, any>();
   const roomByNumberMap = new Map<string, any>();
   for (const r of rooms) {
@@ -689,9 +746,18 @@ export async function getHousekeepingDailyOperations(
 
     const roomId = targetRoom ? Number(targetRoom.id) : (t.room_id ? Number(t.room_id) : null);
     const nextArr = roomId ? arrivalsByRoom.get(roomId) : null;
+    const isCleanTask = ['ROOM_CLEANING', 'DEEP_CLEAN', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'CHECKOUT_ROOM_CHECK'].includes(t.task_type);
+    const isInspTask = t.task_type === 'FINAL_INSPECTION';
+
+    const cleanedBy = t.cleaned_by_name || (isCleanTask ? t.assigned_user_name_snapshot : (targetRoom?.last_cleaned_by_name || null));
+    const inspectedBy = t.inspected_by_name || (isInspTask ? t.assigned_user_name_snapshot : (targetRoom?.last_inspected_by_name || null));
 
     return {
       ...t,
+      cleaned_by_name: cleanedBy,
+      inspected_by_name: inspectedBy,
+      last_cleaned_at: targetRoom?.last_cleaned_at || null,
+      last_inspected_at: targetRoom?.last_inspected_at || null,
       room_status: targetRoom ? targetRoom.status : null,
       room_type_name: targetRoom ? targetRoom.room_type_name : null,
       next_arrival: nextArr ? {
@@ -1288,6 +1354,11 @@ export async function startHousekeepingTask(
            THEN COALESCE($1, assigned_user_name_snapshot)
            ELSE assigned_user_name_snapshot
          END,
+         cleaned_by_name = CASE
+           WHEN task_type IN ('ROOM_CLEANING', 'DEEP_CLEAN', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'CHECKOUT_ROOM_CHECK')
+           THEN COALESCE($1, cleaned_by_name, assigned_user_name_snapshot)
+           ELSE cleaned_by_name
+         END,
          updated_at = NOW()
      WHERE id = $2
      RETURNING *`,
@@ -1606,6 +1677,16 @@ export async function completeHousekeepingTask(
            THEN COALESCE($4, assigned_user_name_snapshot)
            ELSE assigned_user_name_snapshot
          END,
+         cleaned_by_name = CASE
+           WHEN task_type IN ('ROOM_CLEANING', 'DEEP_CLEAN', 'VIP_ROOM_PREPARATION', 'STAYOVER_CLEANING', 'CHECKOUT_ROOM_CHECK')
+           THEN COALESCE($4, cleaned_by_name, assigned_user_name_snapshot)
+           ELSE cleaned_by_name
+         END,
+         inspected_by_name = CASE
+           WHEN task_type = 'FINAL_INSPECTION'
+           THEN COALESCE($4, inspected_by_name, assigned_user_name_snapshot)
+           ELSE inspected_by_name
+         END,
          inspection_result = $5,
          issue_type = $6,
          issue_note = $7,
@@ -1630,7 +1711,10 @@ export async function completeHousekeepingTask(
         [roomId]
       );
       const targetRoomStatus = hasRows(inHouseRes) ? 'OCCUPIED_CLEAN' : 'VACANT_CLEAN';
-      await client.query('UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3', [targetRoomStatus, roomId, propertyId]);
+      await client.query(
+        'UPDATE rooms SET status = $1, last_cleaned_by_name = $2, last_cleaned_at = NOW() WHERE id = $3 AND property_id = $4',
+        [targetRoomStatus, cleaningNoteBy, roomId, propertyId]
+      );
 
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
@@ -1673,11 +1757,15 @@ export async function completeHousekeepingTask(
       }
     } else if (task.task_type === 'FINAL_INSPECTION') {
       if (inspectionResult === 'PASS') {
-        await client.query('UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3', ['INSPECTED', roomId, propertyId]);
+        const inspectorName = actor?.name || cleaningNoteBy || 'Supervisor';
+        await client.query(
+          'UPDATE rooms SET status = $1, last_inspected_by_name = $2, last_inspected_at = NOW() WHERE id = $3 AND property_id = $4',
+          ['INSPECTED', inspectorName, roomId, propertyId]
+        );
         await client.query(
           `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
            VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          ['HOUSEKEEPING', 'ROOM_INSPECTION_PASSED', 'ROOM', String(roomId), JSON.stringify({ status: 'INSPECTED', task_id: taskId }), actor?.name || 'Supervisor', propertyId]
+          ['HOUSEKEEPING', 'ROOM_INSPECTION_PASSED', 'ROOM', String(roomId), JSON.stringify({ status: 'INSPECTED', task_id: taskId }), inspectorName, propertyId]
         );
       } else if (inspectionResult === 'RETURN_TO_CLEANING') {
         await client.query('UPDATE rooms SET status = $1 WHERE id = $2 AND property_id = $3', ['VACANT_DIRTY', roomId, propertyId]);

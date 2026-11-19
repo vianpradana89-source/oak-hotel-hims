@@ -1010,7 +1010,7 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
   };
 
   return (
-    <div className="space-y-3.5 pb-20 max-w-full overflow-x-hidden">
+    <div className="space-y-3.5 pb-28 max-w-full overflow-x-hidden">
       {/* Title & Quick Refresh */}
       <div className="flex items-center justify-between">
         <div>
