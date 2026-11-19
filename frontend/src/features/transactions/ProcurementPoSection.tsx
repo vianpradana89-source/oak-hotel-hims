@@ -1450,7 +1450,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       {/* Create / Edit PO Modal */}
       {showFormModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-6xl h-[90vh] max-h-[92vh] flex flex-col overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
@@ -1471,7 +1471,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
               </button>
             </div>
 
-            <div className="p-6 overflow-y-auto space-y-4 flex-1 text-xs">
+            <div className="p-6 overflow-y-auto space-y-4 flex-1 text-xs pb-56">
               {editingPo && editingPo.approval_status === 'APPROVED' && (
                 <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-800 text-[11px]">
                   <strong>Perhatian Revisi PO:</strong> Perubahan material pada pemasok, item, kuantitas, atau harga satuan akan mengembalikan status PO menjadi <strong>Menunggu Persetujuan</strong> agar diotorisasi ulang. Baris yang sudah memiliki GRN Posted dilindungi dari pengurangan di bawah jumlah diterima.
@@ -1579,7 +1579,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                   <table className="w-full text-left text-[11px]">
                     <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 uppercase text-[10px]">
                       <tr>
-                        <th className="py-2 px-3 min-w-[230px]">Produk Stok (Cari Nama / SKU)</th>
+                        <th className="py-2 px-3 min-w-[280px]">Produk Stok (Cari Nama / SKU)</th>
                         <th className="py-2 px-3 w-36">SKU</th>
                         <th className="py-2 px-3 min-w-[165px]">Kemasan / Satuan Beli</th>
                         <th className="py-2 px-3 text-right w-24">Qty Pesan</th>
@@ -1707,7 +1707,15 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                 )}
 
                                 {isSearchOpen && (
-                                  <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-slate-300 rounded-xl shadow-2xl min-w-[480px] max-w-[560px] max-h-80 overflow-y-auto divide-y divide-slate-100">
+                                  <div
+                                    className={`absolute left-0 ${
+                                      idx >= 2 && idx >= formItems.length - 2 ? 'bottom-full mb-1' : 'top-full mt-1'
+                                    } z-50 bg-white border border-slate-300 rounded-xl shadow-2xl w-[580px] max-w-[90vw] max-h-80 overflow-y-auto divide-y divide-slate-100 ring-1 ring-black/5`}
+                                  >
+                                    <div className="px-3 py-1.5 bg-slate-100/90 border-b border-slate-200 text-[10px] font-bold text-slate-500 uppercase tracking-wider flex items-center justify-between sticky top-0 z-10 backdrop-blur-xs">
+                                      <span>Pilih Produk Stok (Hasil: {filteredCandidates.length})</span>
+                                      <span className="text-[9px] text-slate-400 font-normal">Tekan ↑↓ untuk navigasi, Enter untuk memilih</span>
+                                    </div>
                                     {filteredCandidates.length > 0 ? (
                                       filteredCandidates.map((cand, cIdx) => {
                                         const candUnit = cand.canonical_base_unit_code || cand.base_unit || 'PCS';
@@ -1731,7 +1739,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                             }`}
                                           >
                                             <div className="min-w-0 flex-1">
-                                              <div className="font-bold text-slate-900 text-xs">
+                                              <div className="font-bold text-slate-900 text-xs break-words">
                                                 {cand.name}
                                               </div>
                                               <div className="text-[11px] text-slate-500 flex items-center gap-1.5 mt-1 flex-wrap">
@@ -1757,9 +1765,9 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                         );
                                       })
                                     ) : (
-                                      <div className="px-4 py-3 text-center text-slate-500 text-[11px]">
+                                      <div className="px-4 py-4 text-center text-slate-500 text-[11px]">
                                         Tidak ada produk <strong>Lacak Inventory</strong> yang cocok dengan pencarian{' '}
-                                        <span className="font-mono font-semibold">"{inputDisplayValue}"</span>.
+                                        <span className="font-mono font-semibold text-slate-700">"{inputDisplayValue}"</span>.
                                       </div>
                                     )}
                                   </div>

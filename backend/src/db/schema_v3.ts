@@ -7123,5 +7123,25 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     INSERT INTO schema_migrations (version)
     VALUES ('hk_personnel_tracking_v1')
     ON CONFLICT (version) DO NOTHING;
+
+    -- Migration: transaction_attachments_persistent_storage_v1
+    -- Persistent binary storage for Cloud Run stateless containers + retroactive purchase workflow sync
+    ALTER TABLE transaction_attachments
+      ADD COLUMN IF NOT EXISTS file_data BYTEA;
+
+    ALTER TABLE accounting_manual_payables
+      ADD COLUMN IF NOT EXISTS proof_data BYTEA,
+      ADD COLUMN IF NOT EXISTS proof_mime_type VARCHAR(100);
+
+    UPDATE transactions
+      SET purchase_workflow_status = 'SELESAI'
+    WHERE transaction_type = 'PURCHASE'
+      AND verification_status = 'VERIFIED'
+      AND (purchase_workflow_status IS NULL OR purchase_workflow_status = 'PROSES')
+      AND deleted_at IS NULL;
+
+    INSERT INTO schema_migrations (version)
+    VALUES ('transaction_attachments_persistent_storage_v1')
+    ON CONFLICT (version) DO NOTHING;
   `);
 }

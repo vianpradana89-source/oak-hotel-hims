@@ -245,15 +245,22 @@ export const PurchaseTransactionEditor: React.FC<PurchaseTransactionEditorProps>
     fetchPurchaseOrders(propertyId)
       .then((res: any) => {
         const list = Array.isArray(res) ? res : Array.isArray(res?.orders) ? res.orders : [];
-        const eligible = list.filter((po: any) =>
-          ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED', 'PARTIAL_RECEIVED', 'RECEIVED', 'COMPLETED'].includes(
+        const eligible = list.filter((po: any) => {
+          const statusValid = ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED', 'PARTIAL_RECEIVED', 'RECEIVED', 'COMPLETED'].includes(
             String(po.approval_status || po.status || '').toUpperCase()
-          )
-        );
+          );
+          if (!statusValid) return false;
+          // In edit mode or preselected PO, allow current PO
+          const isCurrentPo = (editMode && initialData?.po_id && Number(po.id) === Number(initialData.po_id)) ||
+            (initialPoId && Number(po.id) === Number(initialPoId));
+          if (isCurrentPo) return true;
+          // Exclude POs that already have invoices created to avoid double billing
+          return Number(po.invoice_count || 0) === 0;
+        });
         setApprovedPos(eligible);
       })
       .catch(() => setApprovedPos([]));
-  }, [propertyId]);
+  }, [propertyId, editMode, initialData?.po_id, initialPoId]);
 
   useEffect(() => {
     if (!editMode && initialPoId && Number(initialPoId) > 0) {

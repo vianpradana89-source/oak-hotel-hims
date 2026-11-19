@@ -20,6 +20,7 @@ export interface ScopedTransactionAttachment {
   original_name: string | null;
   file_name: string | null;
   storage_path: string;
+  file_data?: Buffer | null;
 }
 
 /**
@@ -63,7 +64,7 @@ export async function getScopedTransactionAttachment(
   }
 
   const attRes = await pool.query(
-    `SELECT id, transaction_id, property_id, mime_type, original_name, file_name, storage_path
+    `SELECT id, transaction_id, property_id, mime_type, original_name, file_name, storage_path, file_data
      FROM transaction_attachments
      WHERE id = $1 AND transaction_id = $2 AND property_id = $3`,
     [attachmentId, transactionId, propertyId]

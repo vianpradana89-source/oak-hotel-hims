@@ -5673,6 +5673,7 @@ export async function addTransactionAttachment(
     storagePath: string;
     uploadedBy?: string | null;
     attachmentPurpose?: AttachmentPurpose;
+    fileData?: Buffer | null;
   }
 ): Promise<any> {
   const txCheck = await pool.query(
@@ -5690,10 +5691,10 @@ export async function addTransactionAttachment(
   const insertRes = await pool.query(
     `INSERT INTO transaction_attachments (
       property_id, transaction_id, file_name, original_name,
-      mime_type, file_size, storage_path, uploaded_by, attachment_purpose
+      mime_type, file_size, storage_path, uploaded_by, attachment_purpose, file_data
     ) VALUES (
       $1, $2, $3, $4,
-      $5, $6, $7, $8, $9
+      $5, $6, $7, $8, $9, $10
     ) RETURNING *`,
     [
       propertyId,
@@ -5704,7 +5705,8 @@ export async function addTransactionAttachment(
       attachment.fileSize,
       attachment.storagePath,
       attachment.uploadedBy || 'Staff',
-      purpose
+      purpose,
+      attachment.fileData || null
     ]
   );
 
@@ -6501,6 +6503,7 @@ function buildExpenseAuditPayload(
   next: {
     verification_status: string | null;
     expense_workflow_status: string | null;
+    purchase_workflow_status?: string | null;
     verified_by_user_id: string | null;
     verified_by_name_snapshot: string | null;
     verified_at: string | null;
@@ -6637,14 +6640,15 @@ export async function executeExpenseLifecycle(
        }
      }
 
-     // Single UPDATE: only touch expense_workflow_status for SET_VERIFICATION,
+     // Single UPDATE: only touch purchase_workflow_status for SET_VERIFICATION,
      // or both verification + workflow for SET_WORKFLOW.  The canonical helper
      // already wrote verification_status / verified_*/ verified_at for
      // SET_VERIFICATION so we do NOT overwrite those fields here.
      if (actionUpper === 'SET_VERIFICATION') {
        await client.query(
          `UPDATE transactions
-          SET expense_workflow_status = $1,
+          SET purchase_workflow_status = $1,
+              expense_workflow_status = $1,
               updated_at = NOW()
           WHERE id = $2 AND property_id = $3`,
          [newWorkflow, id, propertyId]
@@ -6657,6 +6661,7 @@ export async function executeExpenseLifecycle(
               verified_by_user_id = $2,
               verified_by_name_snapshot = $3,
               verified_at = $4,
+              purchase_workflow_status = $5,
               expense_workflow_status = $5,
               updated_at = NOW()
           WHERE id = $6 AND property_id = $7`,
@@ -6669,6 +6674,7 @@ export async function executeExpenseLifecycle(
        prev,
        {
          verification_status: newVerification,
+         purchase_workflow_status: newWorkflow,
          expense_workflow_status: newWorkflow,
          verified_by_user_id: newVerifiedByUserId,
          verified_by_name_snapshot: newVerifiedByName,
@@ -6685,7 +6691,7 @@ export async function executeExpenseLifecycle(
       ) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
       [
         'TRANSACTIONS',
-        'EXPENSE_LIFECYCLE_UPDATED',
+        'PURCHASE_LIFECYCLE_UPDATED',
         'transactions',
         String(id),
         JSON.stringify(payload),

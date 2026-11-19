@@ -797,13 +797,6 @@ export function createTransactionsRouter(pool: Pool): Router {
         scoped.attachment.storage_path,
         TRANSACTION_ATTACHMENT_UPLOAD_DIR
       );
-      if (!safePath || !fs.existsSync(safePath)) {
-        return res.status(404).json({
-          status: 'ERROR',
-          code: 'FILE_NOT_FOUND',
-          message: 'File lampiran tidak ditemukan.'
-        });
-      }
 
       const mimeType = scoped.attachment.mime_type || 'application/octet-stream';
       const downloadName = scoped.attachment.original_name || scoped.attachment.file_name || 'attachment';
@@ -812,7 +805,27 @@ export function createTransactionsRouter(pool: Pool): Router {
       res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
-      return res.sendFile(safePath);
+
+      if (safePath && fs.existsSync(safePath)) {
+        return res.sendFile(safePath);
+      }
+
+      if (scoped.attachment.file_data && Buffer.isBuffer(scoped.attachment.file_data)) {
+        if (safePath) {
+          try {
+            fs.writeFileSync(safePath, scoped.attachment.file_data);
+          } catch {
+            // non-fatal cache write
+          }
+        }
+        return res.send(scoped.attachment.file_data);
+      }
+
+      return res.status(404).json({
+        status: 'ERROR',
+        code: 'FILE_NOT_FOUND',
+        message: 'File lampiran tidak ditemukan.'
+      });
     } catch (err: any) {
       const statusCode = err.statusCode || 500;
       return res.status(statusCode).json({
@@ -847,6 +860,14 @@ export function createTransactionsRouter(pool: Pool): Router {
         const purpose: AttachmentPurpose = req.body.attachment_purpose || 'RECEIPT';
 
         const storagePath = `/uploads/transactions/${req.file.filename}`;
+        let fileData: Buffer | null = null;
+        try {
+          if (req.file.path && fs.existsSync(req.file.path)) {
+            fileData = fs.readFileSync(req.file.path);
+          }
+        } catch {
+          // ignore cache read failure
+        }
 
         const createdAttachment = await addTransactionAttachment(pool, propertyId, transactionId, {
           fileName: req.file.filename,
@@ -855,7 +876,8 @@ export function createTransactionsRouter(pool: Pool): Router {
           fileSize: req.file.size,
           storagePath,
           uploadedBy: actorName,
-          attachmentPurpose: purpose
+          attachmentPurpose: purpose,
+          fileData,
         });
 
         return res.status(201).json({

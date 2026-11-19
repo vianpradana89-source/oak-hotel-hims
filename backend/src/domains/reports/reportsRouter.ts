@@ -11,6 +11,7 @@ import { getTransactions, settleTransactionPayment, addTransactionAttachment } f
 import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 import { TRANSACTION_ATTACHMENT_UPLOAD_DIR } from '../transactions/transactionAttachmentAccess';
+import { verifyToken } from '../auth/authService';
 
 const payablesStorage = multer.diskStorage({
   destination: (_req: any, _file: any, cb: (error: Error | null, destination: string) => void) => {
@@ -2570,13 +2571,25 @@ export function createReportsRouter(pool: Pool): Router {
 
         const proofUrl = req.file ? `/uploads/transactions/${req.file.filename}` : null;
         const proofFilename = req.file ? req.file.originalname : null;
+        let proofData: Buffer | null = null;
+        let proofMimeType: string | null = null;
+        if (req.file) {
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              proofData = fs.readFileSync(req.file.path);
+              proofMimeType = req.file.mimetype;
+            }
+          } catch {
+            // non-fatal read cache error
+          }
+        }
 
         if (proofUrl) {
           await pool.query(
             `UPDATE accounting_manual_payables
-             SET paid_amount = $2, status = $3, proof_url = $4, proof_filename = $5, updated_at = NOW()
+             SET paid_amount = $2, status = $3, proof_url = $4, proof_filename = $5, proof_data = $6, proof_mime_type = $7, updated_at = NOW()
              WHERE id = $1`,
-            [id, newPaid, newStatus, proofUrl, proofFilename]
+            [id, newPaid, newStatus, proofUrl, proofFilename, proofData, proofMimeType]
           );
         } else {
           await pool.query(
@@ -2624,6 +2637,15 @@ export function createReportsRouter(pool: Pool): Router {
         // Upload payment proof if provided
         if (req.file) {
           const storagePath = `/uploads/transactions/${req.file.filename}`;
+          let fileData: Buffer | null = null;
+          try {
+            if (req.file.path && fs.existsSync(req.file.path)) {
+              fileData = fs.readFileSync(req.file.path);
+            }
+          } catch {
+            // ignore
+          }
+
           await addTransactionAttachment(pool, propId, txId, {
             fileName: req.file.filename,
             originalName: req.file.originalname,
@@ -2632,6 +2654,7 @@ export function createReportsRouter(pool: Pool): Router {
             storagePath,
             uploadedBy: 'Akuntansi',
             attachmentPurpose: 'PAYMENT_PROOF',
+            fileData,
           });
         }
 
@@ -2640,6 +2663,63 @@ export function createReportsRouter(pool: Pool): Router {
       return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal melunasi hutang' });
+    }
+  });
+
+  router.get('/accounting/payables/:id/proof', async (req: Request, res: Response) => {
+    try {
+      const authHeader = req.headers.authorization;
+      if (!authHeader || !authHeader.startsWith('Bearer ')) {
+        return res.status(401).json({ status: 'ERROR', message: 'Akses ditolak. Silakan login terlebih dahulu.' });
+      }
+      try {
+        verifyToken(authHeader.split(' ')[1]);
+      } catch {
+        return res.status(401).json({ status: 'ERROR', message: 'Sesi login telah kedaluwarsa.' });
+      }
+
+      const id = parsePositiveInt(req.params.id);
+      if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID hutang tidak valid' });
+
+      const cur = await pool.query(
+        `SELECT id, proof_url, proof_filename, proof_mime_type, proof_data FROM accounting_manual_payables WHERE id = $1`,
+        [id]
+      );
+      if (!cur.rowCount) return res.status(404).json({ status: 'ERROR', message: 'Data hutang tidak ditemukan' });
+      const row = cur.rows[0];
+
+      const mimeType = row.proof_mime_type || 'application/octet-stream';
+      const downloadName = row.proof_filename || `proof-ap-${id}`;
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(downloadName)}"`);
+      res.setHeader('Cache-Control', 'private, no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+
+      if (row.proof_url) {
+        const basename = path.basename(row.proof_url);
+        const diskPath = path.join(TRANSACTION_ATTACHMENT_UPLOAD_DIR, basename);
+        if (fs.existsSync(diskPath)) {
+          return res.sendFile(diskPath);
+        }
+      }
+
+      if (row.proof_data && Buffer.isBuffer(row.proof_data)) {
+        if (row.proof_url) {
+          try {
+            const basename = path.basename(row.proof_url);
+            const diskPath = path.join(TRANSACTION_ATTACHMENT_UPLOAD_DIR, basename);
+            fs.writeFileSync(diskPath, row.proof_data);
+          } catch {
+            // cache write non-fatal
+          }
+        }
+        return res.send(row.proof_data);
+      }
+
+      return res.status(404).json({ status: 'ERROR', message: 'Berkas bukti bayar tidak tersedia atau gagal dimuat.' });
+    } catch (err: any) {
+      return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal memuat bukti bayar' });
     }
   });
 

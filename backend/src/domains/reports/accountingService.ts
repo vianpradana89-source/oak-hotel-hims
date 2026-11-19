@@ -129,6 +129,8 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
 
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_url TEXT NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_filename TEXT NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_data BYTEA NULL;
+      ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS proof_mime_type VARCHAR(100) NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_name VARCHAR(100) NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_account VARCHAR(100) NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_holder VARCHAR(100) NULL;
@@ -308,7 +310,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
               to_char(created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD') AS tx_date,
               bank_name, bank_account, bank_holder, supplier_email,
               COALESCE(warehouse_code, '—') AS warehouse_code,
-              proof_url, proof_filename
+              proof_url, proof_filename, proof_mime_type
        FROM accounting_manual_payables
        WHERE property_id = $1
        ORDER BY created_at DESC, id DESC`,
@@ -612,8 +614,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       bank_holder: mp.bank_holder || null,
       supplier_email: mp.supplier_email || null,
       warehouse_code: mp.warehouse_code || '—',
-      proof_url: mp.proof_url || null,
-      payment_proof_attachment: mp.proof_filename ? { id: mp.id, original_name: mp.proof_filename, file_name: mp.proof_filename, mime_type: null } : null,
+      proof_url: (mp.proof_url || mp.proof_filename) ? `/api/reports/accounting/payables/${mp.id}/proof` : null,
+      payment_proof_attachment: mp.proof_filename ? { id: mp.id, original_name: mp.proof_filename, file_name: mp.proof_filename, mime_type: mp.proof_mime_type || null } : null,
     });
   }
 

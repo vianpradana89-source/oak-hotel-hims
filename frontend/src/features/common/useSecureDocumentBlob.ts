@@ -15,6 +15,7 @@ import {
 export function useSecureDocumentBlob(rawPath: string | null | undefined, enabled: boolean = true) {
   const { authFetch } = useAuth();
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  const [mimeType, setMimeType] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   const [errorCode, setErrorCode] = useState<string | null>(null);
@@ -27,6 +28,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
       setLoading(true);
       setError(null);
       setErrorCode(null);
+      setMimeType(null);
 
       // Clean localhost prefix if any legacy path contains it
       const cleanPath = rawPath.replace(/^http:\/\/localhost(:\d+)?/, '');
@@ -51,6 +53,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
           if (!active) return;
           currentObjectUrl = URL.createObjectURL(blob);
           setBlobUrl(currentObjectUrl);
+          setMimeType(blob.type || null);
           setLoading(false);
         })
         .catch((err) => {
@@ -65,6 +68,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
         if (prev) URL.revokeObjectURL(prev);
         return null;
       });
+      setMimeType(null);
       setLoading(false);
       setError(null);
       setErrorCode(null);
@@ -80,6 +84,7 @@ export function useSecureDocumentBlob(rawPath: string | null | undefined, enable
 
   return {
     blobUrl,
+    mimeType,
     loading,
     error,
     errorCode,
