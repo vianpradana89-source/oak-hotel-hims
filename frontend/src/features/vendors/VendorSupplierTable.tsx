@@ -35,7 +35,7 @@ export const VendorSupplierTable: React.FC<VendorSupplierTableProps> = ({
     return (
       <div className="bg-white rounded-xl border border-stone-200/80 p-12 text-center shadow-xs">
         <div className="inline-block animate-spin rounded-full h-8 w-8 border-b-2 border-[#1b4332] mb-3" />
-        <p className="text-sm font-medium text-stone-600">Memuat katalog rekanan vendor & supplier...</p>
+        <p className="text-sm font-medium text-stone-600">Memuat katalog rekanan supplier...</p>
       </div>
     );
   }
@@ -50,7 +50,7 @@ export const VendorSupplierTable: React.FC<VendorSupplierTableProps> = ({
         </div>
         <h3 className="text-sm font-semibold text-stone-800">Tidak Ada Rekanan Ditemukan</h3>
         <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-          Tidak ada data vendor atau supplier yang sesuai dengan kriteria pencarian dan filter saat ini.
+          Tidak ada data supplier yang sesuai dengan kriteria pencarian dan filter saat ini.
         </p>
       </div>
     );

@@ -60,6 +60,7 @@ export const MODULE_SUPPORTED_ACTIONS: Record<string, AccessAction[]> = {
   HRD: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
   POS: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
   'Daftar Purchase Order': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
+  Supplier: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
   'Penerimaan Barang': ['view', 'detail', 'create', 'edit', 'delete', 'export'],
   'Produk & Inventori': ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
   'Master Produk': ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
@@ -216,9 +217,10 @@ export function isNavAllowed(effective: EffectiveAccessGrid | null | undefined, 
       effective['Produk & Inventori']?.view?.allowed === true
     );
   }
-  if (menuKey === 'Daftar Purchase Order') {
+  if (menuKey === 'Daftar Purchase Order' || menuKey === 'Supplier') {
     return (
       effective['Daftar Purchase Order']?.view?.allowed === true ||
+      effective['Supplier']?.view?.allowed === true ||
       effective['Transaksi']?.view?.allowed === true ||
       effective['Master Produk']?.view?.allowed === true ||
       effective['Produk & Inventori']?.view?.allowed === true

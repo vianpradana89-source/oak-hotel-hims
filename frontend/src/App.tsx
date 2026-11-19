@@ -4591,10 +4591,10 @@ function AppContent() {
               }}
             />
 
-        {(selectedMenu === 'Transaksi' || selectedMenu === 'Daftar Purchase Order') && propertyId && (
+        {(selectedMenu === 'Transaksi' || selectedMenu === 'Daftar Purchase Order' || selectedMenu === 'Supplier') && propertyId && (
           <TransactionWorkspace
-            key={selectedMenu === 'Daftar Purchase Order' ? 'po-standalone' : 'tx-default'}
-            mode={selectedMenu === 'Daftar Purchase Order' ? 'STANDALONE_PO' : 'DEFAULT'}
+            key={selectedMenu === 'Supplier' ? 'supplier-standalone' : selectedMenu === 'Daftar Purchase Order' ? 'po-standalone' : 'tx-default'}
+            mode={selectedMenu === 'Supplier' ? 'STANDALONE_SUPPLIER' : selectedMenu === 'Daftar Purchase Order' ? 'STANDALONE_PO' : 'DEFAULT'}
             propertyId={propertyId}
             currentStaffName="Front Desk Staff"
             onOpenQuickBooking={() => setCreateResOpen(true)}

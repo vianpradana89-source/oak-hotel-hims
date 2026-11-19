@@ -10,6 +10,7 @@ export type MainNavKey =
   | 'Laporan'
   | 'Akuntansi'
   | 'Daftar Purchase Order'
+  | 'Supplier'
   | 'Master Kamar'
   | 'Master Produk'
   | 'Penerimaan Barang'

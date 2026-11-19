@@ -353,7 +353,7 @@ export const VendorSupplierMasterPage: React.FC<VendorSupplierMasterPageProps> =
         <div>
           <h3 className="text-sm font-semibold text-stone-800">Akses Terbatas</h3>
           <p className="text-xs text-stone-500 mt-1 max-w-sm mx-auto">
-            Anda tidak memiliki izin untuk melihat Master Vendor & Supplier.
+            Anda tidak memiliki izin untuk melihat Master Supplier.
           </p>
         </div>
         {onBack && (
@@ -427,7 +427,7 @@ export const VendorSupplierMasterPage: React.FC<VendorSupplierMasterPageProps> =
           )}
           <div>
             <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
-              <span>🏢</span> Master Rekanan (Vendor & Supplier)
+              <span>🏢</span> Master Rekanan (Supplier)
             </h2>
             <p className="text-xs text-stone-500 mt-0.5">
               Kelola direktori rekanan pengadaan barang (Supplier) dan penyedia jasa (Vendor) properti OAK HIMS.

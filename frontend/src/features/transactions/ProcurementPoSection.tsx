@@ -740,16 +740,10 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       <div className="px-5 py-4 bg-gradient-to-r from-[#1b4332]/5 via-amber-50/30 to-white border-b border-slate-200 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
         <div>
           <div className="flex items-center gap-2">
-            <span className="px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider bg-[#1b4332] text-[#d4af37] rounded-md">
-              Tahap 1A • Pengadaan Terpadu
-            </span>
             <h2 className="text-sm font-bold text-slate-900">
-              Daftar Purchase Order (PO) &amp; Otorisasi Pengadaan
+              Daftar Purchase Order (PO)
             </h2>
           </div>
-          <p className="text-[11px] text-slate-500 mt-0.5">
-            Pengadaan baru wajib dimulai dari PO yang disetujui. Penerimaan barang (GRN) dan pencatatan tagihan/nota berjalan pada batas kuantitas kumulatif yang sama.
-          </p>
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
@@ -1475,7 +1469,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       {/* Create / Edit PO Modal */}
       {showFormModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs">
-          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-5xl max-h-[92vh] flex flex-col overflow-hidden">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-6xl max-h-[92vh] flex flex-col overflow-hidden">
             <div className="px-6 py-4 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
@@ -1484,7 +1478,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                     : 'Buat Purchase Order (PO) Pengadaan Baru'}
                 </h3>
                 <p className="text-[11px] text-slate-500">
-                  Menggunakan satu Master Rekanan kanonik (`Vendor & Supplier`). Menyimpan atau menyetujui PO tidak otomatis menambah stok atau membuat tagihan.
+                  Menggunakan Master Rekanan (`Supplier`). Menyimpan atau menyetujui PO tidak otomatis menambah stok atau membuat tagihan.
                 </p>
               </div>
               <button
@@ -1513,7 +1507,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                 <div className="sm:col-span-2">
                   <div className="flex items-center justify-between mb-1">
                     <label className="font-bold text-slate-700">
-                      Supplier / Vendor (Master Rekanan) <span className="text-rose-500">*</span>
+                      Supplier (Master Rekanan) <span className="text-rose-500">*</span>
                     </label>
                     {onOpenVendorSupplierMaster && (
                       <button
@@ -1524,7 +1518,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                         }}
                         className="text-[10px] font-semibold text-emerald-700 hover:underline cursor-pointer"
                       >
-                        + Kelola Vendor &amp; Supplier
+                        + Kelola Supplier
                       </button>
                     )}
                   </div>
@@ -1732,7 +1726,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                 )}
 
                                 {isSearchOpen && (
-                                  <div className="absolute left-0 right-0 top-full mt-1 z-50 bg-white border border-slate-200 rounded-xl shadow-xl max-h-56 overflow-y-auto divide-y divide-slate-100">
+                                  <div className="absolute left-0 top-full mt-1 z-50 bg-white border border-slate-300 rounded-xl shadow-2xl min-w-[480px] max-w-[560px] max-h-80 overflow-y-auto divide-y divide-slate-100">
                                     {filteredCandidates.length > 0 ? (
                                       filteredCandidates.map((cand, cIdx) => {
                                         const candUnit = cand.canonical_base_unit_code || cand.base_unit || 'PCS';
@@ -1747,7 +1741,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                               void handleFormProductChange(idx, String(cand.id));
                                             }}
                                             onMouseEnter={() => setHighlightedOptionIdx(cIdx)}
-                                            className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 cursor-pointer transition-colors ${
+                                            className={`w-full text-left px-3.5 py-2.5 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
                                               isHighlighted
                                                 ? 'bg-emerald-50 text-emerald-950'
                                                 : isSelected
@@ -1756,25 +1750,25 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                             }`}
                                           >
                                             <div className="min-w-0 flex-1">
-                                              <div className="font-semibold text-slate-800 truncate">
+                                              <div className="font-bold text-slate-900 text-xs">
                                                 {cand.name}
                                               </div>
-                                              <div className="text-[10px] text-slate-500 flex items-center gap-1.5 mt-0.5">
-                                                <span className="font-mono font-bold text-emerald-800 bg-emerald-100/70 px-1.5 py-0.2 rounded">
+                                              <div className="text-[11px] text-slate-500 flex items-center gap-1.5 mt-1 flex-wrap">
+                                                <span className="font-mono font-semibold text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded text-[10px]">
                                                   {cand.item_code || `ID-${cand.id}`}
                                                 </span>
-                                                <span>•</span>
-                                                <span>Satuan: {candUnit}</span>
+                                                <span className="text-slate-300">•</span>
+                                                <span className="bg-slate-100 text-slate-700 px-1.5 py-0.5 rounded text-[10px] font-medium">Satuan: {candUnit}</span>
                                                 {cand.category_name && (
                                                   <>
-                                                    <span>•</span>
-                                                    <span className="truncate">{cand.category_name}</span>
+                                                    <span className="text-slate-300">•</span>
+                                                    <span className="text-amber-800 bg-amber-50 border border-amber-200/60 px-1.5 py-0.5 rounded text-[10px] font-medium">{cand.category_name}</span>
                                                   </>
                                                 )}
                                               </div>
                                             </div>
                                             {isSelected && (
-                                              <span className="text-emerald-700 font-bold text-xs shrink-0">
+                                              <span className="text-emerald-700 font-bold text-sm shrink-0">
                                                 ✓
                                               </span>
                                             )}
@@ -1782,7 +1776,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                                         );
                                       })
                                     ) : (
-                                      <div className="px-3 py-3 text-center text-slate-500 text-[11px]">
+                                      <div className="px-4 py-3 text-center text-slate-500 text-[11px]">
                                         Tidak ada produk <strong>Lacak Inventory</strong> yang cocok dengan pencarian{' '}
                                         <span className="font-mono font-semibold">"{inputDisplayValue}"</span>.
                                       </div>

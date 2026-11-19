@@ -74,7 +74,7 @@ interface TransactionWorkspaceProps {
   // TransactionUpdated SSE event; the workspace refetches its canonical
   // transaction list without remounting or resetting local filters.
   realtimeRefreshVersion?: number;
-  mode?: 'DEFAULT' | 'STANDALONE_PO';
+  mode?: 'DEFAULT' | 'STANDALONE_PO' | 'STANDALONE_SUPPLIER';
 }
 
 function formatTransactionBusinessDate(value: string | null | undefined): string {
@@ -106,6 +106,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   mode = 'DEFAULT',
 }) => {
   const isStandalonePo = mode === 'STANDALONE_PO';
+  const isStandaloneSupplier = mode === 'STANDALONE_SUPPLIER';
   // Editor View Mode (null = table view, 'PURCHASE' | 'EXPENSE' | 'INCOME' = dedicated full editors)
   const [activeEditor, setActiveEditor] = useState<'PURCHASE' | 'EXPENSE' | 'INCOME' | null>(null);
   /** EDIT-1B: Store transaction id for edit mode */
@@ -2023,6 +2024,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     );
   }
 
+  if (isStandaloneSupplier) {
+    return (
+      <div className="space-y-4">
+        <VendorSupplierMasterPage
+          propertyId={propertyId}
+          currentStaffName={currentStaffName}
+          onBack={onNavigateToPurchaseOrders}
+        />
+      </div>
+    );
+  }
+
   if (isStandalonePo) {
     return (
       <div className="space-y-4">
@@ -2030,18 +2043,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         <div className="bg-white border border-slate-200/90 rounded-2xl shadow-sm px-6 py-5">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
-              <div className="text-[11px] uppercase tracking-wider text-emerald-800 font-bold mb-0.5">
-                Manajemen Pengadaan &amp; Pembelian
-              </div>
               <div className="flex items-center gap-2.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-600" />
                 <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-                  Daftar Purchase Order (PO) &amp; Otorisasi Pengadaan
+                  Daftar Purchase Order (PO)
                 </h1>
               </div>
-              <p className="text-xs text-slate-500 mt-1">
-                Pengadaan baru wajib dimulai dari PO yang disetujui. Penerimaan barang (GRN) dan pencatatan tagihan/nota berjalan pada batas kuantitas kumulatif yang sama.
-              </p>
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
@@ -2073,26 +2080,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 type="button"
                 onClick={() => setShowVendorSupplierMaster(true)}
                 className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-                title="Buka direktori master vendor & supplier"
+                title="Buka direktori master supplier"
               >
                 <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
-                <span>Vendor &amp; Supplier</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setInitialPoIdForInvoice(null);
-                  setActiveEditor('PURCHASE');
-                }}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 rounded-xl transition-all shadow-sm cursor-pointer"
-              >
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-                </svg>
-                <span>+ Catat Tagihan / Nota PO</span>
+                <span>Supplier</span>
               </button>
             </div>
           </div>
@@ -2222,12 +2215,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             <button
               onClick={() => setShowVendorSupplierMaster(true)}
               className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-              title="Buka direktori master vendor & supplier"
+              title="Buka direktori master supplier"
             >
               <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
               </svg>
-              <span>Vendor &amp; Supplier</span>
+              <span>Supplier</span>
             </button>
 
             {activeTab === 'SALE' && (
