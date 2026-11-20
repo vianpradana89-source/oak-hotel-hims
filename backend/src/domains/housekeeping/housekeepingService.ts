@@ -760,6 +760,25 @@ export async function getHousekeepingDailyOperations(
       }
     }
 
+    const recentRestockRes = await client.query(
+      `SELECT DISTINCT ON (room_id) room_id,
+              complimentary_restock_meta,
+              completed_at,
+              updated_at
+       FROM housekeeping_tasks
+       WHERE property_id = $1
+         AND room_id IS NOT NULL
+         AND complimentary_restock_meta IS NOT NULL
+       ORDER BY room_id, COALESCE(completed_at, updated_at) DESC NULLS LAST, id DESC`,
+      [propertyId]
+    );
+    const recentRestockByRoom = new Map<number, any>();
+    for (const rr of recentRestockRes.rows) {
+      if (rr.complimentary_restock_meta) {
+        recentRestockByRoom.set(Number(rr.room_id), rr.complimentary_restock_meta);
+      }
+    }
+
     for (const r of rooms) {
       const rid = Number(r.id);
       if (!r.last_cleaned_by_name && recentCleanerByRoom.has(rid)) {
@@ -770,6 +789,7 @@ export async function getHousekeepingDailyOperations(
         r.last_inspected_by_name = recentInspectorByRoom.get(rid).inspector;
         r.last_inspected_at = recentInspectorByRoom.get(rid).completed_at;
       }
+      r.complimentary_restock_meta = recentRestockByRoom.get(rid) || null;
     }
   } catch (backfillErr) {
     // Non-fatal if legacy migration is in progress
@@ -886,6 +906,7 @@ export async function getHousekeepingDailyOperations(
       last_inspected_at: targetRoom?.last_inspected_at || null,
       room_status: targetRoom ? targetRoom.status : null,
       room_type_name: targetRoom ? targetRoom.room_type_name : null,
+      complimentary_restock_meta: t.complimentary_restock_meta || targetRoom?.complimentary_restock_meta || null,
       next_arrival: nextArr ? {
         reservation_id: nextArr.id,
         guest_name: nextArr.guest_name,

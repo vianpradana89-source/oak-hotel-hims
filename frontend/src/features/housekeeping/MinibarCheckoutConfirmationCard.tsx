@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { CupSoda, CheckCircle2 } from 'lucide-react';
 import { authenticatedFetch as authFetch } from '../../lib/authenticatedFetch';
 
 export interface MinibarItemEntry {
@@ -266,7 +267,8 @@ export const MinibarCheckoutConfirmationCard: React.FC<MinibarCheckoutConfirmati
       <div className="p-3.5 rounded-xl bg-emerald-50/90 border border-emerald-300 text-xs space-y-2">
         <div className="flex items-center justify-between">
           <span className="font-bold text-emerald-900 flex items-center gap-1.5">
-            <span>✓ Tagihan Minibar Terkonfirmasi & Stok HKP Terpotong</span>
+            <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+            <span>Tagihan Minibar Terkonfirmasi &amp; Stok HKP Terpotong</span>
           </span>
           <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-200/80 text-emerald-950">
             Rp {Number(billingMeta.total_amount || totalAmount || 0).toLocaleString('id-ID')}
@@ -313,7 +315,8 @@ export const MinibarCheckoutConfirmationCard: React.FC<MinibarCheckoutConfirmati
       <div className="flex items-center justify-between gap-2">
         <div>
           <div className="font-bold text-amber-950 flex items-center gap-1.5">
-            <span>🥤 Konfirmasi Konsumsi Minibar Kamar {roomNumber || ''} (Gudang HKP)</span>
+            <CupSoda className="w-4 h-4 text-amber-700" />
+            <span>Konfirmasi Konsumsi Minibar Kamar {roomNumber || ''} (Gudang HKP)</span>
           </div>
           <p className="text-[11px] text-amber-800 mt-0.5">
             Periksa rincian minibar yang berkurang, pilih metode penagihan/pembayaran, lalu klik Konfirmasi agar otomatis masuk tagihan & memotong stok HKP.

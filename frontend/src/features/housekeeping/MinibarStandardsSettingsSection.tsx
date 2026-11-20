@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Lightbulb, Building2, Droplets, Check, Plus, Trash2 } from 'lucide-react';
 import { authenticatedFetch as authFetch } from '../../lib/authenticatedFetch';
 
 interface MinibarStandardsSettingsSectionProps {
@@ -346,14 +347,18 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                 type="button"
                 disabled={saving}
                 onClick={handleSaveStandard}
-                className="w-full py-2 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50"
+                className="w-full py-2 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50 inline-flex items-center justify-center gap-1"
               >
-                {saving ? 'Menyimpan...' : '+ Simpan Standar'}
+                <Plus className="w-3.5 h-3.5" />
+                <span>{saving ? 'Menyimpan...' : 'Simpan Standar'}</span>
               </button>
             </div>
           </div>
-          <div className="text-[11px] text-neutral-500">
-            💡 <strong>Tips:</strong> Biarkan pilihan <strong>Cakupan Tipe Kamar</strong> pada <strong>&ldquo;✓ Semua Tipe Kamar (Otomatis)&rdquo;</strong> agar cukup 1x simpan langsung berlaku untuk seluruh tipe kamar. Pilih tipe kamar tertentu hanya jika ada kamar dengan isi minibar khusus.
+          <div className="text-[11px] text-neutral-500 flex items-center gap-1.5">
+            <Lightbulb className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+            <span>
+              <strong>Tips:</strong> Biarkan pilihan <strong>Cakupan Tipe Kamar</strong> pada <strong>&ldquo;Semua Tipe Kamar (Otomatis)&rdquo;</strong> agar cukup 1x simpan langsung berlaku untuk seluruh tipe kamar. Pilih tipe kamar tertentu hanya jika ada kamar dengan isi minibar khusus.
+            </span>
           </div>
         </div>
 
@@ -398,8 +403,9 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                     </td>
                     <td className="py-2.5 px-3">
                       {std.is_all_room_types ? (
-                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
-                          ✓ Semua Tipe Kamar ({roomTypes.length} Tipe)
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          <Check className="w-3 h-3" />
+                          <span>Semua Tipe Kamar ({roomTypes.length} Tipe)</span>
                         </span>
                       ) : (
                         <div className="flex flex-col items-start gap-1">
@@ -410,9 +416,10 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                             type="button"
                             disabled={saving}
                             onClick={() => handleApplyToAllRoomTypes(std)}
-                            className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer disabled:opacity-50"
+                            className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer disabled:opacity-50 inline-flex items-center gap-0.5"
                           >
-                            + Terapkan ke Semua Tipe Kamar
+                            <Plus className="w-3 h-3" />
+                            <span>Terapkan ke Semua Tipe Kamar</span>
                           </button>
                         </div>
                       )}
@@ -432,9 +439,10 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                       <button
                         type="button"
                         onClick={() => handleDeleteStandard(std.id, std.is_all_room_types)}
-                        className="text-rose-600 hover:text-rose-800 font-bold text-[11px] cursor-pointer"
+                        className="text-rose-600 hover:text-rose-800 font-bold text-[11px] cursor-pointer inline-flex items-center gap-1"
                       >
-                        Hapus
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>Hapus</span>
                       </button>
                     </td>
                   </tr>
@@ -449,7 +457,8 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
               <div className="font-bold text-emerald-950 flex items-center gap-1.5">
-                <span>🏨 Isi Complimentary &amp; Minibar ke Kamar yang Sudah Terlanjur Ready (Siap Huni)</span>
+                <Building2 className="w-4 h-4 text-emerald-700" />
+                <span>Isi Complimentary &amp; Minibar ke Kamar yang Sudah Terlanjur Ready (Siap Huni)</span>
               </div>
               <p className="text-[11px] text-emerald-800 mt-0.5">
                 Gunakan fitur ini untuk mengisi/mencatat stok Minibar &amp; Complimentary pada kamar yang saat ini sudah berstatus <strong>VACANT_CLEAN / INSPECTED</strong> tanpa harus mengubah status kamar menjadi kotor.
@@ -470,7 +479,7 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                 onChange={(e) => setSelectedReadyRoomTarget(e.target.value)}
                 className="w-full text-xs bg-white border border-emerald-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-600 cursor-pointer"
               >
-                <option value="ALL">✓ Semua Kamar Ready ({readyRooms.length} Kamar)</option>
+                <option value="ALL">Semua Kamar Ready ({readyRooms.length} Kamar)</option>
                 {readyRooms.map((rm) => (
                   <option key={rm.id} value={rm.id}>
                     Kamar {rm.room_number} — {rm.room_type_name} ({rm.status})
@@ -501,13 +510,16 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                 type="button"
                 disabled={stockingReady || readyRooms.length === 0}
                 onClick={handleStockReadyRooms}
-                className="w-full py-2.5 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50"
+                className="w-full py-2.5 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50 inline-flex items-center justify-center gap-1.5"
               >
-                {stockingReady
-                  ? 'Memproses Kamar...'
-                  : selectedReadyRoomTarget === 'ALL'
-                  ? `💧 Isi ke Semua Kamar Ready (${readyRooms.length})`
-                  : '💧 Isi ke Kamar Terpilih'}
+                <Droplets className="w-4 h-4 text-[#d4af37]" />
+                <span>
+                  {stockingReady
+                    ? 'Memproses Kamar...'
+                    : selectedReadyRoomTarget === 'ALL'
+                    ? `Isi ke Semua Kamar Ready (${readyRooms.length})`
+                    : 'Isi ke Kamar Terpilih'}
+                </span>
               </button>
             </div>
           </div>

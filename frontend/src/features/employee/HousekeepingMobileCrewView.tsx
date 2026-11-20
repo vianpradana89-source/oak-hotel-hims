@@ -1,4 +1,23 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import {
+  CheckCircle2,
+  AlertTriangle,
+  Play,
+  ShieldAlert,
+  RefreshCw,
+  Search,
+  BedDouble,
+  X,
+  Info,
+  Plus,
+  Clock,
+  ChevronDown,
+  ChevronUp,
+  ClipboardCheck,
+  FileText,
+  Droplets,
+  CupSoda
+} from 'lucide-react';
 import type {
   HousekeepingTaskRecord,
   TaskChecklistItem,
@@ -12,83 +31,6 @@ import {
   applyChecklistItemLocalUpdate,
   parseChecklistMutationError
 } from './housekeepingMobileChecklist';
-
-const CheckCircle2 = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
-const AlertTriangle = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-  </svg>
-);
-const Play = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
-const ShieldAlert = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-  </svg>
-);
-const RefreshCw = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-  </svg>
-);
-const Search = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-  </svg>
-);
-const BedDouble = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3" />
-  </svg>
-);
-const X = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-  </svg>
-);
-const Info = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
-const Plus = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-  </svg>
-);
-const Clock = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
-  </svg>
-);
-const ChevronDown = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
-  </svg>
-);
-const ChevronUp = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 15l7-7 7 7" />
-  </svg>
-);
-const ClipboardCheck = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
-  </svg>
-);
-const FileText = ({ className = "w-5 h-5" }: { className?: string }) => (
-  <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-  </svg>
-);
 
 interface HousekeepingMobileCrewViewProps {
   propertyId: number;
@@ -1691,7 +1633,10 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
                 <div className="mt-3 p-3 rounded-2xl bg-amber-50/90 border border-amber-300 space-y-2 text-xs">
                   <div>
                     <div className="font-bold text-amber-950 flex items-center justify-between">
-                      <span>🥤 Pemeriksaan Minibar Kamar (Gudang HKP)</span>
+                      <span className="flex items-center gap-1.5">
+                        <CupSoda className="w-4 h-4 text-amber-700" />
+                        <span>Pemeriksaan Minibar Kamar (Gudang HKP)</span>
+                      </span>
                       <span className="text-[10px] font-mono text-amber-800">Isi Kamar</span>
                     </div>
                     <p className="text-[10px] text-amber-800 mt-0.5">
@@ -2257,8 +2202,9 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
               {/* SECTION 1.5: COMPLIMENTARY & MINIBAR RESTOCK (ABOVE CLEANING NOTES) */}
               <div className="p-3 rounded-2xl bg-emerald-50/70 border border-emerald-200 space-y-2.5 text-xs">
                 <div>
-                  <div className="font-bold text-emerald-950">
-                    💧 Pengisian Complimentary &amp; Isi Minibar Kamar (Gudang HKP)
+                  <div className="font-bold text-emerald-950 flex items-center gap-1.5">
+                    <Droplets className="w-4 h-4 text-emerald-700" />
+                    <span>Pengisian Complimentary &amp; Isi Minibar Kamar (Gudang HKP)</span>
                   </div>
                   <p className="text-[10px] text-emerald-800 mt-0.5">
                     Sesuaikan jumlah complimentary &amp; isi kulkas minibar kamar sebelum klik Submit Selesai.
@@ -2269,8 +2215,9 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
                   Array.isArray(mobileLastCheckoutConsumption.items) &&
                   mobileLastCheckoutConsumption.items.length > 0 && (
                     <div className="p-2 rounded-xl bg-amber-50 border border-amber-300 space-y-0.5">
-                      <div className="font-bold text-amber-950 text-[10px]">
-                        🔄 Minibar Berkurang Saat Checkout Sebelumnya:
+                      <div className="font-bold text-amber-950 text-[10px] flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 text-amber-700" />
+                        <span>Minibar Berkurang Saat Checkout Sebelumnya:</span>
                       </div>
                       <div className="text-[10px] text-amber-900 font-semibold">
                         {mobileLastCheckoutConsumption.items.map((it: any) => `${it.quantity}x ${it.name}`).join(', ')}

@@ -1,4 +1,19 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Wrench,
+  X,
+  Check,
+  CheckCircle2,
+  AlertTriangle,
+  Search,
+  DoorOpen,
+  Tag,
+  Eye,
+  Pencil,
+  Sparkles,
+  Circle,
+  Clock
+} from 'lucide-react';
 import type { HousekeepingTaskFinding } from './housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
@@ -159,8 +174,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
         {/* Header */}
         <div className="p-5 bg-gradient-to-r from-stone-900 via-amber-950 to-stone-900 text-white flex items-center justify-between border-b border-amber-800/40">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-300 text-xl shadow-inner">
-              🔧
+            <div className="w-10 h-10 rounded-xl bg-amber-500/20 border border-amber-400/40 flex items-center justify-center text-amber-300 shadow-inner">
+              <Wrench className="w-5 h-5" />
             </div>
             <div>
               <h2 className="text-base font-bold text-white flex items-center gap-2">
@@ -183,9 +198,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
             className="p-2 text-stone-400 hover:text-white rounded-xl hover:bg-white/10 transition-colors cursor-pointer"
             title="Tutup Modal"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-            </svg>
+            <X className="w-5 h-5" />
           </button>
         </div>
 
@@ -193,7 +206,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
         {successToast && (
           <div className="p-3 bg-emerald-700 text-white text-xs font-bold flex items-center justify-between px-5 animate-in slide-in-from-top duration-200">
             <div className="flex items-center gap-2">
-              <span className="text-sm">✓</span>
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
               <span>{successToast}</span>
             </div>
             <button
@@ -201,7 +214,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
               onClick={() => setSuccessToast(null)}
               className="text-emerald-200 hover:text-white"
             >
-              ✕
+              <X className="w-4 h-4" />
             </button>
           </div>
         )}
@@ -218,7 +231,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                   : 'bg-white text-stone-700 border border-stone-300 hover:bg-stone-100'
               }`}
             >
-              <span>🚨 Kendala Aktif (Open)</span>
+              <AlertTriangle className="w-3.5 h-3.5" />
+              <span>Kendala Aktif (Open)</span>
               {openCount > 0 && (
                 <span className={`px-1.5 py-0.2 rounded-full text-[10px] ${tabFilter === 'OPEN' ? 'bg-amber-900 text-white' : 'bg-rose-100 text-rose-700 font-bold'}`}>
                   {openCount}
@@ -243,10 +257,11 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                 <button
                   type="button"
                   onClick={() => setSelectedRoomId(undefined)}
-                  className="text-amber-800 hover:text-rose-700 font-bold ml-1 cursor-pointer"
+                  className="text-amber-800 hover:text-rose-700 font-bold ml-1 cursor-pointer inline-flex items-center gap-0.5"
                   title="Lihat semua kamar"
                 >
-                  ✕ Tampilkan Semua
+                  <X className="w-3 h-3" />
+                  <span>Tampilkan Semua</span>
                 </button>
               </div>
             )}
@@ -260,9 +275,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
               placeholder="Cari kamar, jenis kendala, catatan..."
               className="w-full pl-8 pr-3 py-1.5 text-xs bg-white border border-stone-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-amber-500"
             />
-            <svg className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-2.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
+            <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-2.5" />
           </div>
         </div>
 
@@ -277,7 +290,10 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
 
           {errorMsg && (
             <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl text-xs flex items-center justify-between">
-              <span>⚠️ {errorMsg}</span>
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{errorMsg}</span>
+              </span>
               <button
                 type="button"
                 onClick={fetchFindings}
@@ -290,8 +306,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
 
           {!loading && !errorMsg && filteredFindings.length === 0 && (
             <div className="p-10 text-center bg-white rounded-xl border border-stone-200 shadow-xs space-y-2">
-              <div className="w-12 h-12 mx-auto rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center text-xl font-bold">
-                ✓
+              <div className="w-12 h-12 mx-auto rounded-full bg-emerald-100 text-emerald-700 flex items-center justify-center font-bold">
+                <CheckCircle2 className="w-6 h-6" />
               </div>
               <h3 className="text-sm font-bold text-stone-800">
                 {tabFilter === 'OPEN' ? 'Tidak Ada Kendala Aktif' : 'Tidak Ada Data Kendala'}
@@ -323,7 +339,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                 <div className="p-4 pb-3 flex items-start justify-between gap-3 border-b border-stone-100 flex-wrap bg-stone-50/50">
                   <div className="flex items-center gap-2.5 flex-wrap">
                     <div className="px-2.5 py-1 bg-stone-900 text-white rounded-lg font-mono font-bold text-xs tracking-wider flex items-center gap-1.5">
-                      <span>🚪 {finding.room_number ? `Kamar ${finding.room_number}` : 'Kamar Belum Ditentukan'}</span>
+                      <DoorOpen className="w-3.5 h-3.5 text-amber-300" />
+                      <span>{finding.room_number ? `Kamar ${finding.room_number}` : 'Kamar Belum Ditentukan'}</span>
                     </div>
 
                     {finding.room_type_name && (
@@ -348,20 +365,31 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
 
                     {finding.block_room_ready && isOpenStatus && (
                       <span className="text-[11px] font-bold text-rose-700 bg-rose-50 border border-rose-200 px-2 py-0.5 rounded-md flex items-center gap-1">
-                        <span>🚨</span> Memblokir Siap Huni (Check-in Blocked)
+                        <AlertTriangle className="w-3 h-3" />
+                        <span>Memblokir Siap Huni (Check-in Blocked)</span>
                       </span>
                     )}
                   </div>
 
                   <div className="flex items-center gap-2">
                     <span
-                      className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider ${
+                      className={`text-xs px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider inline-flex items-center gap-1 ${
                         isOpenStatus
                           ? 'bg-amber-100 text-amber-800 border border-amber-300'
                           : 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                       }`}
                     >
-                      {finding.status === 'OPEN' ? '⏳ Aktif (Open)' : '✓ Selesai (Resolved)'}
+                      {finding.status === 'OPEN' ? (
+                        <>
+                          <Clock className="w-3 h-3" />
+                          <span>Aktif (Open)</span>
+                        </>
+                      ) : (
+                        <>
+                          <Check className="w-3 h-3" />
+                          <span>Selesai (Resolved)</span>
+                        </>
+                      )}
                     </span>
                     <span className="text-[11px] text-stone-400 font-mono">
                       #{finding.id}
@@ -374,7 +402,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                   <div className="flex items-start justify-between gap-4">
                     <div className="space-y-1 flex-1">
                       <div className="text-xs font-bold text-stone-900 flex items-center gap-1.5">
-                        <span className="text-amber-700">🏷️ {finding.finding_type_label}</span>
+                        <Tag className="w-3.5 h-3.5 text-amber-700" />
+                        <span className="text-amber-700">{finding.finding_type_label}</span>
                       </div>
                       <p className="text-xs text-stone-700 bg-stone-50 p-2.5 rounded-lg border border-stone-200 font-medium">
                         "{finding.notes || 'Tidak ada deskripsi detail'}"
@@ -399,7 +428,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                             }}
                           />
                           <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 flex items-center justify-center text-white text-xs font-bold transition-opacity">
-                            👁️
+                            <Eye className="w-4 h-4" />
                           </div>
                         </button>
                       </div>
@@ -428,7 +457,10 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                   {!isOpenStatus && finding.resolution_note && (
                     <div className="p-3 bg-emerald-50/80 border border-emerald-200 rounded-lg text-xs space-y-1 text-emerald-950">
                       <div className="font-bold flex items-center justify-between">
-                        <span>✓ Catatan Penyelesaian:</span>
+                        <span className="flex items-center gap-1">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                          <span>Catatan Penyelesaian:</span>
+                        </span>
                         <span className="text-[10px] font-normal text-emerald-700">
                           {finding.resolved_at ? new Date(finding.resolved_at).toLocaleString('id-ID') : ''}
                         </span>
@@ -444,7 +476,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                   {isOpenStatus && isResolving && (
                     <div className="p-4 bg-amber-50/90 border border-amber-300 rounded-xl space-y-3 animate-in fade-in duration-150">
                       <div className="text-xs font-bold text-amber-950 flex items-center gap-1.5">
-                        <span>✏️ Form Penyelesaian Kendala Kamar {finding.room_number}</span>
+                        <Pencil className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Form Penyelesaian Kendala Kamar {finding.room_number}</span>
                       </div>
 
                       <div>
@@ -480,7 +513,10 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                               className="text-emerald-600"
                             />
                             <div>
-                              <div className="font-bold text-[11px]">🟢 Readykan Kamar</div>
+                              <div className="font-bold text-[11px] flex items-center gap-1">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                <span>Readykan Kamar</span>
+                              </div>
                               <div className="text-[10px] text-emerald-700 font-normal">Siap Huni / Check-in Tamu</div>
                             </div>
                           </label>
@@ -500,7 +536,10 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                               className="text-amber-600"
                             />
                             <div>
-                              <div className="font-bold text-[11px]">🧹 Kamar Kotor</div>
+                              <div className="font-bold text-[11px] flex items-center gap-1">
+                                <Sparkles className="w-3.5 h-3.5 text-amber-600" />
+                                <span>Kamar Kotor</span>
+                              </div>
                               <div className="text-[10px] text-amber-700 font-normal">Perlu Pembersihan Ulang</div>
                             </div>
                           </label>
@@ -520,7 +559,10 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                               className="text-stone-600"
                             />
                             <div>
-                              <div className="font-bold text-[11px]">⚪ Status Tetap</div>
+                              <div className="font-bold text-[11px] flex items-center gap-1">
+                                <Circle className="w-3 h-3 text-stone-500" />
+                                <span>Status Tetap</span>
+                              </div>
                               <div className="text-[10px] text-stone-500 font-normal">Hanya selesaikan tiket</div>
                             </div>
                           </label>
@@ -548,7 +590,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                             </>
                           ) : (
                             <>
-                              <span>✓</span>
+                              <Check className="w-3.5 h-3.5" />
                               <span>Konfirmasi Selesai & Readykan Kamar</span>
                             </>
                           )}
@@ -565,7 +607,8 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
                         onClick={() => handleStartResolve(finding)}
                         className="px-3.5 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer flex items-center gap-1.5 shadow-xs"
                       >
-                        <span>🔧 Selesaikan Kendala & Readykan Kamar</span>
+                        <Wrench className="w-3.5 h-3.5" />
+                        <span>Selesaikan Kendala & Readykan Kamar</span>
                       </button>
                     </div>
                   )}
@@ -599,7 +642,7 @@ export const MaintenanceIssuesModal: React.FC<MaintenanceIssuesModalProps> = ({
               onClick={() => setPreviewPhotoUrl(null)}
               className="absolute top-3 right-3 z-10 w-8 h-8 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black"
             >
-              ✕
+              <X className="w-4 h-4" />
             </button>
             <img
               src={previewPhotoUrl.startsWith('http') ? previewPhotoUrl : `${apiBaseUrl.replace('/api', '')}${previewPhotoUrl}`}

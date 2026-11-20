@@ -1,4 +1,18 @@
 import React, { useEffect, useState } from 'react';
+import {
+  CupSoda,
+  Droplets,
+  RefreshCw,
+  CheckCircle2,
+  XCircle,
+  AlertTriangle,
+  Check,
+  X,
+  Settings,
+  Zap,
+  AlertCircle,
+  Package
+} from 'lucide-react';
 import type {
   HousekeepingTaskRecord,
   HkTaskPriority,
@@ -389,9 +403,7 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
               onClick={onClose}
               className="p-1.5 text-neutral-400 hover:text-neutral-700 rounded-lg hover:bg-neutral-200/60"
             >
-              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
-              </svg>
+              <X className="w-5 h-5" />
             </button>
           </div>
 
@@ -399,9 +411,7 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
           <div className="flex-1 overflow-y-auto p-5 space-y-6">
             {errorMsg && (
               <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-lg flex items-start gap-2">
-                <svg className="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                </svg>
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                 <div>{errorMsg}</div>
               </div>
             )}
@@ -410,9 +420,7 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
             {task.next_arrival && (
               <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-lg">
                 <div className="text-xs font-bold text-amber-900 flex items-center gap-1.5 mb-1">
-                  <svg className="w-4 h-4 text-amber-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
+                  <Zap className="w-4 h-4 text-amber-700" />
                   Priority Turnover — Incoming Arrival Hari Ini
                 </div>
                 <div className="text-xs text-amber-800 space-y-0.5">
@@ -489,13 +497,14 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                             type="button"
                             disabled={isSubmitting}
                             onClick={() => onBulkToggleCategory?.(task, secName, items, !isAllSecCompleted)}
-                            className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border transition-colors cursor-pointer ${
+                            className={`text-[11px] font-bold px-2 py-0.5 rounded-lg border transition-colors cursor-pointer flex items-center gap-1 ${
                               isAllSecCompleted
                                 ? 'bg-emerald-50 text-emerald-800 border-emerald-300 hover:bg-emerald-100'
                                 : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
                             }`}
                           >
-                            {isAllSecCompleted ? '✓ Semua Dicentang' : '✓ Checklist Semua'}
+                            <Check className="w-3 h-3" />
+                            <span>{isAllSecCompleted ? 'Semua Dicentang' : 'Checklist Semua'}</span>
                           </button>
                         )}
                       </div>
@@ -545,7 +554,8 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                     <div className="flex items-center justify-between gap-2">
                       <div>
                         <div className="font-bold text-amber-950 flex items-center gap-1.5">
-                          <span>🥤 Pemeriksaan Konsumsi Minibar Kamar (Gudang HKP)</span>
+                          <CupSoda className="w-4 h-4 text-amber-700" />
+                          <span>Pemeriksaan Konsumsi Minibar Kamar (Gudang HKP)</span>
                         </div>
                         <p className="text-[11px] text-amber-800 mt-0.5">
                           Daftar isi minibar kamar saat dibersihkan. Tekan <strong>+</strong> pada produk yang berkurang/diminum tamu (otomatis ditagihkan ke FO).
@@ -554,8 +564,11 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                     </div>
 
                     {minibarDefaults.length === 0 ? (
-                      <div className="p-2.5 rounded-lg bg-white/80 border border-amber-200 text-[11px] text-amber-900">
-                        Belum ada produk yang didaftarkan sebagai <strong>Minibar Berbayar</strong> untuk kamar ini. Klik ikon <strong>⚙ Setting</strong> di halaman Housekeeping untuk mengatur standar minibar.
+                      <div className="p-2.5 rounded-lg bg-white/80 border border-amber-200 text-[11px] text-amber-900 flex items-center gap-1.5">
+                        <Settings className="w-3.5 h-3.5 text-amber-700 shrink-0" />
+                        <span>
+                          Belum ada produk yang didaftarkan sebagai <strong>Minibar Berbayar</strong> untuk kamar ini. Klik ikon <strong>Setting</strong> di halaman Housekeeping untuk mengatur standar minibar.
+                        </span>
                       </div>
                     ) : (
                       <div className="bg-white rounded-xl border border-amber-200 divide-y divide-neutral-100 overflow-hidden">
@@ -667,8 +680,9 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                 {isCleaningTask && (
                   <div className="p-3.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3 text-xs">
                     <div>
-                      <div className="font-bold text-emerald-950">
-                        💧 Pengisian Complimentary &amp; Isi Kulkas Minibar Kamar (Gudang HKP)
+                      <div className="font-bold text-emerald-950 flex items-center gap-1.5">
+                        <Droplets className="w-4 h-4 text-emerald-700" />
+                        <span>Pengisian Complimentary &amp; Isi Kulkas Minibar Kamar (Gudang HKP)</span>
                       </div>
                       <p className="text-[11px] text-emerald-800 mt-0.5">
                         Produk yang tampil di bawah sesuai dengan pengaturan <strong>Standar Paket Kamar</strong>. Jumlah minibar yang diisi di sini akan tampil sama persis saat pemeriksaan checkout.
@@ -680,8 +694,9 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                       Array.isArray(lastCheckoutConsumption.items) &&
                       lastCheckoutConsumption.items.length > 0 && (
                         <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 space-y-1">
-                          <div className="font-bold text-amber-950 text-[11px]">
-                            🔄 Info Minibar yang Berkurang Saat Checkout Sebelumnya:
+                          <div className="font-bold text-amber-950 text-[11px] flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 text-amber-700" />
+                            <span>Info Minibar yang Berkurang Saat Checkout Sebelumnya:</span>
                           </div>
                           <ul className="list-disc list-inside text-[11px] text-amber-900 font-semibold">
                             {lastCheckoutConsumption.items.map((it: any, idx: number) => (
@@ -873,24 +888,26 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                       <button
                         type="button"
                         onClick={() => setInspectionResult('PASS')}
-                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all ${
+                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all flex items-center justify-center gap-1.5 ${
                           inspectionResult === 'PASS'
                             ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
                             : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
                         }`}
                       >
-                        ✓ Lolos (Inspected)
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Lolos (Inspected)</span>
                       </button>
                       <button
                         type="button"
                         onClick={() => setInspectionResult('RETURN_TO_CLEANING')}
-                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all ${
+                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all flex items-center justify-center gap-1.5 ${
                           inspectionResult === 'RETURN_TO_CLEANING'
                             ? 'bg-rose-600 text-white border-rose-600 shadow-xs'
                             : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
                         }`}
                       >
-                        ✕ Perlu Perbaikan (Rework)
+                        <XCircle className="w-3.5 h-3.5" />
+                        <span>Perlu Perbaikan (Rework)</span>
                       </button>
                     </div>
 
@@ -919,13 +936,14 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                       <button
                         type="button"
                         onClick={() => setInspectionResult('CLEAR')}
-                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all cursor-pointer ${
+                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                           inspectionResult === 'CLEAR'
                             ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs'
                             : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
                         }`}
                       >
-                        ✓ Fisik Kamar Aman (Clear)
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        <span>Fisik Kamar Aman (Clear)</span>
                       </button>
                       <button
                         type="button"
@@ -935,13 +953,14 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                             setIssueType('DAMAGE');
                           }
                         }}
-                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all cursor-pointer ${
+                        className={`p-2.5 text-xs font-semibold rounded-lg border text-center transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
                           inspectionResult === 'ISSUE_FOUND'
                             ? 'bg-amber-600 text-white border-amber-600 shadow-xs'
                             : 'bg-white text-neutral-700 border-neutral-200 hover:bg-neutral-50'
                         }`}
                       >
-                        ⚠ Ada Temuan Fisik / Kerusakan
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Ada Temuan Fisik / Kerusakan</span>
                       </button>
                     </div>
 
@@ -1000,6 +1019,45 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                     />
                   </div>
                 )}
+              </div>
+            )}
+
+            {/* Read-only Produk Kamar Summary when task has complimentary_restock_meta */}
+            {isComplete && task.complimentary_restock_meta && (
+              <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-bold text-neutral-900 flex items-center gap-1.5">
+                    <Package className="w-4 h-4 text-[#1b4332]" />
+                    <span>Produk Kamar yang Dimasukkan (Complimentary &amp; Minibar)</span>
+                  </div>
+                  {task.complimentary_restock_meta.processed_by && (
+                    <span className="text-[10px] text-neutral-500">
+                      Oleh: <strong>{task.complimentary_restock_meta.processed_by}</strong>
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {(task.complimentary_restock_meta.complimentary_items || []).map((c, idx) => (
+                    <span
+                      key={`comp-${idx}`}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold text-[11px]"
+                    >
+                      <Droplets className="w-3 h-3 text-emerald-700" />
+                      <span>{c.name}</span>
+                      <span className="font-mono font-bold text-emerald-800">&times;{c.quantity}</span>
+                    </span>
+                  ))}
+                  {(task.complimentary_restock_meta.stocked_minibar_items || []).map((m, idx) => (
+                    <span
+                      key={`mb-${idx}`}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-[11px]"
+                    >
+                      <CupSoda className="w-3 h-3 text-amber-700" />
+                      <span>{m.name}</span>
+                      <span className="font-mono font-bold text-amber-800">&times;{m.quantity}</span>
+                    </span>
+                  ))}
+                </div>
               </div>
             )}
 

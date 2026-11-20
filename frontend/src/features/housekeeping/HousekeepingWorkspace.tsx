@@ -11,7 +11,19 @@ import {
   Wrench,
   Plus,
   RefreshCw,
-  Settings
+  Settings,
+  Droplets,
+  CupSoda,
+  Package,
+  Sparkles,
+  SearchCheck,
+  ExternalLink,
+  X,
+  Calendar,
+  ChevronLeft,
+  ChevronRight,
+  GripHorizontal,
+  CheckCircle2
 } from 'lucide-react';
 import type {
   HousekeepingTaskRecord,
@@ -306,6 +318,28 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
   const [isMinibarSettingsModalOpen, setIsMinibarSettingsModalOpen] = useState<boolean>(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState<boolean>(false);
+
+  // Room Product Detail & Direct Edit Modal State
+  const [roomProductModalTarget, setRoomProductModalTarget] = useState<{
+    room_id: number;
+    room_number: string;
+    room_type_name?: string | null;
+    room_status?: string | null;
+    meta?: any;
+  } | null>(null);
+  const [roomProductCompItems, setRoomProductCompItems] = useState<
+    Array<{ menu_item_id: number; name: string; sku: string; quantity: number; base_unit_code: string }>
+  >([]);
+  const [roomProductMinibarItems, setRoomProductMinibarItems] = useState<
+    Array<{ menu_item_id: number; name: string; sku: string; quantity: number; unit_price: number; base_unit_code: string }>
+  >([]);
+  const [roomProductCompDefaults, setRoomProductCompDefaults] = useState<any[]>([]);
+  const [roomProductMinibarDefaults, setRoomProductMinibarDefaults] = useState<any[]>([]);
+  const [isRoomProductLoading, setIsRoomProductLoading] = useState<boolean>(false);
+  const [isRoomProductSaving, setIsRoomProductSaving] = useState<boolean>(false);
+  const [roomProductToast, setRoomProductToast] = useState<string | null>(null);
+  const [selectedAddRoomCompId, setSelectedAddRoomCompId] = useState<string>('');
+  const [selectedAddRoomMinibarId, setSelectedAddRoomMinibarId] = useState<string>('');
 
   // History Tab Specific States
   const [historyPreset, setHistoryPreset] = useState<'today' | 'yesterday' | 'custom' | '7days' | '30days' | 'this_month' | 'all'>('today');
@@ -824,6 +858,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                 inspected_by_name: r.last_inspected_by_name || null,
                 last_cleaned_at: r.last_cleaned_at || null,
                 last_inspected_at: r.last_inspected_at || null,
+                complimentary_restock_meta: r.complimentary_restock_meta || null,
                 source_type: 'ROOM',
                 created_at: new Date().toISOString(),
                 updated_at: new Date().toISOString()
@@ -893,6 +928,189 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
     return source;
   }, [tasks, dailyRooms, rooms, historyTasks, activeTab, metricFilter, statusFilter, searchTerm, propertyId, currentUserName, activeRoomBlocks]);
+
+  // Open Detail & Direct Edit Produk Kamar Modal
+  const openRoomProductModal = async (roomObj: {
+    room_id: number;
+    room_number: string;
+    room_type_name?: string | null;
+    room_status?: string | null;
+    meta?: any;
+  }) => {
+    setRoomProductModalTarget(roomObj);
+    setRoomProductToast(null);
+    setSelectedAddRoomCompId('');
+    setSelectedAddRoomMinibarId('');
+    setIsRoomProductLoading(true);
+
+    try {
+      const res = await authenticatedFetch(
+        `${apiBaseUrl}/housekeeping/minibar-catalog?property_id=${propertyId}&room_id=${roomObj.room_id}`
+      );
+      const json = await res.json().catch(() => ({}));
+      const compDefs = Array.isArray(json?.data?.complimentary_defaults) ? json.data.complimentary_defaults : [];
+      const mbDefs = Array.isArray(json?.data?.minibar_defaults) ? json.data.minibar_defaults : [];
+      setRoomProductCompDefaults(compDefs);
+      setRoomProductMinibarDefaults(mbDefs);
+
+      const existingComp = Array.isArray(roomObj.meta?.complimentary_items)
+        ? roomObj.meta.complimentary_items.filter((x: any) => Number(x.quantity) > 0)
+        : [];
+      const existingMb = Array.isArray(roomObj.meta?.stocked_minibar_items)
+        ? roomObj.meta.stocked_minibar_items.filter((x: any) => Number(x.quantity) > 0)
+        : [];
+
+      if (existingComp.length > 0) {
+        setRoomProductCompItems(
+          existingComp.map((c: any) => ({
+            menu_item_id: Number(c.menu_item_id),
+            name: String(c.name || ''),
+            sku: String(c.sku || ''),
+            quantity: Number(c.quantity || 1),
+            base_unit_code: String(c.base_unit_code || 'PCS')
+          }))
+        );
+      } else {
+        setRoomProductCompItems(
+          compDefs.map((d: any) => ({
+            menu_item_id: Number(d.menu_item_id),
+            name: String(d.item_name || d.name || ''),
+            sku: String(d.sku || ''),
+            quantity: Number(d.standard_qty || 1),
+            base_unit_code: String(d.base_unit_code || 'PCS')
+          }))
+        );
+      }
+
+      if (existingMb.length > 0) {
+        setRoomProductMinibarItems(
+          existingMb.map((m: any) => ({
+            menu_item_id: Number(m.menu_item_id),
+            name: String(m.name || ''),
+            sku: String(m.sku || ''),
+            quantity: Number(m.quantity || 1),
+            unit_price: Number(m.unit_price || 0),
+            base_unit_code: String(m.base_unit_code || 'PCS')
+          }))
+        );
+      } else {
+        setRoomProductMinibarItems(
+          mbDefs.map((d: any) => ({
+            menu_item_id: Number(d.menu_item_id),
+            name: String(d.item_name || d.name || ''),
+            sku: String(d.sku || ''),
+            quantity: Number(d.stocked_qty ?? d.standard_qty ?? 1),
+            unit_price: Number(d.unit_price || 0),
+            base_unit_code: String(d.base_unit_code || 'PCS')
+          }))
+        );
+      }
+    } catch {
+      // non-fatal
+    } finally {
+      setIsRoomProductLoading(false);
+    }
+  };
+
+  const handleAdjustRoomCompItem = (
+    prod: { menu_item_id: number; name: string; sku?: string; base_unit_code?: string },
+    delta: number
+  ) => {
+    setRoomProductCompItems((prev) => {
+      const existing = prev.find((it) => it.menu_item_id === prod.menu_item_id);
+      if (existing) {
+        const nextQty = Math.max(0, existing.quantity + delta);
+        return prev
+          .map((it) => (it.menu_item_id === prod.menu_item_id ? { ...it, quantity: nextQty } : it))
+          .filter((it) => it.quantity > 0);
+      }
+      if (delta > 0) {
+        return [
+          ...prev,
+          {
+            menu_item_id: prod.menu_item_id,
+            name: prod.name,
+            sku: prod.sku || '',
+            quantity: delta,
+            base_unit_code: prod.base_unit_code || 'PCS'
+          }
+        ];
+      }
+      return prev;
+    });
+  };
+
+  const handleAdjustRoomMinibarItem = (
+    prod: { menu_item_id: number; name: string; sku?: string; unit_price: number; base_unit_code?: string },
+    delta: number
+  ) => {
+    setRoomProductMinibarItems((prev) => {
+      const existing = prev.find((it) => it.menu_item_id === prod.menu_item_id);
+      if (existing) {
+        const nextQty = Math.max(0, existing.quantity + delta);
+        return prev
+          .map((it) => (it.menu_item_id === prod.menu_item_id ? { ...it, quantity: nextQty } : it))
+          .filter((it) => it.quantity > 0);
+      }
+      if (delta > 0) {
+        return [
+          ...prev,
+          {
+            menu_item_id: prod.menu_item_id,
+            name: prod.name,
+            sku: prod.sku || '',
+            quantity: delta,
+            unit_price: Number(prod.unit_price || 0),
+            base_unit_code: prod.base_unit_code || 'PCS'
+          }
+        ];
+      }
+      return prev;
+    });
+  };
+
+  const handleSaveRoomProducts = async () => {
+    if (!roomProductModalTarget) return;
+    setIsRoomProductSaving(true);
+    setRoomProductToast(null);
+    try {
+      const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/minibar-stock-ready-rooms`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          room_ids: [roomProductModalTarget.room_id],
+          complimentary_items: roomProductCompItems.map((it) => ({
+            menu_item_id: it.menu_item_id,
+            quantity: it.quantity
+          })),
+          stocked_minibar_items: roomProductMinibarItems.map((it) => ({
+            menu_item_id: it.menu_item_id,
+            quantity: it.quantity,
+            unit_price: it.unit_price
+          })),
+          actor_name: currentUserName
+        })
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(json.message || 'Gagal menyimpan produk kamar');
+      }
+      setRoomProductToast(`Produk Kamar ${roomProductModalTarget.room_number} berhasil disimpan.`);
+      await fetchDailyOperations(true);
+      if (activeTab === 'history') {
+        await fetchHistory(historyPreset, includeArchived, dateStr);
+      }
+      setTimeout(() => {
+        setRoomProductModalTarget(null);
+        setRoomProductToast(null);
+      }, 900);
+    } catch (err: any) {
+      alert(err.message || 'Gagal menyimpan produk kamar');
+    } finally {
+      setIsRoomProductSaving(false);
+    }
+  };
 
   // Actions
   const handleAcknowledge = async (task: HousekeepingTaskRecord) => {
@@ -1227,9 +1445,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
             </button>
             <div className="relative flex items-center">
               <div className="absolute left-2.5 text-neutral-500 pointer-events-none">
-                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                </svg>
+                <Calendar className="w-3.5 h-3.5" />
               </div>
               <input
                 type="date"
@@ -1293,7 +1509,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
               <span className="text-xs font-bold text-neutral-700">Ringkasan Status Kamar</span>
               {isReorderMode && (
                 <span className="text-[11px] font-medium text-amber-700 bg-amber-50 border border-amber-200 px-2 py-0.5 rounded-md flex items-center gap-1">
-                  Mode Atur Posisi: Geser dengan tombol ◀ / ▶ atau seret (drag & drop)
+                  Mode Atur Posisi: Geser dengan tombol panah atau seret (drag &amp; drop)
                 </span>
               )}
             </div>
@@ -1360,7 +1576,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                             className="p-1 rounded hover:bg-neutral-200 disabled:opacity-20 text-neutral-700 cursor-pointer disabled:cursor-not-allowed"
                             title="Geser ke kiri"
                           >
-                            ◀
+                            <ChevronLeft className="w-3 h-3" />
                           </button>
                           <button
                             type="button"
@@ -1369,7 +1585,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                             className="p-1 rounded hover:bg-neutral-200 disabled:opacity-20 text-neutral-700 cursor-pointer disabled:cursor-not-allowed"
                             title="Geser ke kanan"
                           >
-                            ▶
+                            <ChevronRight className="w-3 h-3" />
                           </button>
                         </div>
                       </div>
@@ -1378,8 +1594,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                         <div className={`text-xl font-bold ${def.textClass} mt-0.5`}>{countVal}</div>
                         <div className="text-[10px] text-neutral-400 mt-0.5">{def.sublabel}</div>
                       </div>
-                      <div className="mt-2 pt-1 text-[9px] text-amber-700/80 font-medium text-center bg-amber-50/80 rounded py-0.5">
-                        ⋮⋮ Tarik (Drag)
+                      <div className="mt-2 pt-1 text-[9px] text-amber-700/80 font-medium text-center bg-amber-50/80 rounded py-0.5 flex items-center justify-center gap-1">
+                        <GripHorizontal className="w-3 h-3" />
+                        <span>Tarik (Drag)</span>
                       </div>
                     </div>
                   ) : (
@@ -1396,8 +1613,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                       <div className="flex items-center justify-between">
                         <div className="text-[11px] font-semibold text-neutral-500 uppercase tracking-wider">{def.label}</div>
                         {def.key === 'MAINTENANCE' && (
-                          <span className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity text-amber-700 font-bold">
-                            Buka ↗
+                          <span className="text-[10px] opacity-0 group-hover:opacity-100 transition-opacity text-amber-700 font-bold inline-flex items-center gap-0.5">
+                            <span>Buka</span>
+                            <ExternalLink className="w-2.5 h-2.5" />
                           </span>
                         )}
                       </div>
@@ -1637,6 +1855,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                   ) : (
                     <th className="py-2.5 px-3">Room Attendant / PIC</th>
                   )}
+                  <th className="py-2.5 px-3 text-emerald-900">Produk Kamar</th>
                   <th className="py-2.5 px-3">Durasi</th>
                   <th className="py-2.5 px-3">Next Arrival</th>
                   <th className="py-2.5 px-3 text-right">Aksi</th>
@@ -1663,6 +1882,19 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                     || (t.task_type === 'FINAL_INSPECTION' && t.status === 'DONE' && !isGenericPic ? rawPic : '-');
 
                   const activeBlockForRoom = t.room_id ? activeRoomBlocks.find((b) => Number(b.room_id) === Number(t.room_id)) : undefined;
+                  const roomMeta = t.complimentary_restock_meta || targetRoom?.complimentary_restock_meta || null;
+                  const compItems = Array.isArray(roomMeta?.complimentary_items)
+                    ? roomMeta.complimentary_items.filter((x: any) => Number(x.quantity) > 0)
+                    : [];
+                  const mbItems = Array.isArray(roomMeta?.stocked_minibar_items)
+                    ? roomMeta.stocked_minibar_items.filter((x: any) => Number(x.quantity) > 0)
+                    : [];
+                  const combinedProductChips = [
+                    ...mbItems.map((m: any) => ({ ...m, kind: 'MINIBAR' as const })),
+                    ...compItems.map((c: any) => ({ ...c, kind: 'COMP' as const }))
+                  ];
+                  const visibleProductChips = combinedProductChips.slice(0, 3);
+                  const hiddenProductCount = Math.max(0, combinedProductChips.length - visibleProductChips.length);
 
                   return (
                     <tr
@@ -1743,7 +1975,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             {roomAttendant !== '-' ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold text-xs">
-                                <span>🧹</span> {roomAttendant}
+                                <Sparkles className="w-3 h-3 text-emerald-700 shrink-0" />
+                                <span>{roomAttendant}</span>
                               </span>
                             ) : (
                               <span className="text-neutral-400 italic text-xs">-</span>
@@ -1752,7 +1985,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                           <td className="py-2.5 px-3 whitespace-nowrap">
                             {roomInspector !== '-' ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 font-semibold text-xs">
-                                <span>🔍</span> {roomInspector}
+                                <SearchCheck className="w-3 h-3 text-amber-700 shrink-0" />
+                                <span>{roomInspector}</span>
                               </span>
                             ) : (
                               <span className="text-neutral-400 italic text-xs">-</span>
@@ -1763,7 +1997,8 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                         <td className="py-2.5 px-3 whitespace-nowrap">
                           {roomAttendant !== '-' ? (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-800 font-semibold text-xs">
-                              <span>🧹</span> {roomAttendant}
+                              <Sparkles className="w-3 h-3 text-emerald-700 shrink-0" />
+                              <span>{roomAttendant}</span>
                             </span>
                           ) : (
                             <span className="font-semibold text-neutral-800">{displayPic}</span>
@@ -1798,6 +2033,76 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                           )}
                         </td>
                       )}
+
+                      {/* Produk Kamar (Complimentary & Minibar) */}
+                      <td
+                        className="py-2.5 px-3 max-w-[290px]"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          if (t.room_id) {
+                            openRoomProductModal({
+                              room_id: Number(t.room_id),
+                              room_number: String(t.room_number || ''),
+                              room_type_name: t.room_type_name || targetRoom?.room_type_name,
+                              room_status: t.room_status || targetRoom?.status,
+                              meta: roomMeta
+                            });
+                          }
+                        }}
+                      >
+                        {!t.room_id ? (
+                          <span className="text-neutral-400 text-[10px]">-</span>
+                        ) : combinedProductChips.length > 0 ? (
+                          <div
+                            className="space-y-1 p-1 -m-1 rounded-lg hover:bg-emerald-50/60 transition-colors cursor-pointer"
+                            title="Klik untuk melihat detail atau mengubah isi produk kamar ini"
+                          >
+                            <div className="flex flex-wrap gap-1">
+                              {visibleProductChips.map((prod, idx) => (
+                                <span
+                                  key={`${prod.menu_item_id}-${idx}`}
+                                  className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-semibold ${
+                                    prod.kind === 'MINIBAR'
+                                      ? 'bg-amber-50 border-amber-200 text-amber-900'
+                                      : 'bg-emerald-50 border-emerald-200 text-emerald-900'
+                                  }`}
+                                >
+                                  {prod.kind === 'MINIBAR' ? (
+                                    <CupSoda className="w-2.5 h-2.5 text-amber-700 shrink-0" />
+                                  ) : (
+                                    <Droplets className="w-2.5 h-2.5 text-emerald-700 shrink-0" />
+                                  )}
+                                  <span className="truncate max-w-[95px]">{prod.name}</span>
+                                  <span className="font-mono font-bold">&times;{prod.quantity}</span>
+                                </span>
+                              ))}
+                              {hiddenProductCount > 0 && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-neutral-100 border border-neutral-200 text-neutral-700 text-[10px] font-bold">
+                                  +{hiddenProductCount} item
+                                </span>
+                              )}
+                            </div>
+                            <div className="text-[10px] text-neutral-500 flex items-center gap-1.5">
+                              {mbItems.length > 0 && (
+                                <span className="text-amber-800 font-medium">{mbItems.length} Minibar</span>
+                              )}
+                              {mbItems.length > 0 && compItems.length > 0 && <span>&bull;</span>}
+                              {compItems.length > 0 && (
+                                <span className="text-emerald-800 font-medium">{compItems.length} Complimentary</span>
+                              )}
+                            </div>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-neutral-50 hover:bg-emerald-50 border border-neutral-200 hover:border-emerald-300 text-neutral-600 hover:text-emerald-800 text-[10px] font-semibold transition-colors cursor-pointer"
+                            title="Klik untuk mengisi atau mengecek produk kamar ini"
+                          >
+                            <Package className="w-3 h-3" />
+                            <span>Isi / Cek Produk</span>
+                          </button>
+                        )}
+                      </td>
 
                       {/* Duration */}
                       <td className="py-2.5 px-3 text-neutral-600 whitespace-nowrap font-mono">
@@ -2086,9 +2391,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setIsOoModalOpen(false)}
-                className="text-neutral-400 hover:text-neutral-600 text-lg leading-none cursor-pointer"
+                className="p-1 text-neutral-400 hover:text-neutral-600 rounded-lg hover:bg-neutral-100 cursor-pointer"
               >
-                &times;
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -2234,9 +2539,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setReleaseBlockTarget(null)}
-                className="text-neutral-400 hover:text-neutral-600 text-lg leading-none cursor-pointer"
+                className="p-1 text-neutral-400 hover:text-neutral-600 rounded-lg hover:bg-neutral-100 cursor-pointer"
               >
-                &times;
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -2301,9 +2606,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
               <button
                 type="button"
                 onClick={() => setHistoryEditTask(null)}
-                className="text-neutral-400 hover:text-neutral-600 text-lg leading-none"
+                className="p-1 text-neutral-400 hover:text-neutral-600 rounded-lg hover:bg-neutral-100 cursor-pointer"
               >
-                &times;
+                <X className="w-4 h-4" />
               </button>
             </div>
 
@@ -2395,6 +2700,246 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         </div>
       )}
 
+      {/* Detail & Edit Produk Kamar Modal (Klik Kolom Produk Kamar) */}
+      {roomProductModalTarget && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setRoomProductModalTarget(null)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-neutral-200 w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-emerald-100 text-[#1b4332]">
+                  <Package className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900">
+                    Produk Kamar {roomProductModalTarget.room_number}
+                  </h3>
+                  <p className="text-[11px] text-neutral-500">
+                    {roomProductModalTarget.room_type_name || 'Kamar Hotel'}
+                    {roomProductModalTarget.meta?.processed_by
+                      ? ` • Diisi oleh ${roomProductModalTarget.meta.processed_by}`
+                      : ' • Detail & Pengisian Produk Kamar'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRoomProductModalTarget(null)}
+                className="p-1.5 text-neutral-400 hover:text-neutral-700 rounded-lg hover:bg-neutral-200/60 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-y-auto space-y-4 text-xs">
+              {roomProductToast && (
+                <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 font-semibold flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" />
+                  <span>{roomProductToast}</span>
+                </div>
+              )}
+
+              {isRoomProductLoading ? (
+                <div className="py-8 text-center text-neutral-500 flex flex-col items-center gap-2">
+                  <RefreshCw className="w-5 h-5 animate-spin text-[#1b4332]" />
+                  <span>Memuat daftar produk kamar...</span>
+                </div>
+              ) : (
+                <>
+                  {/* 1. Produk Complimentary Kamar */}
+                  <div className="bg-white rounded-xl border border-emerald-200 overflow-hidden">
+                    <div className="px-3 py-2 bg-emerald-50 border-b border-emerald-200 font-bold text-emerald-950 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Droplets className="w-3.5 h-3.5 text-emerald-700" />
+                        <span>1. Produk Complimentary Kamar (Gratis)</span>
+                      </span>
+                      <span>Jumlah</span>
+                    </div>
+                    {roomProductCompItems.length === 0 ? (
+                      <div className="p-3 text-center text-neutral-500 text-[11px]">
+                        Belum ada produk complimentary di kamar ini.
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-neutral-100">
+                        {roomProductCompItems.map((it) => (
+                          <div key={it.menu_item_id} className="px-3 py-2 flex items-center justify-between gap-2">
+                            <div className="font-semibold text-neutral-800 truncate flex-1">{it.name}</div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustRoomCompItem(it, -1)}
+                                className="w-6 h-6 rounded border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 font-bold text-neutral-700 cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="w-6 text-center font-bold text-emerald-900">{it.quantity}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustRoomCompItem(it, 1)}
+                                className="w-6 h-6 rounded border border-emerald-400 bg-emerald-50 hover:bg-emerald-100 font-bold text-emerald-800 cursor-pointer"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {roomProductCompDefaults.some(
+                      (c: any) => !roomProductCompItems.some((it) => Number(it.menu_item_id) === Number(c.menu_item_id))
+                    ) && (
+                      <div className="p-2 bg-neutral-50 border-t border-neutral-200">
+                        <select
+                          value={selectedAddRoomCompId}
+                          onChange={(e) => {
+                            const pid = Number(e.target.value);
+                            const found = roomProductCompDefaults.find((c: any) => Number(c.menu_item_id) === pid);
+                            if (found) {
+                              handleAdjustRoomCompItem(
+                                {
+                                  menu_item_id: found.menu_item_id,
+                                  name: found.item_name || found.name,
+                                  sku: found.sku,
+                                  base_unit_code: found.base_unit_code
+                                },
+                                Number(found.standard_qty || 1)
+                              );
+                            }
+                            setSelectedAddRoomCompId('');
+                          }}
+                          className="w-full text-[11px] bg-white border border-neutral-300 rounded-lg px-2 py-1 text-neutral-700 cursor-pointer"
+                        >
+                          <option value="">+ Tambah Produk Complimentary Standar Kamar...</option>
+                          {roomProductCompDefaults
+                            .filter(
+                              (c: any) =>
+                                !roomProductCompItems.some((it) => Number(it.menu_item_id) === Number(c.menu_item_id))
+                            )
+                            .map((c: any) => (
+                              <option key={c.menu_item_id} value={c.menu_item_id}>
+                                {c.item_name || c.name} (Standar: {c.standard_qty} {c.base_unit_code})
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 2. Produk Minibar Berbayar di Kamar */}
+                  <div className="bg-white rounded-xl border border-amber-200 overflow-hidden">
+                    <div className="px-3 py-2 bg-amber-50 border-b border-amber-200 font-bold text-amber-950 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <CupSoda className="w-3.5 h-3.5 text-amber-700" />
+                        <span>2. Isi Kulkas Minibar Berbayar di Kamar</span>
+                      </span>
+                      <span>Jumlah</span>
+                    </div>
+                    {roomProductMinibarItems.length === 0 ? (
+                      <div className="p-3 text-center text-neutral-500 text-[11px]">
+                        Belum ada produk minibar berbayar di kamar ini.
+                      </div>
+                    ) : (
+                      <div className="divide-y divide-neutral-100">
+                        {roomProductMinibarItems.map((it) => (
+                          <div key={it.menu_item_id} className="px-3 py-2 flex items-center justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <div className="font-semibold text-neutral-800 truncate">{it.name}</div>
+                              <div className="text-[10px] text-neutral-500 font-mono">
+                                Rp {Number(it.unit_price || 0).toLocaleString('id-ID')}
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustRoomMinibarItem(it, -1)}
+                                className="w-6 h-6 rounded border border-neutral-300 bg-neutral-50 hover:bg-neutral-100 font-bold text-neutral-700 cursor-pointer"
+                              >
+                                -
+                              </button>
+                              <span className="w-6 text-center font-bold text-amber-900">{it.quantity}</span>
+                              <button
+                                type="button"
+                                onClick={() => handleAdjustRoomMinibarItem(it, 1)}
+                                className="w-6 h-6 rounded border border-amber-400 bg-amber-50 hover:bg-amber-100 font-bold text-amber-900 cursor-pointer"
+                              >
+                                +
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {roomProductMinibarDefaults.some(
+                      (m: any) => !roomProductMinibarItems.some((it) => Number(it.menu_item_id) === Number(m.menu_item_id))
+                    ) && (
+                      <div className="p-2 bg-neutral-50 border-t border-neutral-200">
+                        <select
+                          value={selectedAddRoomMinibarId}
+                          onChange={(e) => {
+                            const pid = Number(e.target.value);
+                            const found = roomProductMinibarDefaults.find((m: any) => Number(m.menu_item_id) === pid);
+                            if (found) {
+                              handleAdjustRoomMinibarItem(
+                                {
+                                  menu_item_id: found.menu_item_id,
+                                  name: found.item_name || found.name,
+                                  sku: found.sku,
+                                  unit_price: Number(found.unit_price || 0),
+                                  base_unit_code: found.base_unit_code
+                                },
+                                Number(found.standard_qty || 1)
+                              );
+                            }
+                            setSelectedAddRoomMinibarId('');
+                          }}
+                          className="w-full text-[11px] bg-white border border-neutral-300 rounded-lg px-2 py-1 text-neutral-700 cursor-pointer"
+                        >
+                          <option value="">+ Tambah Produk Minibar Standar Kamar...</option>
+                          {roomProductMinibarDefaults
+                            .filter(
+                              (m: any) =>
+                                !roomProductMinibarItems.some((it) => Number(it.menu_item_id) === Number(m.menu_item_id))
+                            )
+                            .map((m: any) => (
+                              <option key={m.menu_item_id} value={m.menu_item_id}>
+                                {m.item_name || m.name} — Rp {Number(m.unit_price || 0).toLocaleString('id-ID')} (Standar: {m.standard_qty} {m.base_unit_code})
+                              </option>
+                            ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
+            <div className="px-5 py-3.5 border-t border-neutral-200 bg-neutral-50 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setRoomProductModalTarget(null)}
+                className="px-3.5 py-2 rounded-xl text-xs font-semibold text-neutral-700 bg-white border border-neutral-300 hover:bg-neutral-100 cursor-pointer"
+              >
+                Tutup
+              </button>
+              <button
+                type="button"
+                disabled={isRoomProductSaving || isRoomProductLoading}
+                onClick={handleSaveRoomProducts}
+                className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] disabled:opacity-50 flex items-center gap-1.5 shadow-xs cursor-pointer"
+              >
+                <Check className="w-3.5 h-3.5" />
+                <span>{isRoomProductSaving ? 'Menyimpan...' : 'Simpan Produk Kamar'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Maintenance & Room Findings Modal */}
       <MaintenanceIssuesModal
         isOpen={isMaintenanceModalOpen}
@@ -2429,9 +2974,10 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                       setIsMinibarSettingsModalOpen(false);
                       onNavigateToSettings('housekeeping');
                     }}
-                    className="px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-lg cursor-pointer"
+                    className="px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-lg cursor-pointer inline-flex items-center gap-1"
                   >
-                    Pengaturan Checklist &amp; Modul HK ↗
+                    <span>Pengaturan Checklist &amp; Modul HK</span>
+                    <ExternalLink className="w-3 h-3" />
                   </button>
                 )}
                 <button
@@ -2439,7 +2985,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                   onClick={() => setIsMinibarSettingsModalOpen(false)}
                   className="p-1.5 text-neutral-400 hover:text-neutral-700 rounded-lg hover:bg-neutral-200/60 cursor-pointer"
                 >
-                  ✕
+                  <X className="w-4 h-4" />
                 </button>
               </div>
             </div>

@@ -1047,6 +1047,8 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
         roomIds: Array.isArray(req.body.room_ids) ? req.body.room_ids : null,
         applyAllReadyRooms: req.body.apply_all_ready_rooms === true,
         deductComplimentary: req.body.deduct_complimentary !== false,
+        explicitComplimentaryItems: Array.isArray(req.body.complimentary_items) ? req.body.complimentary_items : null,
+        explicitStockedMinibarItems: Array.isArray(req.body.stocked_minibar_items) ? req.body.stocked_minibar_items : null,
         actorUserId: req.body.actor_id ? String(req.body.actor_id) : null,
         actorName: req.body.actor_name || 'Housekeeping',
       });
@@ -1338,10 +1340,24 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
       }
 
       const query = `
-        SELECT t.*, r.room_number, COALESCE(rt.name, r.name) as room_type_name
+        SELECT
+          t.*,
+          r.room_number,
+          COALESCE(rt.name, r.name) as room_type_name,
+          COALESCE(t.complimentary_restock_meta, latest_rm.complimentary_restock_meta) AS complimentary_restock_meta
         FROM housekeeping_tasks t
         LEFT JOIN rooms r ON r.id = t.room_id
         LEFT JOIN room_types rt ON rt.id = r.room_type_id
+        LEFT JOIN LATERAL (
+          SELECT ht2.complimentary_restock_meta
+          FROM housekeeping_tasks ht2
+          WHERE ht2.property_id = t.property_id
+            AND ht2.room_id = t.room_id
+            AND ht2.complimentary_restock_meta IS NOT NULL
+            AND (ht2.is_archived IS NULL OR ht2.is_archived = FALSE)
+          ORDER BY ht2.completed_at DESC NULLS LAST, ht2.id DESC
+          LIMIT 1
+        ) latest_rm ON t.room_id IS NOT NULL
         WHERE ${conditions.join(' AND ')}
         ORDER BY t.completed_at DESC NULLS LAST, t.updated_at DESC
         LIMIT 300

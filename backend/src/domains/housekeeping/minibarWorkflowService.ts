@@ -993,6 +993,8 @@ export async function stockReadyRoomsMinibarAndComplimentary(
     roomIds?: number[] | null;
     applyAllReadyRooms?: boolean;
     deductComplimentary?: boolean;
+    explicitComplimentaryItems?: MinibarConsumedItemInput[] | null;
+    explicitStockedMinibarItems?: MinibarConsumedItemInput[] | null;
     actorUserId?: string | null;
     actorName?: string | null;
   }
@@ -1047,16 +1049,20 @@ export async function stockReadyRoomsMinibarAndComplimentary(
 
   for (const rm of targetRooms) {
     const ctx = await getMinibarCatalogAndRoomContext(client, propertyId, { roomId: rm.id });
-    const rawComp = ctx.complimentary_defaults.map((d) => ({
-      menu_item_id: d.menu_item_id,
-      quantity: d.standard_qty,
-      unit_price: 0,
-    }));
-    const rawMb = ctx.minibar_defaults.map((d) => ({
-      menu_item_id: d.menu_item_id,
-      quantity: d.standard_qty,
-      unit_price: d.unit_price,
-    }));
+    const rawComp = Array.isArray(params.explicitComplimentaryItems)
+      ? params.explicitComplimentaryItems
+      : ctx.complimentary_defaults.map((d) => ({
+          menu_item_id: d.menu_item_id,
+          quantity: d.standard_qty,
+          unit_price: 0,
+        }));
+    const rawMb = Array.isArray(params.explicitStockedMinibarItems)
+      ? params.explicitStockedMinibarItems
+      : ctx.minibar_defaults.map((d) => ({
+          menu_item_id: d.menu_item_id,
+          quantity: d.standard_qty,
+          unit_price: d.unit_price,
+        }));
 
     const compSnapshot = await normalizeMinibarItemsList(client, propertyId, rawComp, 'COMPLIMENTARY');
     const mbSnapshot = await normalizeMinibarItemsList(client, propertyId, rawMb, 'PAID_MINIBAR');

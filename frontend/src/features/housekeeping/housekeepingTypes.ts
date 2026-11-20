@@ -138,6 +138,39 @@ export interface HousekeepingTaskRecord {
     required_completed: number;
   };
   checklist_items?: TaskChecklistItem[];
+  complimentary_restock_meta?: {
+    processed_at?: string | null;
+    processed_by?: string | null;
+    source?: string | null;
+    location_code?: string | null;
+    complimentary_items?: Array<{
+      menu_item_id: number;
+      name: string;
+      sku?: string;
+      quantity: number;
+      unit_price?: number;
+      base_unit_code?: string;
+    }>;
+    stocked_minibar_items?: Array<{
+      menu_item_id: number;
+      name: string;
+      sku?: string;
+      quantity: number;
+      unit_price?: number;
+      base_unit_code?: string;
+    }>;
+  } | null;
+  minibar_items_json?: Array<{
+    menu_item_id: number;
+    name: string;
+    sku?: string;
+    quantity: number;
+    unit_price: number;
+    subtotal: number;
+    base_unit_code?: string;
+  }> | null;
+  minibar_billing_status?: string | null;
+  minibar_billing_meta?: any | null;
 }
 
 export interface HousekeepingDailyMetrics {
