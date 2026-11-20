@@ -1826,6 +1826,28 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
 
           await client.query(`SAVEPOINT sp_import_${idx}`);
           try {
+            // Free up item_code / barcode on any soft-deleted rows so unique constraints never block re-imports
+            if (rawCode) {
+              await client.query(
+                `UPDATE pos_menu_items
+                    SET item_code = LEFT(item_code || '-DEL-' || id::text, 50)
+                  WHERE property_id = $1
+                    AND COALESCE(is_deleted, FALSE) = TRUE
+                    AND UPPER(BTRIM(item_code)) = $2`,
+                [propertyId, rawCode]
+              );
+            }
+            if (rawBarcode) {
+              await client.query(
+                `UPDATE pos_menu_items
+                    SET barcode = NULL
+                  WHERE property_id = $1
+                    AND COALESCE(is_deleted, FALSE) = TRUE
+                    AND BTRIM(barcode) = $2`,
+                [propertyId, rawBarcode]
+              );
+            }
+
             // 1. Check if item exists by item_code or normalized name among non-deleted items
             let existingItem: any = null;
             if (rawCode) {
@@ -1843,9 +1865,16 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                   WHERE property_id = $1
                     AND COALESCE(is_deleted, FALSE) = FALSE
                     AND LOWER(REGEXP_REPLACE(BTRIM(name), '\\s+', ' ', 'g')) = LOWER($2)
-                  ORDER BY CASE WHEN COALESCE(product_type, 'FINISHED_GOOD') = $3 THEN 0 ELSE 1 END, id ASC
+                  ORDER BY
+                    CASE
+                      WHEN $4::text IS NOT NULL AND UPPER(BTRIM(COALESCE(item_code, ''))) = $4 THEN 0
+                      WHEN $4::text IS NOT NULL AND UPPER(BTRIM(COALESCE(item_code, ''))) LIKE 'HK%' THEN 1
+                      WHEN COALESCE(product_type, 'FINISHED_GOOD') = $3 THEN 2
+                      ELSE 3
+                    END,
+                    id ASC
                   LIMIT 1`,
-                [propertyId, rawName, productTypeVal]
+                [propertyId, rawName, productTypeVal, rawCode]
               );
               if ((nameRes.rowCount ?? 0) > 0) {
                 existingItem = nameRes.rows[0];
@@ -1853,11 +1882,9 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
             }
 
             // 2. Enforce import_mode rules before mutating categories or items
-            if (existingItem && importMode === 'CREATE_ONLY') {
-              skippedCount++;
-              await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
-              continue;
-            }
+            // Note: If CREATE_ONLY is chosen, but the existing item has NO stock_balances at the target location yet,
+            // allow binding its opening stock in step 4 instead of silently skipping its stock!
+            const isCreateOnlyExisting = Boolean(existingItem && importMode === 'CREATE_ONLY');
             if (!existingItem && importMode === 'UPDATE_ONLY') {
               skippedCount++;
               await client.query(`RELEASE SAVEPOINT sp_import_${idx}`);
@@ -1905,10 +1932,27 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               const lockStatus = await checkProductBaseUnitLockStatus(client, propertyId, targetProductId, {
                 forMutation: false,
               });
-              const nextBaseUnit = lockStatus.isLocked ? existingItem.base_unit || baseUnitLabel : baseUnitLabel;
-              const nextCanonicalUnit = lockStatus.isLocked
-                ? existingItem.canonical_base_unit_code || canonicalCode
-                : canonicalCode;
+              const hasExistingCanonical = Boolean(existingItem.canonical_base_unit_code);
+              const nextBaseUnit =
+                lockStatus.isLocked || hasExistingCanonical
+                  ? existingItem.base_unit || baseUnitLabel
+                  : baseUnitLabel;
+              const nextCanonicalUnit =
+                lockStatus.isLocked || hasExistingCanonical
+                  ? existingItem.canonical_base_unit_code || canonicalCode
+                  : canonicalCode;
+
+              // Check if rawCode is already taken by a different non-deleted product
+              let safeCodeToSet = rawCode;
+              if (rawCode) {
+                const dupCodeCheck = await client.query(
+                  `SELECT id FROM pos_menu_items WHERE property_id = $1 AND UPPER(BTRIM(item_code)) = $2 AND id <> $3 LIMIT 1`,
+                  [propertyId, rawCode, targetProductId]
+                );
+                if ((dupCodeCheck.rowCount ?? 0) > 0) {
+                  safeCodeToSet = existingItem.item_code || null;
+                }
+              }
 
               await client.query(
                 `UPDATE pos_menu_items
@@ -1927,12 +1971,14 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                         variants = $12::jsonb,
                         average_cost = CASE WHEN $13::numeric IS NOT NULL AND $13::numeric > 0 AND COALESCE(average_cost, 0) = 0 THEN $13::numeric ELSE average_cost END,
                         last_cost = CASE WHEN $13::numeric IS NOT NULL AND $13::numeric > 0 THEN $13::numeric ELSE last_cost END,
-                        description = COALESCE($14, description)
+                        description = COALESCE($14, description),
+                        is_active = TRUE,
+                        is_deleted = FALSE
                   WHERE id = $15 AND property_id = $16`,
                 [
                   rawName,
                   categoryId,
-                  rawCode,
+                  safeCodeToSet,
                   rawBarcode,
                   priceVal,
                   effectiveSellablePos,
@@ -1954,7 +2000,9 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
                   [rawSublocation, propertyId, targetProductId]
                 );
               }
-              updatedCount++;
+              if (!isCreateOnlyExisting) {
+                updatedCount++;
+              }
             } else {
               const generatedCode =
                 rawCode || `PRD-${Date.now().toString().slice(-4)}-${idx + 1}`;
@@ -2089,9 +2137,9 @@ export function createPosMenuItemsBulkImportHandler(deps: PosMenuItemCreateDeps)
               await client
                 .query(
                   `UPDATE pos_menu_items
-                      SET default_location_id = COALESCE(default_location_id, $1)
+                      SET default_location_id = CASE WHEN $4 = TRUE THEN $1 ELSE COALESCE(default_location_id, $1) END
                     WHERE id = $2 AND property_id = $3`,
-                  [uniqueLocIds[0], targetProductId, propertyId]
+                  [uniqueLocIds[0], targetProductId, propertyId, Boolean(rawLocationCodeInput)]
                 )
                 .catch(() => {});
             }

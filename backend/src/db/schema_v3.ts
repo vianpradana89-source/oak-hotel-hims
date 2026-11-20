@@ -7260,4 +7260,217 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     VALUES ('housekeeping_minibar_hkp_workflow_v1')
     ON CONFLICT (version) DO NOTHING;
   `);
+
+  // Migration: Ensure all 19 Minibar HKP products from mini_bar.xlsx exist in pos_menu_items and stock_balances (HKP, 10 PCS)
+  await pool.query(`
+    DO $$
+    DECLARE
+      v_prop_id INT;
+      v_hkp_loc_id INT;
+      v_minibar_cat_id INT;
+      v_prod_id INT;
+      v_op_id INT;
+      r RECORD;
+    BEGIN
+      IF EXISTS (SELECT 1 FROM schema_migrations WHERE version = 'housekeeping_minibar_hkp_seed_excel_v1') THEN
+        RETURN;
+      END IF;
+
+      -- Free up item_code on soft-deleted rows so unique index never blocks active products
+      UPDATE pos_menu_items
+         SET item_code = LEFT(item_code || '-DEL-' || id::text, 50)
+       WHERE COALESCE(is_deleted, FALSE) = TRUE
+         AND item_code IS NOT NULL
+         AND item_code NOT LIKE '%-DEL-%';
+
+      FOR v_prop_id IN SELECT id FROM properties ORDER BY id ASC LOOP
+        -- Ensure HKP stock location exists
+        SELECT id INTO v_hkp_loc_id
+          FROM stock_locations
+         WHERE property_id = v_prop_id
+           AND (UPPER(BTRIM(code)) = 'HKP' OR location_type = 'HK_PANTRY')
+         ORDER BY CASE WHEN UPPER(BTRIM(code)) = 'HKP' THEN 0 ELSE 1 END, id ASC
+         LIMIT 1;
+
+        IF v_hkp_loc_id IS NULL THEN
+          INSERT INTO stock_locations (property_id, code, name, location_type, is_active, notes)
+          VALUES (v_prop_id, 'HKP', 'Husekeeping', 'HK_PANTRY', TRUE, 'Gudang Pantry Housekeeping (Minibar & Complimentary)')
+          RETURNING id INTO v_hkp_loc_id;
+        END IF;
+
+        -- Ensure MINIBAR category exists
+        SELECT id INTO v_minibar_cat_id
+          FROM pos_menu_categories
+         WHERE property_id = v_prop_id
+           AND UPPER(BTRIM(name)) = 'MINIBAR'
+         ORDER BY id ASC
+         LIMIT 1;
+
+        IF v_minibar_cat_id IS NULL THEN
+          INSERT INTO pos_menu_categories (property_id, name, product_type)
+          VALUES (v_prop_id, 'MINIBAR', 'FINISHED_GOOD')
+          RETURNING id INTO v_minibar_cat_id;
+        END IF;
+
+        -- Upsert the 19 Minibar HKP items from mini_bar.xlsx
+        FOR r IN
+          SELECT * FROM (VALUES
+            ('HKP.MN.001',  'MINERAL WATER',       5500,  10),
+            ('HKP.MN.002',  'BINTANG ZERO 0.0',    11000, 10),
+            ('HKP.MN.003',  'COCA COLA',           11000, 10),
+            ('HKP.MN.004',  'COCA COLA ZERO',      11000, 10),
+            ('HKP.MN.005',  'COLLAGENA',           18000, 10),
+            ('HKP.MN.006',  'CLEVO SUSU KOTAK',    4000,  10),
+            ('HKP.MN.007',  'CINCAU HIJAU',        8000,  10),
+            ('HKP.MN.008',  'FANTA',               11000, 10),
+            ('HKP.MN.009',  'HEMAVITON C1000',     9000,  10),
+            ('HKP.MN.010',  'LIANG TEA CAP PANDA', 9000,  10),
+            ('HKP.MN.011',  'LARUTAN ANAK',        9000,  10),
+            ('HKP.MN.0012', 'LARUTAN ANGGUR',      10000, 10),
+            ('HKP.MN.013',  'LARUTAN JERUK',       10000, 10),
+            ('HKP.MN.014',  'LARUTAN JAMBU',       10000, 10),
+            ('HKP.MN.015',  'MILO CALCIUM',        13000, 10),
+            ('HKP.MN.016',  'POLARIS',             8000,  10),
+            ('HKP.MN.017',  'SPRITE',              11000, 10),
+            ('HKP.MN.018',  'TUJUH KURMA',         16000, 10),
+            ('HKP.MN.019',  'YOU C1000',           14000, 10)
+          ) AS t(sku, item_name, sell_price, init_qty)
+        LOOP
+          v_prod_id := NULL;
+
+          -- Find existing by HKP/HK SKU or by exact name in MINIBAR/HKP context
+          SELECT id INTO v_prod_id
+            FROM pos_menu_items
+           WHERE property_id = v_prop_id
+             AND COALESCE(is_deleted, FALSE) = FALSE
+             AND (
+               UPPER(BTRIM(COALESCE(item_code, ''))) = r.sku
+               OR UPPER(BTRIM(COALESCE(item_code, ''))) = REPLACE(r.sku, 'HKP.', 'HK.')
+               OR (
+                 UPPER(BTRIM(name)) = r.item_name
+                 AND (
+                   default_location_id = v_hkp_loc_id
+                   OR UPPER(BTRIM(COALESCE(item_code, ''))) LIKE 'HK%'
+                   OR UPPER(BTRIM(COALESCE(storage_sublocation, ''))) = 'MINIBAR'
+                 )
+               )
+             )
+           ORDER BY
+             CASE
+               WHEN UPPER(BTRIM(COALESCE(item_code, ''))) = r.sku THEN 0
+               WHEN UPPER(BTRIM(COALESCE(item_code, ''))) LIKE 'HK%' THEN 1
+               ELSE 2
+             END,
+             id ASC
+           LIMIT 1;
+
+          IF v_prod_id IS NOT NULL THEN
+            -- Ensure no other row holds r.sku before updating item_code
+            IF NOT EXISTS (
+              SELECT 1 FROM pos_menu_items WHERE property_id = v_prop_id AND UPPER(BTRIM(COALESCE(item_code, ''))) = r.sku AND id <> v_prod_id
+            ) THEN
+              UPDATE pos_menu_items
+                 SET item_code = r.sku,
+                     name = r.item_name,
+                     category_id = v_minibar_cat_id,
+                     price = r.sell_price,
+                     is_active = TRUE,
+                     is_deleted = FALSE,
+                     is_sellable_pos = TRUE,
+                     product_type = 'FINISHED_GOOD',
+                     track_stock = TRUE,
+                     track_inventory = TRUE,
+                     default_location_id = v_hkp_loc_id,
+                     storage_sublocation = 'MINIBAR'
+               WHERE id = v_prod_id AND property_id = v_prop_id;
+            ELSE
+              UPDATE pos_menu_items
+                 SET name = r.item_name,
+                     category_id = v_minibar_cat_id,
+                     price = r.sell_price,
+                     is_active = TRUE,
+                     is_deleted = FALSE,
+                     is_sellable_pos = TRUE,
+                     product_type = 'FINISHED_GOOD',
+                     track_stock = TRUE,
+                     track_inventory = TRUE,
+                     default_location_id = v_hkp_loc_id,
+                     storage_sublocation = 'MINIBAR'
+               WHERE id = v_prod_id AND property_id = v_prop_id;
+            END IF;
+          ELSE
+            INSERT INTO pos_menu_items (
+              property_id, category_id, item_code, name, price,
+              is_active, is_deleted, is_sellable_pos, product_type, product_kind,
+              base_unit, canonical_base_unit_code, track_stock, track_inventory,
+              default_location_id, storage_sublocation, average_cost, last_cost
+            ) VALUES (
+              v_prop_id, v_minibar_cat_id, r.sku, r.item_name, r.sell_price,
+              TRUE, FALSE, TRUE, 'FINISHED_GOOD', 'STANDARD',
+              'Pcs', 'PCS', TRUE, TRUE,
+              v_hkp_loc_id, 'MINIBAR', 0, 0
+            )
+            RETURNING id INTO v_prod_id;
+          END IF;
+
+          -- Ensure stock_balances at HKP exists with 10 PCS if missing or 0
+          IF NOT EXISTS (
+            SELECT 1 FROM stock_balances
+             WHERE property_id = v_prop_id
+               AND product_id = v_prod_id
+               AND location_id = v_hkp_loc_id
+               AND quantity > 0
+          ) THEN
+            INSERT INTO stock_operations (
+              property_id, operation_type, operation_key, payload_fingerprint, notes, metadata, created_at
+            ) VALUES (
+              v_prop_id,
+              'OPENING_BALANCE',
+              'SEED-MB-HKP-P' || v_prop_id || '-I' || v_prod_id,
+              'SEED-MB-HKP-P' || v_prop_id || '-I' || v_prod_id,
+              'Saldo awal Minibar HKP dari import mini_bar.xlsx',
+              '{"source":"EXCEL_IMPORT_SYNC"}'::jsonb,
+              NOW()
+            )
+            ON CONFLICT (property_id, operation_key) DO UPDATE SET notes = EXCLUDED.notes
+            RETURNING id INTO v_op_id;
+
+            IF NOT EXISTS (
+              SELECT 1 FROM stock_movements WHERE operation_id = v_op_id AND product_id = v_prod_id
+            ) THEN
+              INSERT INTO stock_movements (
+                operation_id, property_id, product_id, location_id,
+                quantity_delta, base_unit_code, unit_cost, created_at
+              ) VALUES (
+                v_op_id, v_prop_id, v_prod_id, v_hkp_loc_id,
+                r.init_qty, 'PCS', 0, NOW()
+              );
+            END IF;
+
+            INSERT INTO stock_balances (
+              property_id, product_id, location_id, quantity, storage_sublocation, updated_at
+            ) VALUES (
+              v_prop_id, v_prod_id, v_hkp_loc_id, r.init_qty, 'MINIBAR', NOW()
+            )
+            ON CONFLICT (property_id, product_id, location_id)
+            DO UPDATE SET
+              quantity = GREATEST(stock_balances.quantity, EXCLUDED.quantity),
+              storage_sublocation = 'MINIBAR',
+              updated_at = NOW();
+          ELSE
+            UPDATE stock_balances
+               SET storage_sublocation = COALESCE(NULLIF(BTRIM(storage_sublocation), ''), 'MINIBAR'),
+                   updated_at = NOW()
+             WHERE property_id = v_prop_id
+               AND product_id = v_prod_id
+               AND location_id = v_hkp_loc_id;
+          END IF;
+        END LOOP;
+      END LOOP;
+
+      INSERT INTO schema_migrations (version)
+      VALUES ('housekeeping_minibar_hkp_seed_excel_v1')
+      ON CONFLICT (version) DO NOTHING;
+    END $$;
+  `);
 }
