@@ -33,6 +33,15 @@ export interface PenjualanBidChild {
   pos_open_count?: number;
   unapplied_advance_deposit?: number;
   active_advance_deposit_id?: number | null;
+  minibar_count?: number;
+  minibar_total?: number;
+  minibar_summary?: string | null;
+  minibar_charges?: Array<{
+    id?: number | string;
+    transaction_no?: string;
+    description: string;
+    amount: number;
+  }>;
 }
 
 export interface PenjualanBidGroup {

@@ -1817,7 +1817,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                        <th className="py-1.5 px-3 text-right">Sisa</th>
                        <th className="py-1.5 px-3 text-center">Status</th>
                        <th className="py-1.5 px-3 text-center">Penanggung</th>
-                       <th className="py-1.5 px-3 text-center">POS</th>
+                       <th className="py-1.5 px-3 text-center">POS / Minibar</th>
                        <th className="py-1.5 px-3 text-center">Aksi</th>
                     </tr>
                   </thead>
@@ -1832,6 +1832,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       const posLabel = (child.pos_order_count ?? 0) > 0
                         ? `${child.pos_order_count} POS${(child.pos_open_count ?? 0) > 0 ? ` · ${child.pos_open_count} belum dibayar` : ''}`
                         : null;
+                      const hasMinibar = (child.minibar_count ?? 0) > 0 || (child.minibar_total ?? 0) > 0 || Boolean(child.minibar_summary);
                       return (
                         <React.Fragment key={child.reservation_id || child.primary_transaction_id}>
                           <tr className="border-t border-slate-100">
@@ -1863,24 +1864,36 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               </div>
                             </td>
                             <td className="py-1.5 px-3 text-center whitespace-nowrap">{renderPaymentResponsibilityBadge(child.payment_responsibility)}</td>
-                            <td className="py-1.5 px-3 text-center whitespace-nowrap">
-                              {showPosIndicator && posLabel ? (
-                                <button
-                                  type="button"
-                                  aria-expanded={posIsExpanded}
-                                  aria-controls={posResKey ? `pos-panel-${posResKey}` : undefined}
-                                  onClick={togglePos}
-                                  className={`px-1.5 py-0.5 text-[10px] font-semibold rounded border transition-colors cursor-pointer ${
-                                    posIsExpanded
-                                      ? 'bg-amber-50 border-amber-300 text-amber-800'
-                                      : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-300'
-                                  }`}
-                                >
-                                  {posLabel}
-                                </button>
-                              ) : (
-                                <span className="text-slate-300 text-[10px]">—</span>
-                              )}
+                            <td className="py-1.5 px-3 text-center">
+                              <div className="flex flex-col items-center justify-center gap-1">
+                                {showPosIndicator && posLabel && (
+                                  <button
+                                    type="button"
+                                    aria-expanded={posIsExpanded}
+                                    aria-controls={posResKey ? `pos-panel-${posResKey}` : undefined}
+                                    onClick={togglePos}
+                                    className={`px-1.5 py-0.5 text-[10px] font-semibold rounded border transition-colors cursor-pointer whitespace-nowrap ${
+                                      posIsExpanded
+                                        ? 'bg-amber-50 border-amber-300 text-amber-800'
+                                        : 'bg-slate-100 hover:bg-slate-200 text-slate-600 border-slate-300'
+                                    }`}
+                                  >
+                                    {posLabel}
+                                  </button>
+                                )}
+                                {hasMinibar && (
+                                  <div
+                                    className="px-2 py-0.5 text-[10px] font-semibold rounded border bg-amber-50 border-amber-300 text-amber-900 max-w-[260px] truncate"
+                                    title={child.minibar_summary || `Minibar: ${formatIdr(child.minibar_total || 0)}`}
+                                  >
+                                    Minibar: {formatIdr(child.minibar_total || 0)}
+                                    {child.minibar_summary ? ` (${child.minibar_summary})` : ''}
+                                  </div>
+                                )}
+                                {!showPosIndicator && !hasMinibar && (
+                                  <span className="text-slate-300 text-[10px]">—</span>
+                                )}
+                              </div>
                             </td>
                             <td className="py-1.5 px-3 text-center whitespace-nowrap">
                               <button
@@ -1892,6 +1905,36 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               </button>
                             </td>
                           </tr>
+                          {hasMinibar && child.minibar_summary && (
+                            <tr className="bg-amber-50/40 border-t border-amber-100/80">
+                              <td colSpan={13} className="px-3 py-1.5 text-[10px] text-amber-950">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <span className="font-bold uppercase tracking-wider text-amber-800 bg-amber-100 px-1.5 py-0.5 rounded border border-amber-200">
+                                      Rincian Minibar Kamar {child.room_number || '-'}
+                                    </span>
+                                    <span className="font-medium text-amber-900">
+                                      {child.minibar_summary}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <span className="font-mono font-bold text-amber-900">
+                                      Total Minibar: {formatIdr(child.minibar_total || 0)}
+                                    </span>
+                                    {Array.isArray(child.minibar_charges) && child.minibar_charges[0]?.id && (
+                                      <button
+                                        type="button"
+                                        onClick={() => openDetailDrawer(child.minibar_charges![0].id!)}
+                                        className="px-2 py-0.5 text-[10px] font-bold text-amber-900 bg-white hover:bg-amber-100 border border-amber-300 rounded cursor-pointer"
+                                      >
+                                        Detail Minibar
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </td>
+                            </tr>
+                          )}
                           {showPosIndicator && posIsExpanded && posResKey && (
                             <tr id={`pos-panel-${posResKey}`} className="bg-slate-50/50">
                               <td colSpan={13} className="px-3 py-2">

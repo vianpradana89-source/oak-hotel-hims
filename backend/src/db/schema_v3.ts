@@ -7475,5 +7475,14 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
 
     ALTER TABLE IF EXISTS checklist_template_items
       ADD COLUMN IF NOT EXISTS applicable_room_type_ids JSONB DEFAULT NULL;
+
+    -- Backfill null/empty base_unit and canonical_base_unit_code on pos_menu_items so stock_movements never fails NOT NULL constraint
+    UPDATE pos_menu_items
+       SET base_unit = COALESCE(NULLIF(BTRIM(base_unit), ''), 'Pcs'),
+           canonical_base_unit_code = COALESCE(NULLIF(BTRIM(canonical_base_unit_code), ''), 'PCS')
+     WHERE base_unit IS NULL
+        OR BTRIM(base_unit) = ''
+        OR canonical_base_unit_code IS NULL
+        OR BTRIM(canonical_base_unit_code) = '';
   `);
 }

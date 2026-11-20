@@ -1,0 +1,24 @@
+{
+  "name": "OAK Lawang",
+  "short_name": "OAK Lawang",
+  "description": "OAK Lawang Hotel Integrated Management System & Employee Mobile",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#1c2321",
+  "theme_color": "#1b4332",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

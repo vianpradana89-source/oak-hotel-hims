@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
 import { verifyToken, isPlatformSuperAdmin, type AuthUserPayload } from './authService';
+import { getUserOverridePermissionSets } from '../settings/accessControlService';
 
 export interface AuthenticatedRequest extends Request {
   user?: AuthUserPayload;
@@ -238,6 +239,18 @@ export async function hasPermission(
     return true;
   }
 
+  // 1. Check per-user permission overrides (Hak Akses Pengguna) first
+  if (user.id) {
+    const overrides = await getUserOverridePermissionSets(db, Number(user.id), user.property_id ? Number(user.property_id) : null);
+    if (overrides.allowed.has(permissionKey)) {
+      return true;
+    }
+    if (overrides.denied.has(permissionKey)) {
+      return false;
+    }
+  }
+
+  // 2. Fall back to role-level permissions (Hak Akses Role)
   if (user.role_id) {
     const res = await db.query(
       `SELECT rp.granted

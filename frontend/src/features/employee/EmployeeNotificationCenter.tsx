@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import { triggerUrgentMobileNotification, updateMobileAppBadge } from './mobileAlarmAndBadge';
 
 const Bell = ({ className = "w-5 h-5" }: { className?: string }) => (
   <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -82,21 +83,37 @@ export const EmployeeNotificationCenter: React.FC<EmployeeNotificationCenterProp
           });
         });
 
-        // Check for urgent dirty rooms
+        // Check for urgent dirty rooms & FO Periksa Kamar pings
         const urgentDirty = tasks.filter(
-          (t: any) => (t.priority === 'URGENT' || t.priority === 'HIGH') && t.status === 'ASSIGNED' && !t.is_archived
+          (t: any) =>
+            (t.priority === 'CRITICAL' || t.priority === 'URGENT' || t.priority === 'HIGH' || String(t.title || '').includes('[FO MENUNGGU CHECK-IN]')) &&
+            t.status !== 'DONE' &&
+            t.status !== 'VERIFIED' &&
+            t.status !== 'CANCELLED' &&
+            t.task_type !== 'CHECKOUT_ROOM_CHECK' &&
+            !t.is_archived
         );
         urgentDirty.forEach((t: any) => {
+          const isFoPing = String(t.title || '').includes('[FO MENUNGGU CHECK-IN]');
           items.push({
             id: `task-${t.id}`,
             type: 'TASK_ASSIGNED',
-            title: `Tugas Prioritas Tinggi: Kamar ${t.room_number || ''}`,
-            message: `Kamar ${t.room_number || ''} (${t.room_type_name || ''}) ditugaskan dengan prioritas tinggi.`,
-            timestamp: t.created_at,
+            title: isFoPing
+              ? `⚡ FO Periksa Kamar ${t.room_number || ''} (Tamu Check-in)`
+              : `Tugas Prioritas Tinggi: Kamar ${t.room_number || ''}`,
+            message: isFoPing
+              ? `Front Office meminta percepatan kesiapan Kamar ${t.room_number || ''} untuk tamu check-in sekarang.`
+              : `Kamar ${t.room_number || ''} (${t.room_type_name || ''}) ditugaskan dengan prioritas tinggi.`,
+            timestamp: t.updated_at || t.created_at,
             read: false,
             priority: 'URGENT'
           });
         });
+
+        const activeCount = tasks.filter(
+          (t: any) => !t.is_archived && ['ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS'].includes(t.status)
+        ).length;
+        updateMobileAppBadge(activeCount);
 
         // Add welcome / status notification
         items.push({
@@ -134,6 +151,19 @@ export const EmployeeNotificationCenter: React.FC<EmployeeNotificationCenterProp
           <p className="text-xs text-white/60">Pemberitahuan tugas & permintaan operasional</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              void triggerUrgentMobileNotification({
+                title: '🔔 Tes Alarm & Notifikasi OAK Lawang',
+                body: 'Suara alarm, getar, dan angka badge ikon aplikasi sudah aktif di HP Anda.',
+                tag: 'oak-test-alarm'
+              });
+            }}
+            className="px-2.5 py-1.5 rounded-xl bg-amber-500/20 border border-amber-400/40 text-amber-200 hover:bg-amber-500/30 text-[11px] font-bold cursor-pointer"
+          >
+            🔊 Tes Alarm
+          </button>
           <button
             type="button"
             onClick={loadNotifications}

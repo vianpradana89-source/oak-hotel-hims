@@ -719,7 +719,7 @@ export async function getUserEffectivePermissions(
     return allRes.rows.map(r => r.key);
   }
 
-  // Regular user -> role-granted permissions
+  // Regular user -> role-granted permissions + per-user overrides (Hak Akses Pengguna)
   const permRes = await clientOrPool.query(
     `SELECT p.key
      FROM role_permissions rp
@@ -728,5 +728,14 @@ export async function getUserEffectivePermissions(
      ORDER BY p.key ASC`,
     [roleId]
   );
-  return permRes.rows.map(r => r.key);
+  const keySet = new Set<string>(permRes.rows.map(r => r.key));
+  const { getUserOverridePermissionSets } = await import('../settings/accessControlService');
+  const overrides = await getUserOverridePermissionSets(clientOrPool, uid, propertyId);
+  for (const k of overrides.denied) {
+    keySet.delete(k);
+  }
+  for (const k of overrides.allowed) {
+    keySet.add(k);
+  }
+  return Array.from(keySet).sort();
 }

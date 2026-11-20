@@ -34,6 +34,19 @@ export interface PenjualanBidChild {
   unapplied_advance_deposit?: number;
   /** KB-1: ID deposit ADVANCE_PAYMENT aktif untuk aksi Gunakan DP */
   active_advance_deposit_id?: number | null;
+  /** Minibar: jumlah transaksi minibar pada reservasi ini */
+  minibar_count?: number;
+  /** Minibar: total nominal transaksi minibar pada reservasi ini */
+  minibar_total?: number;
+  /** Minibar: ringkasan produk minibar yang dikonsumsi tamu */
+  minibar_summary?: string | null;
+  /** Minibar: daftar item transaksi minibar pada reservasi ini */
+  minibar_charges?: Array<{
+    id?: number | string;
+    transaction_no?: string;
+    description: string;
+    amount: number;
+  }>;
 }
 
 export type PenjualanTotalsScope = 'PERIOD_ACTIVITY';
@@ -133,6 +146,19 @@ export interface BookingReservationLifecycleRow {
   unapplied_advance_deposit?: number;
   /** KB-1: ID deposit ADVANCE_PAYMENT aktif untuk aksi Gunakan DP */
   active_advance_deposit_id?: number | null;
+  /** Minibar: jumlah transaksi minibar pada reservasi ini */
+  minibar_count?: number;
+  /** Minibar: total nominal transaksi minibar pada reservasi ini */
+  minibar_total?: number;
+  /** Minibar: ringkasan produk minibar yang dikonsumsi tamu */
+  minibar_summary?: string | null;
+  /** Minibar: daftar item transaksi minibar pada reservasi ini */
+  minibar_charges?: Array<{
+    id?: number | string;
+    transaction_no?: string;
+    description: string;
+    amount: number;
+  }>;
 }
 
 /**
@@ -488,6 +514,35 @@ export function buildChild(reservationId: number | null, members: any[], include
     { ...primary, verification_status: aggregatedVerification },
     canonicalSheet
   );
+
+  // Extract Minibar charges from member transactions or canonical folio summary
+  const minibarMembers = members.filter((m) => {
+    const catCode = String(m.category_code || '').toUpperCase();
+    const srcType = String(m.source_type || '').toUpperCase();
+    const desc = String(m.description || '').toUpperCase();
+    return catCode === 'MINIBAR_SALES' || srcType === 'MINIBAR' || desc.includes('MINIBAR');
+  });
+  const minibarCharges = minibarMembers.map((m) => ({
+    id: m.id,
+    transaction_no: m.transaction_no ? String(m.transaction_no) : undefined,
+    description: String(m.description || 'Pembelian Minibar Kamar').trim(),
+    amount: saleNet(m),
+  }));
+  const memberMinibarTotal = minibarCharges.reduce((s, c) => s + c.amount, 0);
+  const canonicalMinibarCount = Number(primary.minibar_count ?? 0);
+  const canonicalMinibarTotal = roundIdr(primary.minibar_total ?? 0);
+  const canonicalMinibarSummary = primary.minibar_summary ? String(primary.minibar_summary).trim() : null;
+
+  const effectiveMinibarCount = Math.max(minibarCharges.length, canonicalMinibarCount);
+  const effectiveMinibarTotal = memberMinibarTotal > 0 ? memberMinibarTotal : canonicalMinibarTotal;
+  const effectiveMinibarSummary =
+    minibarCharges.length > 0
+      ? minibarCharges
+          .map((c) => c.description.replace(/^Tagihan Minibar Kamar\s*\S*\s*:\s*/i, '').trim())
+          .filter(Boolean)
+          .join(' | ')
+      : canonicalMinibarSummary;
+
   return {
     reservation_id: reservationId,
     primary_transaction_id: primary.id,
@@ -513,6 +568,14 @@ export function buildChild(reservationId: number | null, members: any[], include
         : {}),
       ...(unappliedAdvanceDeposit > 0
         ? { unapplied_advance_deposit: unappliedAdvanceDeposit, active_advance_deposit_id: activeAdvanceDepositId }
+        : {}),
+      ...(effectiveMinibarCount > 0 || effectiveMinibarTotal > 0
+        ? {
+            minibar_count: effectiveMinibarCount,
+            minibar_total: effectiveMinibarTotal,
+            minibar_summary: effectiveMinibarSummary,
+            ...(minibarCharges.length > 0 ? { minibar_charges: minibarCharges } : {}),
+          }
         : {}),
   };
 }
@@ -669,6 +732,13 @@ export function presentBidGroupedSales(presented: any[], options?: BidGroupingOp
             ? {
                 pos_order_count: canonicalSettlement.pos_order_count ?? 0,
                 pos_open_count:  canonicalSettlement.pos_open_count  ?? 0,
+              }
+            : {}),
+          ...((canonicalSettlement.minibar_count ?? 0) > 0 || (canonicalSettlement.minibar_total ?? 0) > 0
+            ? {
+                minibar_count: canonicalSettlement.minibar_count ?? 0,
+                minibar_total: canonicalSettlement.minibar_total ?? 0,
+                minibar_summary: canonicalSettlement.minibar_summary ?? null,
               }
             : {}),
         }
@@ -919,12 +989,34 @@ folio_payment_fallback AS (
    SELECT
      po.reservation_id,
      COUNT(*) AS pos_order_count,
-     SUM(CASE WHEN po.status = 'OPEN' THEN 1 ELSE 0 END) AS pos_open_count
+     SUM(CASE WHEN po.status IN ('OPEN', 'BILLED_TO_ROOM') THEN 1 ELSE 0 END) AS pos_open_count
    FROM pos_orders po
    WHERE po.property_id = $1
      AND po.reservation_id = ANY($2)
-     AND po.status IN ('OPEN', 'PAID')
+     AND po.status IN ('OPEN', 'PAID', 'BILLED_TO_ROOM')
    GROUP BY po.reservation_id
+ ),
+ minibar_counts AS (
+   SELECT
+     fe.reservation_id,
+     COUNT(*)::int AS minibar_count,
+     COALESCE(SUM(fe.amount), 0) AS minibar_total,
+     STRING_AGG(
+       REGEXP_REPLACE(COALESCE(fe.description, ''), '^Tagihan Minibar Kamar\s*\S*\s*:\s*', '', 'i'),
+       ' | ' ORDER BY fe.id ASC
+     ) AS minibar_summary
+   FROM folio_entries fe
+   WHERE fe.property_id = $1
+     AND fe.reservation_id = ANY($2)
+     AND fe.direction = 'DEBIT'
+     AND COALESCE(fe.is_voided, FALSE) = FALSE
+     AND fe.reversal_of_entry_id IS NULL
+     AND (
+       UPPER(COALESCE(fe.entry_type, '')) = 'MINIBAR'
+       OR UPPER(COALESCE(fe.source_type, '')) = 'MINIBAR'
+       OR UPPER(COALESCE(fe.revenue_category, '')) = 'MINIBAR_SALES'
+     )
+   GROUP BY fe.reservation_id
  ),
  unapplied_deposits AS (
    SELECT
@@ -986,6 +1078,9 @@ SELECT
   COALESCE(fpf.folio_paid, 0) AS folio_paid,
   COALESCE(pc.pos_order_count, 0) AS pos_order_count,
   COALESCE(pc.pos_open_count, 0) AS pos_open_count,
+  COALESCE(mbc.minibar_count, 0) AS minibar_count,
+  COALESCE(mbc.minibar_total, 0) AS minibar_total,
+  mbc.minibar_summary,
   COALESCE(ud.unapplied_advance_deposit, 0) AS unapplied_advance_deposit,
   ud.active_advance_deposit_id
 FROM reservations r
@@ -998,6 +1093,7 @@ LEFT JOIN hotel_collectible hc ON hc.reservation_id = r.id
 LEFT JOIN nightly_fallback nf ON nf.reservation_id = r.id
 LEFT JOIN folio_payment_fallback fpf ON fpf.reservation_id = r.id
 LEFT JOIN pos_counts pc ON pc.reservation_id = r.id
+LEFT JOIN minibar_counts mbc ON mbc.reservation_id = r.id
 LEFT JOIN unapplied_deposits ud ON ud.reservation_id = r.id
 WHERE b.property_id = $1
   AND r.id = ANY($2)
@@ -1095,6 +1191,9 @@ ORDER BY r.booking_id, r.stay_sequence, r.id
       canonical_remaining_balance: remaining,
       pos_order_count: posOrderCount,
       pos_open_count: posOpenCount,
+      minibar_count: Math.max(0, Number(row.minibar_count || 0)),
+      minibar_total: Math.max(0, Math.round(Number(row.minibar_total || 0))),
+      minibar_summary: row.minibar_summary ? String(row.minibar_summary).trim() : null,
       unapplied_advance_deposit: unappliedAdvanceDeposit,
       active_advance_deposit_id: activeAdvanceDepositId,
     };

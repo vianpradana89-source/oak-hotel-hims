@@ -232,6 +232,52 @@ export function getPermissionKeysFor(resource: string, action: AccessAction): st
   return ACCESS_RESOURCE_BY_KEY.get(resource)?.permission_keys[action] || [];
 }
 
+/**
+ * Resolves atomic permission keys explicitly ALLOWED or DENIED via `user_permission_overrides`
+ * for a given user (`userId`) and optional `propertyId`.
+ * If any resource+action override grants a shared atomic key (e.g. `inventory.create`),
+ * `allowed` takes precedence over `denied` on another resource sharing the same atomic key.
+ */
+export async function getUserOverridePermissionSets(
+  client: Pool | PoolClient,
+  userId: number,
+  propertyId?: number | null
+): Promise<{ allowed: Set<string>; denied: Set<string> }> {
+  const allowed = new Set<string>();
+  const denied = new Set<string>();
+  if (!Number.isInteger(Number(userId)) || Number(userId) <= 0) {
+    return { allowed, denied };
+  }
+  try {
+    const propFilter =
+      propertyId !== undefined && propertyId !== null && Number.isInteger(Number(propertyId)) && Number(propertyId) > 0
+        ? Number(propertyId)
+        : null;
+    const res = await client.query(
+      `SELECT resource, action, effect
+         FROM user_permission_overrides
+        WHERE user_id = $1
+          AND ($2::int IS NULL OR property_id = $2)`,
+      [Number(userId), propFilter]
+    );
+    for (const row of res.rows || []) {
+      if (!isKnownAccessResource(row.resource)) continue;
+      const keys = getPermissionKeysFor(row.resource, row.action as AccessAction);
+      if (row.effect === 'ALLOW') {
+        for (const k of keys) allowed.add(k);
+      } else if (row.effect === 'DENY') {
+        for (const k of keys) denied.add(k);
+      }
+    }
+    for (const k of allowed) {
+      denied.delete(k);
+    }
+  } catch {
+    // non-fatal if table does not exist yet
+  }
+  return { allowed, denied };
+}
+
 export type AccessGrid = Record<string, Record<AccessAction, boolean>>;
 export type EffectiveAccessGrid = Record<string, Record<AccessAction, { allowed: boolean; source: AccessSource }>>;
 

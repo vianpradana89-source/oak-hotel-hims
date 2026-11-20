@@ -2743,6 +2743,11 @@ function AppContent() {
           void loadDailyKpisRef.current();
           if (eventName === 'RoomStatusUpdated') {
             void fetchOperationsData();
+            try {
+              window.dispatchEvent(new CustomEvent('oak:room-status-updated', { detail: data }));
+            } catch {
+              // ignore
+            }
           }
           if (eventName === 'CheckoutInspectionUpdated') {
             const signaledResId = Number(data?.reservation_id);

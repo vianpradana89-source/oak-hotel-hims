@@ -2,6 +2,13 @@ import React, { useState, useEffect, useRef } from 'react';
 import { AttendanceGateScreen } from './AttendanceGateScreen';
 import { HousekeepingMobileCrewView } from './HousekeepingMobileCrewView';
 import { EmployeeNotificationCenter } from './EmployeeNotificationCenter';
+import {
+  updateMobileAppBadge,
+  triggerUrgentMobileNotification,
+  unlockMobileAudioContext,
+  requestMobileNotificationPermission,
+  playUrgentHousekeepingAlarm
+} from './mobileAlarmAndBadge';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
 import {
   attendanceEligibilityReasonText,
@@ -213,6 +220,13 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     done_today: 0,
     checkout_urgent: 0
   });
+  const [urgentAlarmBanner, setUrgentAlarmBanner] = useState<{
+    title: string;
+    message: string;
+    roomNumber?: string;
+  } | null>(null);
+  const seenUrgentSignaturesRef = useRef<Set<string>>(new Set());
+  const initialTasksLoadedRef = useRef<boolean>(false);
 
   // WIB Live Clock
   useEffect(() => {
@@ -305,7 +319,7 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
     }
   };
 
-  // Fetch task statistics
+  // Fetch task statistics & trigger alarm/badge for urgent FO requests
   const fetchTaskStats = async () => {
     try {
       const [activeRes, histRes] = await Promise.all([
@@ -321,9 +335,50 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       const assigned = activeTasks.filter((t: any) => t.status === 'ASSIGNED' || t.status === 'ACKNOWLEDGED').length;
       const in_progress = activeTasks.filter((t: any) => t.status === 'IN_PROGRESS').length;
       const done_today = historyTasks.length;
-      const checkout_urgent = activeTasks.filter((t: any) => t.task_type === 'CHECKOUT_ROOM_CHECK').length;
+
+      const urgentTasks = activeTasks.filter(
+        (t: any) =>
+          t.task_type === 'CHECKOUT_ROOM_CHECK' ||
+          t.priority === 'CRITICAL' ||
+          t.priority === 'URGENT' ||
+          String(t.title || '').includes('[FO MENUNGGU CHECK-IN]')
+      );
+      const checkout_urgent = urgentTasks.length;
+      const totalActiveBadge = assigned + in_progress;
 
       setTaskStats({ assigned, in_progress, done_today, checkout_urgent });
+      updateMobileAppBadge(totalActiveBadge);
+
+      for (const ut of urgentTasks) {
+        const sig = `${ut.id}:${ut.priority || ''}:${ut.updated_at || ut.created_at || ''}`;
+        if (!seenUrgentSignaturesRef.current.has(sig)) {
+          seenUrgentSignaturesRef.current.add(sig);
+          const isFoCheckinPing = String(ut.title || '').includes('[FO MENUNGGU CHECK-IN]') || String(ut.notes || '').includes('FO PERIKSA KAMAR');
+          const notifTitle = isFoCheckinPing
+            ? `⚡ FO Periksa Kamar ${ut.room_number || ''} (Tamu Check-in)`
+            : ut.task_type === 'CHECKOUT_ROOM_CHECK'
+            ? `🚨 Pemeriksaan Checkout Kamar ${ut.room_number || ''}`
+            : `🔔 Tugas Prioritas Kamar ${ut.room_number || ''}`;
+          const notifBody = isFoCheckinPing
+            ? `Front Office meminta percepatan kesiapan Kamar ${ut.room_number || ''} untuk tamu check-in sekarang.`
+            : ut.title || `Segera periksa Kamar ${ut.room_number || ''}.`;
+
+          if (initialTasksLoadedRef.current || isFoCheckinPing || ut.task_type === 'CHECKOUT_ROOM_CHECK') {
+            setUrgentAlarmBanner({
+              title: notifTitle,
+              message: notifBody,
+              roomNumber: ut.room_number ? String(ut.room_number) : undefined
+            });
+            void triggerUrgentMobileNotification({
+              title: notifTitle,
+              body: notifBody,
+              tag: `oak-urgent-${ut.id}`,
+              badgeCount: Math.max(1, totalActiveBadge)
+            });
+          }
+        }
+      }
+      initialTasksLoadedRef.current = true;
     } catch (err) {
       console.error('Failed to fetch task stats:', err);
     }
@@ -338,10 +393,29 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       await fetchOwnSchedule();
       await fetchTaskStats();
     })();
+    const pollInterval = setInterval(() => {
+      if (!cancelled) {
+        void fetchTaskStats();
+      }
+    }, 5000);
     return () => {
       cancelled = true;
+      clearInterval(pollInterval);
     };
   }, [propertyId]);
+
+  useEffect(() => {
+    const handleFirstInteraction = () => {
+      unlockMobileAudioContext();
+      void requestMobileNotificationPermission();
+    };
+    window.addEventListener('click', handleFirstInteraction, { once: true });
+    window.addEventListener('touchstart', handleFirstInteraction, { once: true });
+    return () => {
+      window.removeEventListener('click', handleFirstInteraction);
+      window.removeEventListener('touchstart', handleFirstInteraction);
+    };
+  }, []);
 
   // Handle Clock-Out (Absen Pulang)
   const handleClockOut = async () => {
@@ -592,6 +666,43 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
       </header>
 
       {/* Main Tab Content */}
+      {urgentAlarmBanner && (
+        <div className="shrink-0 z-40 bg-rose-700 text-white px-3.5 py-2.5 border-b border-rose-500 shadow-md animate-pulse">
+          <div className="flex items-start justify-between gap-2">
+            <div className="min-w-0 flex-1">
+              <div className="text-xs font-extrabold tracking-wide">{urgentAlarmBanner.title}</div>
+              <p className="text-[11px] text-rose-100 mt-0.5 leading-snug">{urgentAlarmBanner.message}</p>
+            </div>
+            <div className="flex items-center gap-1.5 shrink-0">
+              <button
+                type="button"
+                onClick={() => playUrgentHousekeepingAlarm()}
+                className="px-2 py-1 rounded-lg bg-rose-800 hover:bg-rose-900 border border-rose-400 text-[10px] font-bold text-white cursor-pointer"
+                title="Bunyikan Ulang Alarm"
+              >
+                🔊
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setUrgentAlarmBanner(null);
+                  setActiveTab('TASKS');
+                }}
+                className="px-2.5 py-1 rounded-lg bg-white text-rose-900 hover:bg-rose-50 text-[10px] font-extrabold shadow-xs cursor-pointer"
+              >
+                Buka Kamar
+              </button>
+              <button
+                type="button"
+                onClick={() => setUrgentAlarmBanner(null)}
+                className="px-1.5 py-1 rounded-lg text-rose-200 hover:text-white text-xs font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <main className="flex-1 p-3.5 overflow-y-auto overscroll-contain [-webkit-overflow-scrolling:touch]">
         {activeTab === 'HOME' && (
           <div className="space-y-3.5 pb-20">

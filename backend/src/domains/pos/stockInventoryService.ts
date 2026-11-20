@@ -429,13 +429,10 @@ export async function recordOpeningBalance(
       );
     }
 
-    const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
-    if (!baseUnitCode) {
-      throw Object.assign(
-        new Error(`Produk "${product.name}" belum memiliki satuan dasar yang terdefinisi`),
-        { statusCode: 400, code: 'PRODUCT_BASE_UNIT_NOT_CONFIGURED' }
-      );
-    }
+    const baseUnitCode =
+      String(product.canonical_base_unit_code || product.base_unit || 'PCS')
+        .trim()
+        .toUpperCase() || 'PCS';
 
     // ── Validasi Lokasi Stok ──
     const locRes = await client.query(
@@ -3087,13 +3084,10 @@ export async function recordStockAdjustment(
       );
     }
 
-    const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
-    if (!baseUnitCode) {
-      throw Object.assign(
-        new Error(`Produk "${product.name}" belum memiliki satuan dasar yang terdefinisi`),
-        { statusCode: 400, code: 'PRODUCT_BASE_UNIT_NOT_CONFIGURED' }
-      );
-    }
+    const baseUnitCode =
+      String(product.canonical_base_unit_code || product.base_unit || 'PCS')
+        .trim()
+        .toUpperCase() || 'PCS';
 
     // ── Guard 2: Validasi lokasi ──
     const locRes = await client.query(
@@ -3670,7 +3664,10 @@ export async function recordStockOpname(
         );
       }
 
-      const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
+      const baseUnitCode =
+        String(product.canonical_base_unit_code || product.base_unit || 'PCS')
+          .trim()
+          .toUpperCase() || 'PCS';
 
       // Konversi kuantitas fisik (R-06 jika via kemasan)
       let physicalBaseQtyStr: string;
@@ -4109,7 +4106,10 @@ export async function recordStockTransfer(
         );
       }
 
-      const baseUnitCode = product.canonical_base_unit_code || product.base_unit;
+      const baseUnitCode =
+        String(product.canonical_base_unit_code || product.base_unit || 'PCS')
+          .trim()
+          .toUpperCase() || 'PCS';
 
       let baseQtyStr: string;
       let packagingId: number | null = null;

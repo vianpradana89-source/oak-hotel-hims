@@ -593,11 +593,16 @@ export default function ReservationDetailDrawer({
     void loadFullReservation(Number(targetId));
     void loadFolio(Number(targetId));
   }, [posOrdersRefreshVersion, posOrdersRefreshReservationId]);
-  const loadFullReservation = async (customId?: number): Promise<any | null> => {
+  const [roomReadinessPingMsg, setRoomReadinessPingMsg] = useState<{ type: 'success' | 'info' | 'error'; text: string } | null>(null);
+  const [roomReadinessPinging, setRoomReadinessPinging] = useState(false);
+
+  const loadFullReservation = async (customId?: number, opts?: { silent?: boolean }): Promise<any | null> => {
     const targetId = customId || detailData?.id || reservation?.id;
     if (!targetId || !activePropId) return null;
     try {
-      setLoading(true);
+      if (!opts?.silent) {
+        setLoading(true);
+      }
       const result = await safeFetchJson<{ data?: any }>(
         `/api/reservations/${targetId}?property_id=${activePropId}`,
         undefined,
@@ -616,7 +621,9 @@ export default function ReservationDetailDrawer({
       console.warn('Failed to load full reservation data', err);
       return null;
     } finally {
-      setLoading(false);
+      if (!opts?.silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -1338,7 +1345,95 @@ export default function ReservationDetailDrawer({
   const pendingNavRef = useRef<{ tab: string; anchor: string } | null>(null);
   const navFrameRef = useRef<number | null>(null);
 
+  const handleRequestUrgentRoomReadiness = useCallback(async () => {
+    const targetId = Number(detailData?.id || reservation?.id);
+    const targetRoomId = Number(detailData?.room_id || reservation?.room_id);
+    if (!activePropId || (!targetId && !targetRoomId) || roomReadinessPinging) return;
+    try {
+      setRoomReadinessPinging(true);
+      setRoomReadinessPingMsg({ type: 'info', text: 'Memeriksa status kamar & mengirim sinyal ke Housekeeping...' });
+      const result = await safeFetchJson<{
+        status?: string;
+        already_ready?: boolean;
+        message?: string;
+      }>(
+        '/api/housekeeping/urgent-room-readiness-request',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: activePropId,
+            reservation_id: targetId || null,
+            room_id: targetRoomId || null,
+            guest_name: primaryGuestName || null,
+            requested_by_name: 'Front Office',
+            requested_by_role: 'Receptionist'
+          })
+        },
+        'Gagal mengirim permintaan periksa kamar.',
+        authFetch
+      );
+      await loadFullReservation(targetId, { silent: true });
+      onRefresh();
+      if (result.ok && result.data) {
+        setRoomReadinessPingMsg({
+          type: 'success',
+          text:
+            result.data.message ||
+            (result.data.already_ready
+              ? 'Kamar sudah siap huni (Ready) dan siap untuk Check-in!'
+              : 'Notifikasi & alarm pemeriksaan kamar telah dikirim ke HP Room Attendant!')
+        });
+      } else {
+        setRoomReadinessPingMsg({
+          type: 'error',
+          text: result.errorMessage || 'Gagal mengirim permintaan periksa kamar.'
+        });
+      }
+    } catch (err: any) {
+      setRoomReadinessPingMsg({
+        type: 'error',
+        text: err?.message || 'Gagal mengirim permintaan periksa kamar.'
+      });
+    } finally {
+      setRoomReadinessPinging(false);
+    }
+  }, [activePropId, detailData?.id, detailData?.room_id, reservation?.id, reservation?.room_id, primaryGuestName, roomReadinessPinging, authFetch, onRefresh]);
+
+  // Realtime listener + 4s silent polling while drawer is open on a BOOKED reservation so room readiness updates without manual page refresh
+  useEffect(() => {
+    const targetId = Number(detailData?.id || reservation?.id);
+    const targetRoomId = Number(detailData?.room_id || reservation?.room_id);
+    if (!targetId || !activePropId) return;
+
+    const handleRoomStatusEvent = (ev: Event) => {
+      const customEv = ev as CustomEvent;
+      const evRoomId = Number(customEv.detail?.room_id);
+      if (!evRoomId || !targetRoomId || evRoomId === targetRoomId) {
+        void loadFullReservation(targetId, { silent: true });
+      }
+    };
+    window.addEventListener('oak:room-status-updated', handleRoomStatusEvent);
+
+    const statusStr = String((detailData || reservation)?.status || '').toUpperCase();
+    const isBookedState = statusStr === 'BOOKED' || statusStr === 'CONFIRMED' || statusStr === 'RESERVED';
+    let intervalId: ReturnType<typeof setInterval> | null = null;
+    if (isBookedState) {
+      intervalId = setInterval(() => {
+        void loadFullReservation(targetId, { silent: true });
+      }, 4000);
+    }
+
+    return () => {
+      window.removeEventListener('oak:room-status-updated', handleRoomStatusEvent);
+      if (intervalId) clearInterval(intervalId);
+    };
+  }, [detailData?.id, detailData?.room_id, detailData?.status, reservation?.id, reservation?.room_id, reservation?.status, activePropId]);
+
   const navigateToRequirementTarget = useCallback((tab: string, anchor: string) => {
+    if (anchor === 'room-findings-block') {
+      void handleRequestUrgentRoomReadiness();
+    }
     // Cancel any pending frame to prevent stale scroll
     if (navFrameRef.current !== null) {
       cancelAnimationFrame(navFrameRef.current);
@@ -1355,7 +1450,7 @@ export default function ReservationDetailDrawer({
       pendingNavRef.current = { tab, anchor };
       setActiveTab(tab as typeof activeTab);
     }
-  }, [activeTab, scrollToSection, setActiveTab]);
+  }, [activeTab, scrollToSection, setActiveTab, handleRequestUrgentRoomReadiness]);
 
   // After activeTab changes, check for pending navigation and scroll
   useEffect(() => {
@@ -1584,6 +1679,26 @@ export default function ReservationDetailDrawer({
                     <p className="text-xs text-stone-600">
                       Kesiapan check-in belum dapat diverifikasi. Pastikan layanan sedang aktif.
                     </p>
+                  )}
+                  {roomReadinessPingMsg && (
+                    <div
+                      className={`mt-2 px-3 py-2 rounded-lg text-xs font-semibold border flex items-center justify-between gap-2 ${
+                        roomReadinessPingMsg.type === 'success'
+                          ? 'bg-emerald-100/90 text-emerald-950 border-emerald-300'
+                          : roomReadinessPingMsg.type === 'info'
+                          ? 'bg-amber-100/90 text-amber-950 border-amber-300'
+                          : 'bg-rose-100/90 text-rose-950 border-rose-300'
+                      }`}
+                    >
+                      <span>{roomReadinessPingMsg.text}</span>
+                      <button
+                        type="button"
+                        onClick={() => setRoomReadinessPingMsg(null)}
+                        className="text-xs font-bold opacity-70 hover:opacity-100 cursor-pointer"
+                      >
+                        ✕
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>

@@ -677,6 +677,186 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
     }
   });
 
+  // 4b. Urgent Pre-Checkin Room Readiness Ping from Front Office ("Periksa Kamar")
+  router.post('/urgent-room-readiness-request', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+
+      const reservationId = req.body.reservation_id ? Number(req.body.reservation_id) : null;
+      let roomId = Number(req.body.room_id);
+
+      if ((!Number.isInteger(roomId) || roomId <= 0) && reservationId && reservationId > 0) {
+        const resCheck = await client.query(
+          'SELECT r.room_id, r.guest_name FROM reservations r WHERE r.id = $1',
+          [reservationId]
+        );
+        if (resCheck.rowCount && resCheck.rows[0].room_id) {
+          roomId = Number(resCheck.rows[0].room_id);
+        }
+      }
+
+      if (!Number.isInteger(roomId) || roomId <= 0) {
+        return res.status(400).json({
+          status: 'ERROR',
+          code: 'INVALID_ROOM_ID',
+          message: 'Kamar belum ditentukan pada reservasi ini.'
+        });
+      }
+
+      await client.query('BEGIN');
+      const roomRes = await client.query(
+        'SELECT id, room_number, status FROM rooms WHERE id = $1 AND property_id = $2 FOR UPDATE',
+        [roomId, propertyId]
+      );
+      if (roomRes.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ status: 'ERROR', code: 'ROOM_NOT_FOUND', message: 'Kamar tidak ditemukan.' });
+      }
+      const room = roomRes.rows[0];
+      const rawStatus = String(room.status || '').trim().toUpperCase();
+
+      const blockingRes = await client.query(
+        `SELECT id, finding_type_label, notes
+           FROM housekeeping_task_findings
+          WHERE room_id = $1 AND status = 'OPEN' AND block_room_ready = TRUE
+          LIMIT 1`,
+        [roomId]
+      );
+      const hasBlockingFinding = (blockingRes.rowCount ?? 0) > 0;
+
+      if ((rawStatus === 'VACANT_CLEAN' || rawStatus === 'INSPECTED' || rawStatus === 'READY') && !hasBlockingFinding) {
+        await client.query('COMMIT');
+        if (broadcastEvent) {
+          try {
+            broadcastEvent(
+              'RoomStatusUpdated',
+              {
+                room_id: roomId,
+                status: room.status,
+                source: 'FO_READINESS_VERIFIED',
+                timestamp: new Date().toISOString()
+              },
+              propertyId
+            );
+          } catch {
+            // ignore
+          }
+        }
+        return res.json({
+          status: 'OK',
+          already_ready: true,
+          room_status: room.status,
+          message: `Kamar ${room.room_number} sudah berstatus ${room.status} (Siap Huni) dan siap untuk Check-in!`
+        });
+      }
+
+      let guestName = req.body.guest_name ? String(req.body.guest_name).trim() : '';
+      if (!guestName && reservationId) {
+        const gRes = await client.query('SELECT guest_name FROM reservations WHERE id = $1', [reservationId]);
+        guestName = gRes.rows[0]?.guest_name || '';
+      }
+
+      const activeTaskRes = await client.query(
+        `SELECT * FROM housekeeping_tasks
+          WHERE property_id = $1
+            AND room_id = $2
+            AND COALESCE(is_archived, FALSE) = FALSE
+            AND status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+          ORDER BY id DESC
+          LIMIT 1`,
+        [propertyId, roomId]
+      );
+
+      const pingNote = `[⚡ FO PERIKSA KAMAR ${new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} — Tamu ${guestName || 'Check-in'} menunggu kesiapan Kamar ${room.room_number}]`;
+      let taskRow: any = null;
+
+      if ((activeTaskRes.rowCount ?? 0) > 0) {
+        const cur = activeTaskRes.rows[0];
+        const nextTitle = String(cur.title || '').includes('[FO MENUNGGU CHECK-IN]')
+          ? cur.title
+          : `${cur.title} [FO MENUNGGU CHECK-IN]`;
+        const nextNotes = cur.notes ? `${cur.notes}\n${pingNote}` : pingNote;
+        const upd = await client.query(
+          `UPDATE housekeeping_tasks
+              SET priority = 'CRITICAL',
+                  title = $1,
+                  notes = $2,
+                  updated_at = NOW()
+            WHERE id = $3
+            RETURNING *`,
+          [nextTitle, nextNotes, cur.id]
+        );
+        taskRow = upd.rows[0];
+      } else {
+        const created = await ensureDirtyRoomCleaningTask(client, propertyId, roomId, {
+          reservationId,
+          sourceType: 'FO_URGENT_CHECKIN_REQUEST',
+          sourceEntityId: reservationId ? String(reservationId) : String(roomId),
+          actor: {
+            name: req.body.requested_by_name || 'Front Office',
+            role: req.body.requested_by_role || 'Receptionist'
+          }
+        });
+        if (created) {
+          const upd = await client.query(
+            `UPDATE housekeeping_tasks
+                SET priority = 'CRITICAL',
+                    title = $1,
+                    notes = $2,
+                    updated_at = NOW()
+              WHERE id = $3
+              RETURNING *`,
+            [
+              `Periksa & Siapkan Kamar ${room.room_number} [FO MENUNGGU CHECK-IN]`,
+              pingNote,
+              created.id
+            ]
+          );
+          taskRow = upd.rows[0];
+        }
+      }
+
+      await client.query('COMMIT');
+
+      if (broadcastEvent) {
+        try {
+          broadcastEvent(
+            'RoomStatusUpdated',
+            {
+              room_id: roomId,
+              room_number: room.room_number,
+              status: room.status,
+              task_id: taskRow?.id || null,
+              urgent_fo_ping: true,
+              guest_name: guestName || null,
+              source: 'FO_URGENT_READINESS_PING',
+              timestamp: new Date().toISOString()
+            },
+            propertyId
+          );
+        } catch {
+          // ignore
+        }
+      }
+
+      return res.json({
+        status: 'OK',
+        already_ready: false,
+        room_status: room.status,
+        data: taskRow,
+        message: `Notifikasi & alarm percepatan Kamar ${room.room_number} berhasil dikirim ke HP Room Attendant!`
+      });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      return res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
   // 5. Acknowledge Task (Supports PATCH and POST)
   const acknowledgeTaskHandler = async (req: Request, res: Response) => {
     const client = await pool.connect();
