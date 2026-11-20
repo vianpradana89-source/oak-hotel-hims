@@ -220,11 +220,15 @@ export async function getMinibarCatalogAndRoomContext(
       roomStandardsMap.set(s.menu_item_id, s);
     }
   }
-  // Fallback: if roomInfo's specific room_type_id had no rows, fall back to property-wide deduplicated standards
-  if (roomStandardsMap.size === 0 && allPropertyStandards.length > 0) {
-    for (const s of allPropertyStandards) {
-      if (!roomStandardsMap.has(s.menu_item_id)) {
-        roomStandardsMap.set(s.menu_item_id, s);
+  // Per-role fallback: if roomInfo's specific room_type_id has no standards for a given role
+  // (e.g. admin added PAID_MINIBAR to only one room type), fall back to property-wide standards for that role.
+  for (const role of ['COMPLIMENTARY', 'PAID_MINIBAR'] as const) {
+    const hasRoleForRoom = Array.from(roomStandardsMap.values()).some((s) => s.item_role === role);
+    if (!hasRoleForRoom) {
+      for (const s of allPropertyStandards) {
+        if (s.item_role === role && !roomStandardsMap.has(s.menu_item_id)) {
+          roomStandardsMap.set(s.menu_item_id, s);
+        }
       }
     }
   }

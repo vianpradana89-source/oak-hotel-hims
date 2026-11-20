@@ -1,21 +1,36 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { authenticatedFetch as authFetch } from '../../lib/authenticatedFetch';
 
 interface MinibarStandardsSettingsSectionProps {
   propertyId: number;
 }
 
+interface GroupedStandardItem {
+  id: number;
+  menu_item_id: number;
+  item_name: string;
+  sku: string;
+  item_role: 'COMPLIMENTARY' | 'PAID_MINIBAR';
+  standard_qty: number;
+  unit_price: number;
+  base_unit_code: string;
+  hkp_stock_balance: number;
+  room_type_ids: number[];
+  room_type_names: string[];
+  is_all_room_types: boolean;
+}
+
 export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsSectionProps> = ({
   propertyId,
 }) => {
   const [loading, setLoading] = useState(false);
-  const [standards, setStandards] = useState<any[]>([]);
+  const [rawStandards, setRawStandards] = useState<any[]>([]);
   const [catalogItems, setCatalogItems] = useState<any[]>([]);
   const [roomTypes, setRoomTypes] = useState<Array<{ id: number; name: string }>>([]);
   const [hkpLocation, setHkpLocation] = useState<{ id: number; code: string; name: string } | null>(null);
 
   const [selectedMenuItemId, setSelectedMenuItemId] = useState<string>('');
-  const [itemRole, setItemRole] = useState<'COMPLIMENTARY' | 'PAID_MINIBAR'>('COMPLIMENTARY');
+  const [itemRole, setItemRole] = useState<'COMPLIMENTARY' | 'PAID_MINIBAR'>('PAID_MINIBAR');
   const [standardQty, setStandardQty] = useState<string>('2');
   const [selectedRoomTypeId, setSelectedRoomTypeId] = useState<string>('ALL');
   const [saving, setSaving] = useState(false);
@@ -28,7 +43,12 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
       const res = await authFetch(`/api/housekeeping/minibar-catalog?property_id=${propertyId}`);
       const json = await res.json();
       if (res.ok && json?.data) {
-        setStandards(Array.isArray(json.data.active_room_standards) ? json.data.active_room_standards : []);
+        const allStds = Array.isArray(json.data.standards)
+          ? json.data.standards
+          : Array.isArray(json.data.active_room_standards)
+          ? json.data.active_room_standards
+          : [];
+        setRawStandards(allStds);
         setCatalogItems(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
         setRoomTypes(Array.isArray(json.data.room_types) ? json.data.room_types : []);
         setHkpLocation(json.data.hkp_location || null);
@@ -44,6 +64,60 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
     loadData();
   }, [loadData]);
 
+  // Group standards by (menu_item_id + item_role + standard_qty) so we can show exact room type coverage
+  const groupedStandards = useMemo<GroupedStandardItem[]>(() => {
+    const totalRoomTypesCount = roomTypes.length;
+    const map = new Map<string, GroupedStandardItem>();
+
+    for (const row of rawStandards) {
+      const role: 'COMPLIMENTARY' | 'PAID_MINIBAR' =
+        String(row.item_role || 'PAID_MINIBAR').toUpperCase() === 'COMPLIMENTARY'
+          ? 'COMPLIMENTARY'
+          : 'PAID_MINIBAR';
+      const key = `${row.menu_item_id}:${role}:${row.standard_qty}`;
+      const rtId = Number(row.room_type_id || 0);
+      const rtName = String(row.room_type_name || '').trim();
+
+      const existing = map.get(key);
+      if (existing) {
+        if (rtId > 0 && !existing.room_type_ids.includes(rtId)) {
+          existing.room_type_ids.push(rtId);
+        }
+        if (rtName && !existing.room_type_names.includes(rtName)) {
+          existing.room_type_names.push(rtName);
+        }
+      } else {
+        map.set(key, {
+          id: Number(row.id),
+          menu_item_id: Number(row.menu_item_id),
+          item_name: String(row.item_name || ''),
+          sku: String(row.sku || ''),
+          item_role: role,
+          standard_qty: Number(row.standard_qty || 0),
+          unit_price: Number(row.unit_price || 0),
+          base_unit_code: String(row.base_unit_code || 'PCS').toUpperCase(),
+          hkp_stock_balance: Number(row.hkp_stock_balance || 0),
+          room_type_ids: rtId > 0 ? [rtId] : [],
+          room_type_names: rtName ? [rtName] : [],
+          is_all_room_types: false,
+        });
+      }
+    }
+
+    const result = Array.from(map.values());
+    for (const item of result) {
+      item.is_all_room_types =
+        totalRoomTypesCount > 0 && item.room_type_ids.length >= totalRoomTypesCount;
+    }
+
+    return result.sort((a, b) => {
+      if (a.item_role !== b.item_role) {
+        return a.item_role === 'COMPLIMENTARY' ? -1 : 1;
+      }
+      return a.item_name.localeCompare(b.item_name, 'id');
+    });
+  }, [rawStandards, roomTypes]);
+
   const handleSaveStandard = async () => {
     const pid = Number(selectedMenuItemId);
     const qty = Number(standardQty);
@@ -51,6 +125,11 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
       setFeedback({ type: 'error', text: 'Pilih produk dan isi jumlah standar minimal 1.' });
       return;
     }
+    const isAllRoomTypes = selectedRoomTypeId === 'ALL';
+    const targetRtName = isAllRoomTypes
+      ? `Semua Tipe Kamar (${roomTypes.length} Tipe)`
+      : roomTypes.find((rt) => String(rt.id) === String(selectedRoomTypeId))?.name || 'Tipe Kamar Terpilih';
+
     try {
       setSaving(true);
       setFeedback(null);
@@ -62,8 +141,8 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
           menu_item_id: pid,
           standard_qty: qty,
           item_role: itemRole,
-          apply_all_room_types: selectedRoomTypeId === 'ALL',
-          room_type_id: selectedRoomTypeId === 'ALL' ? null : Number(selectedRoomTypeId),
+          apply_all_room_types: isAllRoomTypes,
+          room_type_id: isAllRoomTypes ? null : Number(selectedRoomTypeId),
         }),
       });
       const json = await res.json();
@@ -72,9 +151,10 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
       }
       setFeedback({
         type: 'success',
-        text: 'Standar paket kamar (Complimentary / Minibar HKP) berhasil disimpan.',
+        text: `Standar paket kamar berhasil disimpan untuk ${targetRtName}.`,
       });
       setSelectedMenuItemId('');
+      setSelectedRoomTypeId('ALL');
       await loadData();
     } catch (err: any) {
       setFeedback({ type: 'error', text: err.message || 'Gagal menyimpan standar kamar.' });
@@ -83,11 +163,43 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
     }
   };
 
-  const handleDeleteStandard = async (stdId: number) => {
+  const handleApplyToAllRoomTypes = async (item: GroupedStandardItem) => {
+    try {
+      setSaving(true);
+      setFeedback(null);
+      const res = await authFetch('/api/housekeeping/minibar-standards', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          menu_item_id: item.menu_item_id,
+          standard_qty: item.standard_qty,
+          item_role: item.item_role,
+          apply_all_room_types: true,
+          room_type_id: null,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal menerapkan ke semua tipe kamar.');
+      }
+      setFeedback({
+        type: 'success',
+        text: `Produk "${item.item_name}" berhasil diterapkan ke Semua Tipe Kamar (${roomTypes.length} Tipe).`,
+      });
+      await loadData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || 'Gagal menerapkan ke semua tipe kamar.' });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDeleteStandard = async (stdId: number, deleteAllRoomTypes = true) => {
     try {
       setFeedback(null);
       const res = await authFetch(
-        `/api/housekeeping/minibar-standards/${stdId}?property_id=${propertyId}&all_room_types=true`,
+        `/api/housekeeping/minibar-standards/${stdId}?property_id=${propertyId}&all_room_types=${deleteAllRoomTypes ? 'true' : 'false'}`,
         { method: 'DELETE' }
       );
       if (res.ok) {
@@ -112,7 +224,7 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
             </span>
           </div>
           <p className="text-xs text-neutral-500 mt-0.5">
-            Atur produk Complimentary (contoh: Air Mineral gratis, otomatis potong stok HKP saat kamar selesai dibersihkan) dan produk Minibar Berbayar (ditagihkan & potong stok HKP saat checkout).
+            Hanya produk yang didaftarkan di tabel ini yang akan muncul sesuai peruntukannya: <strong>Complimentary Gratis</strong> (saat bersihkan kamar) atau <strong>Minibar Berbayar</strong> (saat cek kamar checkout & konfirmasi FO).
           </p>
         </div>
       </div>
@@ -131,80 +243,85 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
         )}
 
         {/* Form Tambah / Update Standar Kamar */}
-        <div className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
-          <div className="md:col-span-4">
-            <label className="block text-[11px] font-bold text-neutral-700 mb-1">
-              Pilih Produk (Master Barang / HKP) *
-            </label>
-            <select
-              value={selectedMenuItemId}
-              onChange={(e) => setSelectedMenuItemId(e.target.value)}
-              className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-            >
-              <option value="">— Pilih Produk —</option>
-              {catalogItems.map((item) => (
-                <option key={item.menu_item_id} value={item.menu_item_id}>
-                  {item.name} {item.sku ? `(${item.sku})` : ''} — Stok HKP: {item.hkp_stock_balance} {item.base_unit_code}
-                </option>
-              ))}
-            </select>
-          </div>
+        <div className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
+            <div className="md:col-span-4">
+              <label className="block text-[11px] font-bold text-neutral-700 mb-1">
+                Pilih Produk (Master Barang / HKP) *
+              </label>
+              <select
+                value={selectedMenuItemId}
+                onChange={(e) => setSelectedMenuItemId(e.target.value)}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+              >
+                <option value="">— Pilih Produk —</option>
+                {catalogItems.map((item) => (
+                  <option key={item.menu_item_id} value={item.menu_item_id}>
+                    {item.name} {item.sku ? `(${item.sku})` : ''} — Stok HKP: {item.hkp_stock_balance} {item.base_unit_code}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <div className="md:col-span-3">
-            <label className="block text-[11px] font-bold text-neutral-700 mb-1">Jenis Peruntukan Kamar *</label>
-            <select
-              value={itemRole}
-              onChange={(e) => setItemRole(e.target.value as 'COMPLIMENTARY' | 'PAID_MINIBAR')}
-              className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-            >
-              <option value="COMPLIMENTARY">Complimentary Gratis (Potong saat Bersihkan Kamar)</option>
-              <option value="PAID_MINIBAR">Minibar Berbayar (Tagih & Potong saat Checkout)</option>
-            </select>
-          </div>
+            <div className="md:col-span-3">
+              <label className="block text-[11px] font-bold text-neutral-700 mb-1">Jenis Peruntukan Kamar *</label>
+              <select
+                value={itemRole}
+                onChange={(e) => setItemRole(e.target.value as 'COMPLIMENTARY' | 'PAID_MINIBAR')}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+              >
+                <option value="COMPLIMENTARY">Complimentary Gratis (Potong saat Bersihkan Kamar)</option>
+                <option value="PAID_MINIBAR">Minibar Berbayar (Tagih & Potong saat Checkout)</option>
+              </select>
+            </div>
 
-          <div className="md:col-span-2">
-            <label className="block text-[11px] font-bold text-neutral-700 mb-1">Tipe Kamar</label>
-            <select
-              value={selectedRoomTypeId}
-              onChange={(e) => setSelectedRoomTypeId(e.target.value)}
-              className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
-            >
-              <option value="ALL">Semua Tipe Kamar</option>
-              {roomTypes.map((rt) => (
-                <option key={rt.id} value={rt.id}>
-                  {rt.name}
-                </option>
-              ))}
-            </select>
-          </div>
+            <div className="md:col-span-2">
+              <label className="block text-[11px] font-bold text-neutral-700 mb-1">Cakupan Tipe Kamar</label>
+              <select
+                value={selectedRoomTypeId}
+                onChange={(e) => setSelectedRoomTypeId(e.target.value)}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+              >
+                <option value="ALL">✓ Semua Tipe Kamar (Otomatis)</option>
+                {roomTypes.map((rt) => (
+                  <option key={rt.id} value={rt.id}>
+                    Khusus: {rt.name}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <div className="md:col-span-1">
-            <label className="block text-[11px] font-bold text-neutral-700 mb-1">Qty *</label>
-            <input
-              type="number"
-              min={1}
-              value={standardQty}
-              onChange={(e) => setStandardQty(e.target.value)}
-              className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-2.5 py-2 text-neutral-900 font-bold text-center focus:outline-none focus:ring-2 focus:ring-emerald-500"
-            />
-          </div>
+            <div className="md:col-span-1">
+              <label className="block text-[11px] font-bold text-neutral-700 mb-1">Qty *</label>
+              <input
+                type="number"
+                min={1}
+                value={standardQty}
+                onChange={(e) => setStandardQty(e.target.value)}
+                className="w-full text-xs bg-white border border-neutral-300 rounded-xl px-2.5 py-2 text-neutral-900 font-bold text-center focus:outline-none focus:ring-2 focus:ring-emerald-500"
+              />
+            </div>
 
-          <div className="md:col-span-2">
-            <button
-              type="button"
-              disabled={saving}
-              onClick={handleSaveStandard}
-              className="w-full py-2 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50"
-            >
-              {saving ? 'Menyimpan...' : '+ Simpan Standar'}
-            </button>
+            <div className="md:col-span-2">
+              <button
+                type="button"
+                disabled={saving}
+                onClick={handleSaveStandard}
+                className="w-full py-2 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50"
+              >
+                {saving ? 'Menyimpan...' : '+ Simpan Standar'}
+              </button>
+            </div>
+          </div>
+          <div className="text-[11px] text-neutral-500">
+            💡 <strong>Tips:</strong> Biarkan pilihan <strong>Cakupan Tipe Kamar</strong> pada <strong>&ldquo;✓ Semua Tipe Kamar (Otomatis)&rdquo;</strong> agar cukup 1x simpan langsung berlaku untuk seluruh tipe kamar. Pilih tipe kamar tertentu hanya jika ada kamar dengan isi minibar khusus.
           </div>
         </div>
 
         {/* Tabel Daftar Standar Aktif */}
         {loading ? (
           <div className="text-xs text-neutral-500 py-3">Memuat daftar standar kamar...</div>
-        ) : standards.length === 0 ? (
+        ) : groupedStandards.length === 0 ? (
           <div className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 text-xs text-neutral-500 text-center">
             Belum ada produk standar yang dikonfigurasi. Tambahkan produk Air Mineral sebagai <strong>Complimentary Gratis</strong> dan produk minuman/snack sebagai <strong>Minibar Berbayar</strong> di atas.
           </div>
@@ -215,6 +332,7 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                 <tr>
                   <th className="py-2.5 px-3 font-bold">Produk</th>
                   <th className="py-2.5 px-3 font-bold">Peruntukan</th>
+                  <th className="py-2.5 px-3 font-bold">Cakupan Tipe Kamar</th>
                   <th className="py-2.5 px-3 font-bold text-center">Qty Standar Kamar</th>
                   <th className="py-2.5 px-3 font-bold text-right">Harga Tagih Tamu</th>
                   <th className="py-2.5 px-3 font-bold text-right">Stok Gudang HKP</th>
@@ -222,8 +340,8 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-100">
-                {standards.map((std) => (
-                  <tr key={std.id} className="hover:bg-neutral-50/70">
+                {groupedStandards.map((std) => (
+                  <tr key={`${std.menu_item_id}-${std.item_role}-${std.standard_qty}`} className="hover:bg-neutral-50/70">
                     <td className="py-2.5 px-3">
                       <div className="font-bold text-neutral-900">{std.item_name}</div>
                       {std.sku && <div className="text-[10px] font-mono text-neutral-500">{std.sku}</div>}
@@ -237,6 +355,27 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                         <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
                           Minibar Berbayar (Cek Checkout)
                         </span>
+                      )}
+                    </td>
+                    <td className="py-2.5 px-3">
+                      {std.is_all_room_types ? (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                          ✓ Semua Tipe Kamar ({roomTypes.length} Tipe)
+                        </span>
+                      ) : (
+                        <div className="flex flex-col items-start gap-1">
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300">
+                            Khusus: {std.room_type_names.join(', ') || '1 Tipe Kamar'}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={saving}
+                            onClick={() => handleApplyToAllRoomTypes(std)}
+                            className="text-[10px] font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer disabled:opacity-50"
+                          >
+                            + Terapkan ke Semua Tipe Kamar
+                          </button>
+                        </div>
                       )}
                     </td>
                     <td className="py-2.5 px-3 text-center font-bold text-neutral-900">
@@ -253,7 +392,7 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
                     <td className="py-2.5 px-3 text-right">
                       <button
                         type="button"
-                        onClick={() => handleDeleteStandard(std.id)}
+                        onClick={() => handleDeleteStandard(std.id, std.is_all_room_types)}
                         className="text-rose-600 hover:text-rose-800 font-bold text-[11px] cursor-pointer"
                       >
                         Hapus

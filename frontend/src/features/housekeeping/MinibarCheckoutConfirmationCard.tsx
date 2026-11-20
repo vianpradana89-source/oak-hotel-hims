@@ -114,7 +114,19 @@ export const MinibarCheckoutConfirmationCard: React.FC<MinibarCheckoutConfirmati
         const res = await authFetch(`/api/housekeeping/minibar-catalog?${params.toString()}`);
         const json = await res.json();
         if (!cancelled && res.ok && json?.data) {
-          setCatalog(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
+          const paidDefaults: CatalogProduct[] = Array.isArray(json.data.minibar_defaults)
+            ? json.data.minibar_defaults.map((std: any) => ({
+                menu_item_id: Number(std.menu_item_id),
+                name: String(std.item_name || std.name || ''),
+                sku: String(std.sku || ''),
+                unit_price: Number(std.unit_price || 0),
+                base_unit_code: String(std.base_unit_code || 'PCS'),
+                hkp_stock_balance: Number(std.hkp_stock_balance || 0),
+                standard_qty: Number(std.standard_qty || 0),
+                item_role: 'PAID_MINIBAR',
+              }))
+            : [];
+          setCatalog(paidDefaults);
           if (json.data.reservation_context) {
             setResContext(json.data.reservation_context);
             // If guest has an active deposit balance > 0, default to DEPOSIT or keep FOLIO

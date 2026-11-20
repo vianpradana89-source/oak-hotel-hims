@@ -563,64 +563,70 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
                                 🥤 Pilih Produk Minibar yang Berkurang (Gudang HKP)
                               </span>
                               <span className="text-[10px] font-mono text-amber-800">
-                                Otomatis hitung harga
+                                Khusus Standar Minibar Berbayar
                               </span>
                             </div>
 
-                            {minibarDefaults.length > 0 && (
-                              <div className="flex flex-wrap gap-1.5">
-                                {minibarDefaults.map((std: any) => (
-                                  <button
-                                    key={std.menu_item_id}
-                                    type="button"
-                                    onClick={() =>
+                            {minibarDefaults.length > 0 ? (
+                              <>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {minibarDefaults.map((std: any) => (
+                                    <button
+                                      key={std.menu_item_id}
+                                      type="button"
+                                      onClick={() =>
+                                        handleAdjustMinibarItem(
+                                          {
+                                            menu_item_id: std.menu_item_id,
+                                            name: std.item_name || std.name,
+                                            sku: std.sku,
+                                            unit_price: std.unit_price,
+                                            base_unit_code: std.base_unit_code,
+                                          },
+                                          1
+                                        )
+                                      }
+                                      className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 font-semibold text-[11px] cursor-pointer"
+                                    >
+                                      + {std.item_name || std.name} (Rp {Number(std.unit_price || 0).toLocaleString('id-ID')})
+                                    </button>
+                                  ))}
+                                </div>
+
+                                <select
+                                  value={selectedAddMinibarId}
+                                  onChange={(e) => {
+                                    const pid = Number(e.target.value);
+                                    const found = minibarDefaults.find((c: any) => Number(c.menu_item_id) === pid);
+                                    if (found) {
                                       handleAdjustMinibarItem(
                                         {
-                                          menu_item_id: std.menu_item_id,
-                                          name: std.item_name,
-                                          sku: std.sku,
-                                          unit_price: std.unit_price,
-                                          base_unit_code: std.base_unit_code,
+                                          menu_item_id: found.menu_item_id,
+                                          name: found.item_name || found.name,
+                                          sku: found.sku,
+                                          unit_price: found.unit_price,
+                                          base_unit_code: found.base_unit_code,
                                         },
                                         1
-                                      )
+                                      );
                                     }
-                                    className="px-2.5 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-300 text-amber-950 font-semibold text-[11px] cursor-pointer"
-                                  >
-                                    + {std.item_name} (Rp {Number(std.unit_price || 0).toLocaleString('id-ID')})
-                                  </button>
-                                ))}
+                                    setSelectedAddMinibarId('');
+                                  }}
+                                  className="w-full text-xs bg-neutral-50 border border-neutral-300 rounded-lg px-2.5 py-1.5 text-neutral-800 cursor-pointer"
+                                >
+                                  <option value="">+ Cari / Pilih Produk Minibar yang Berkurang...</option>
+                                  {minibarDefaults.map((c: any) => (
+                                    <option key={c.menu_item_id} value={c.menu_item_id}>
+                                      {c.item_name || c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')} (Standar Kamar: {c.standard_qty} {c.base_unit_code} • Stok HKP: {c.hkp_stock_balance} {c.base_unit_code})
+                                    </option>
+                                  ))}
+                                </select>
+                              </>
+                            ) : (
+                              <div className="p-2.5 rounded-lg bg-amber-50/70 border border-amber-200 text-[11px] text-amber-900">
+                                Belum ada produk yang didaftarkan sebagai <strong>Minibar Berbayar</strong> untuk tipe kamar ini. Silakan atur terlebih dahulu di menu <strong>Pengaturan Modul &rarr; Standar Paket Complimentary &amp; Minibar Kamar</strong>.
                               </div>
                             )}
-
-                            <select
-                              value={selectedAddMinibarId}
-                              onChange={(e) => {
-                                const pid = Number(e.target.value);
-                                const found = catalogItems.find((c) => Number(c.menu_item_id) === pid);
-                                if (found) {
-                                  handleAdjustMinibarItem(
-                                    {
-                                      menu_item_id: found.menu_item_id,
-                                      name: found.name,
-                                      sku: found.sku,
-                                      unit_price: found.unit_price,
-                                      base_unit_code: found.base_unit_code,
-                                    },
-                                    1
-                                  );
-                                }
-                                setSelectedAddMinibarId('');
-                              }}
-                              className="w-full text-xs bg-neutral-50 border border-neutral-300 rounded-lg px-2.5 py-1.5 text-neutral-800 cursor-pointer"
-                            >
-                              <option value="">+ Cari / Pilih Produk Minibar yang Berkurang...</option>
-                              {catalogItems.map((c) => (
-                                <option key={c.menu_item_id} value={c.menu_item_id}>
-                                  {c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')} (Stok HKP: {c.hkp_stock_balance} {c.base_unit_code})
-                                </option>
-                              ))}
-                            </select>
 
                             {selectedMinibarItems.length > 0 && (
                               <div className="border border-neutral-200 rounded-lg divide-y divide-neutral-100 overflow-hidden">

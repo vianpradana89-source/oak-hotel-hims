@@ -529,7 +529,18 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
       const res = await authenticatedFetch(`/api/housekeeping/minibar-catalog?${params.toString()}`);
       const json = await res.json();
       if (res.ok && json?.data) {
-        setMobileMinibarCatalog(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
+        const paidDefaults = Array.isArray(json.data.minibar_defaults)
+          ? json.data.minibar_defaults.map((std: any) => ({
+              menu_item_id: Number(std.menu_item_id),
+              name: String(std.item_name || std.name || ''),
+              sku: String(std.sku || ''),
+              unit_price: Number(std.unit_price || 0),
+              base_unit_code: String(std.base_unit_code || 'PCS'),
+              hkp_stock_balance: Number(std.hkp_stock_balance || 0),
+              standard_qty: Number(std.standard_qty || 0),
+            }))
+          : [];
+        setMobileMinibarCatalog(paidDefaults);
       }
     } catch {
       // non-fatal
@@ -1668,23 +1679,43 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
                   <div className="font-bold text-amber-950 text-xs">
                     🥤 Pilih Produk Minibar yang Berkurang (Gudang HKP)
                   </div>
-                  <select
-                    value={mobileSelectedAddMinibarId}
-                    onChange={(e) => {
-                      const pid = Number(e.target.value);
-                      const found = mobileMinibarCatalog.find((c) => Number(c.menu_item_id) === pid);
-                      if (found) handleAdjustMobileMinibar(found, 1);
-                      setMobileSelectedAddMinibarId('');
-                    }}
-                    className="w-full p-2 rounded-xl bg-white border border-amber-300 text-neutral-900 text-xs"
-                  >
-                    <option value="">+ Pilih Produk Minibar yang Berkurang...</option>
-                    {mobileMinibarCatalog.map((c) => (
-                      <option key={c.menu_item_id} value={c.menu_item_id}>
-                        {c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')}
-                      </option>
-                    ))}
-                  </select>
+                  {mobileMinibarCatalog.length > 0 ? (
+                    <>
+                      <div className="flex flex-wrap gap-1.5">
+                        {mobileMinibarCatalog.map((c) => (
+                          <button
+                            key={c.menu_item_id}
+                            type="button"
+                            onClick={() => handleAdjustMobileMinibar(c, 1)}
+                            className="px-2.5 py-1 rounded-lg bg-white hover:bg-amber-100 border border-amber-300 text-amber-950 font-semibold text-[11px] cursor-pointer"
+                          >
+                            + {c.name} (Rp {Number(c.unit_price || 0).toLocaleString('id-ID')})
+                          </button>
+                        ))}
+                      </div>
+                      <select
+                        value={mobileSelectedAddMinibarId}
+                        onChange={(e) => {
+                          const pid = Number(e.target.value);
+                          const found = mobileMinibarCatalog.find((c) => Number(c.menu_item_id) === pid);
+                          if (found) handleAdjustMobileMinibar(found, 1);
+                          setMobileSelectedAddMinibarId('');
+                        }}
+                        className="w-full p-2 rounded-xl bg-white border border-amber-300 text-neutral-900 text-xs"
+                      >
+                        <option value="">+ Pilih Produk Minibar yang Berkurang...</option>
+                        {mobileMinibarCatalog.map((c) => (
+                          <option key={c.menu_item_id} value={c.menu_item_id}>
+                            {c.name} — Rp {Number(c.unit_price || 0).toLocaleString('id-ID')}
+                          </option>
+                        ))}
+                      </select>
+                    </>
+                  ) : (
+                    <div className="p-2 rounded-lg bg-white/80 border border-amber-200 text-[11px] text-amber-900">
+                      Belum ada produk yang didaftarkan sebagai <strong>Minibar Berbayar</strong> di Pengaturan Modul Housekeeping.
+                    </div>
+                  )}
 
                   {mobileSelectedMinibarItems.length > 0 && (
                     <div className="bg-white rounded-xl border border-amber-200 divide-y divide-neutral-100">
