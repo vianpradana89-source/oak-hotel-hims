@@ -1568,6 +1568,7 @@ export async function completeHousekeepingTask(
     estimated_charge?: number | null;
     minibar_items?: MinibarConsumedItemInput[] | null;
     complimentary_items?: MinibarConsumedItemInput[] | null;
+    stocked_minibar_items?: MinibarConsumedItemInput[] | null;
   } = {};
   let actor: { id?: number; name?: string; role?: string } | undefined;
 
@@ -1766,6 +1767,12 @@ export async function completeHousekeepingTask(
           roomId,
           roomNumber: task.room_number || null,
           explicitComplimentaryItems: payload.complimentary_items !== undefined ? payload.complimentary_items : null,
+          explicitStockedMinibarItems:
+            payload.stocked_minibar_items !== undefined
+              ? payload.stocked_minibar_items
+              : payload.minibar_items !== undefined
+              ? payload.minibar_items
+              : null,
           actorUserId: actor?.id ? String(actor.id) : null,
           actorName: cleaningNoteBy,
         });

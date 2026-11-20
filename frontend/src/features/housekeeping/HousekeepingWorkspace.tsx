@@ -29,6 +29,7 @@ import type {
 import { HousekeepingTaskDetailDrawer } from './HousekeepingTaskDetailDrawer';
 import { CreateTaskModal } from './CreateTaskModal';
 import { MaintenanceIssuesModal } from './MaintenanceIssuesModal';
+import { MinibarStandardsSettingsSection } from './MinibarStandardsSettingsSection';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { useAuth } from '../auth/AuthContext';
 
@@ -303,6 +304,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   const [selectedTask, setSelectedTask] = useState<HousekeepingTaskRecord | null>(null);
   const [isDrawerOpen, setIsDrawerOpen] = useState<boolean>(false);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState<boolean>(false);
+  const [isMinibarSettingsModalOpen, setIsMinibarSettingsModalOpen] = useState<boolean>(false);
   const [isActionSubmitting, setIsActionSubmitting] = useState<boolean>(false);
 
   // History Tab Specific States
@@ -1042,6 +1044,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
       estimated_charge?: number;
       minibar_items?: Array<{ menu_item_id: number; quantity: number; unit_price?: number }>;
       complimentary_items?: Array<{ menu_item_id: number; quantity: number }>;
+      stocked_minibar_items?: Array<{ menu_item_id: number; quantity: number; unit_price?: number }>;
     }
   ) => {
     setIsActionSubmitting(true);
@@ -1254,17 +1257,14 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           >
             <RefreshCw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
           </button>
-          {onNavigateToSettings && (
-            <button
-              type="button"
-              onClick={() => onNavigateToSettings('housekeeping')}
-              className="px-3 py-1.5 text-xs font-semibold text-neutral-700 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
-              title="Buka Pengaturan Housekeeping di Manajemen → Pengaturan"
-            >
-              <Settings className="w-3.5 h-3.5 text-neutral-500" />
-              Pengaturan Modul ↗
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={() => setIsMinibarSettingsModalOpen(true)}
+            className="p-2 text-neutral-600 hover:text-neutral-900 bg-neutral-100 hover:bg-neutral-200 rounded-lg transition-colors cursor-pointer border border-neutral-200"
+            title="Standar Paket Complimentary & Minibar Kamar (Gudang HKP)"
+          >
+            <Settings className="w-4 h-4" />
+          </button>
           <button
             type="button"
             onClick={() => handleOpenOoModal()}
@@ -2403,6 +2403,52 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
         apiBaseUrl={apiBaseUrl}
         onRefreshParent={() => fetchDailyOperations(true)}
       />
+
+      {/* Standar Paket Complimentary & Minibar Kamar (Gudang HKP) Modal */}
+      {isMinibarSettingsModalOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setIsMinibarSettingsModalOpen(false)}
+        >
+          <div
+            className="bg-white rounded-2xl shadow-2xl border border-neutral-200 w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-3.5 border-b border-neutral-200 bg-neutral-50 flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Settings className="w-4 h-4 text-[#1b4332]" />
+                <h3 className="text-sm font-bold text-neutral-900">
+                  Pengaturan Standar Paket Complimentary & Minibar Kamar (Gudang HKP)
+                </h3>
+              </div>
+              <div className="flex items-center gap-2">
+                {onNavigateToSettings && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsMinibarSettingsModalOpen(false);
+                      onNavigateToSettings('housekeeping');
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-semibold text-neutral-700 bg-white hover:bg-neutral-100 border border-neutral-300 rounded-lg cursor-pointer"
+                  >
+                    Pengaturan Checklist &amp; Modul HK ↗
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setIsMinibarSettingsModalOpen(false)}
+                  className="p-1.5 text-neutral-400 hover:text-neutral-700 rounded-lg hover:bg-neutral-200/60 cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+            <div className="p-5 overflow-y-auto">
+              <MinibarStandardsSettingsSection propertyId={propertyId} />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

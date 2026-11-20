@@ -310,7 +310,89 @@ export async function getMinibarCatalogAndRoomContext(
     }
   }
 
-  const minibarDefaults = activeRoomStandards.filter((s) => s.item_role === 'PAID_MINIBAR' && s.standard_qty > 0);
+  let minibarDefaults = activeRoomStandards
+    .filter((s) => s.item_role === 'PAID_MINIBAR' && s.standard_qty > 0)
+    .map((s) => ({
+      ...s,
+      stocked_qty: s.standard_qty,
+    }));
+
+  // Look up the most recent cleaning task on this room to see the exact minibar items & quantities stocked by the Room Attendant
+  let lastCleaningStockedMinibar: {
+    task_id: number;
+    completed_at: string | null;
+    processed_by: string | null;
+    items: MinibarConsumedItemSnapshot[];
+  } | null = null;
+
+  if (roomId) {
+    const lastCleanRes = await client.query(
+      `SELECT id, completed_at, complimentary_restock_meta
+         FROM housekeeping_tasks
+        WHERE property_id = $1
+          AND room_id = $2
+          AND task_type IN ('ROOM_CLEANING', 'STAYOVER_CLEANING', 'DEEP_CLEAN', 'VIP_ROOM_PREPARATION')
+          AND status IN ('DONE', 'VERIFIED')
+          AND complimentary_restock_meta IS NOT NULL
+        ORDER BY completed_at DESC NULLS LAST, id DESC
+        LIMIT 1`,
+      [propertyId, roomId]
+    );
+    if ((lastCleanRes.rowCount ?? 0) > 0) {
+      const cRow = lastCleanRes.rows[0];
+      const meta = cRow.complimentary_restock_meta || {};
+      const stockedArr: MinibarConsumedItemSnapshot[] = Array.isArray(meta.stocked_minibar_items)
+        ? meta.stocked_minibar_items
+        : [];
+      if (stockedArr.length > 0) {
+        lastCleaningStockedMinibar = {
+          task_id: Number(cRow.id),
+          completed_at: cRow.completed_at,
+          processed_by: meta.processed_by || null,
+          items: stockedArr,
+        };
+
+        // Override / enrich minibarDefaults with the exact items and quantities stocked into this room during cleaning
+        const catalogById = new Map<number, (typeof catalogItems)[number]>(
+          catalogItems.map((c) => [c.menu_item_id, c])
+        );
+        const mergedMap = new Map<number, (typeof minibarDefaults)[number]>();
+
+        for (const stocked of stockedArr) {
+          const pid = Number(stocked.menu_item_id);
+          const qty = Math.max(0, Number(stocked.quantity || 0));
+          if (!pid || qty <= 0) continue;
+          const cat = catalogById.get(pid);
+          const existingStd = minibarDefaults.find((m) => m.menu_item_id === pid);
+          mergedMap.set(pid, {
+            id: existingStd?.id || 0,
+            property_id: propertyId,
+            room_type_id: roomInfo?.room_type_id || existingStd?.room_type_id || 0,
+            room_type_name: roomInfo?.room_type_name || existingStd?.room_type_name || '',
+            menu_item_id: pid,
+            item_name: cat?.name || stocked.name || existingStd?.item_name || `Produk #${pid}`,
+            sku: cat?.sku || stocked.sku || existingStd?.sku || '',
+            standard_qty: qty,
+            stocked_qty: qty,
+            item_role: 'PAID_MINIBAR',
+            unit_price: cat ? cat.unit_price : Number(stocked.unit_price || existingStd?.unit_price || 0),
+            base_unit_code: cat?.base_unit_code || stocked.base_unit_code || existingStd?.base_unit_code || 'PCS',
+            hkp_stock_balance: cat ? cat.hkp_stock_balance : Number(existingStd?.hkp_stock_balance || 0),
+            notes: existingStd?.notes || 'Isi Minibar Kamar Saat Pembersihan',
+          });
+        }
+
+        // Also keep any newly added standard items that weren't in the snapshot yet
+        for (const std of minibarDefaults) {
+          if (!mergedMap.has(std.menu_item_id)) {
+            mergedMap.set(std.menu_item_id, std);
+          }
+        }
+
+        minibarDefaults = Array.from(mergedMap.values());
+      }
+    }
+  }
 
   // Recent checkout consumption on this room (for Room Attendant restock visibility during ROOM_CLEANING)
   let lastCheckoutConsumption: {
@@ -449,6 +531,7 @@ export async function getMinibarCatalogAndRoomContext(
     complimentary_defaults: complimentaryDefaults,
     minibar_defaults: minibarDefaults,
     catalog_items: catalogItems,
+    last_cleaning_stocked_minibar: lastCleaningStockedMinibar,
     last_checkout_consumption: lastCheckoutConsumption,
     reservation_context: reservationContext,
   };
@@ -775,12 +858,16 @@ export async function processCleaningComplimentaryAndRestock(
     roomId: number;
     roomNumber?: string | null;
     explicitComplimentaryItems?: MinibarConsumedItemInput[] | null;
+    explicitStockedMinibarItems?: MinibarConsumedItemInput[] | null;
     actorUserId?: string | null;
     actorName?: string | null;
   }
 ) {
   const { propertyId, taskId, roomId } = params;
   let itemsToDeduct: MinibarConsumedItemSnapshot[] = [];
+  let stockedMinibarItems: MinibarConsumedItemSnapshot[] = [];
+
+  const ctx = await getMinibarCatalogAndRoomContext(client, propertyId, { roomId });
 
   if (Array.isArray(params.explicitComplimentaryItems)) {
     itemsToDeduct = await normalizeMinibarItemsList(
@@ -790,8 +877,6 @@ export async function processCleaningComplimentaryAndRestock(
       'COMPLIMENTARY'
     );
   } else {
-    // Use room's configured COMPLIMENTARY standard
-    const ctx = await getMinibarCatalogAndRoomContext(client, propertyId, { roomId });
     const rawDefaults = ctx.complimentary_defaults.map((d) => ({
       menu_item_id: d.menu_item_id,
       quantity: d.standard_qty,
@@ -800,23 +885,42 @@ export async function processCleaningComplimentaryAndRestock(
     itemsToDeduct = await normalizeMinibarItemsList(client, propertyId, rawDefaults, 'COMPLIMENTARY');
   }
 
-  if (itemsToDeduct.length === 0) {
+  if (Array.isArray(params.explicitStockedMinibarItems)) {
+    stockedMinibarItems = await normalizeMinibarItemsList(
+      client,
+      propertyId,
+      params.explicitStockedMinibarItems,
+      'PAID_MINIBAR'
+    );
+  } else {
+    const rawMinibarDefaults = ctx.minibar_defaults.map((d) => ({
+      menu_item_id: d.menu_item_id,
+      quantity: d.standard_qty,
+      unit_price: d.unit_price,
+    }));
+    stockedMinibarItems = await normalizeMinibarItemsList(client, propertyId, rawMinibarDefaults, 'PAID_MINIBAR');
+  }
+
+  if (itemsToDeduct.length === 0 && stockedMinibarItems.length === 0) {
     return null;
   }
 
   const summaryLabel = itemsToDeduct.map((i) => `${i.quantity}x ${i.name}`).join(', ');
-  const deduction = await deductItemsFromHkpStock(client, {
-    propertyId,
-    operationKey: `HK_CLEANING_COMP_TASK_${taskId}`,
-    items: itemsToDeduct,
-    isComplimentary: true,
-    taskId,
-    roomId,
-    roomNumber: params.roomNumber || null,
-    actorUserId: params.actorUserId || null,
-    actorName: params.actorName || 'Room Attendant',
-    notes: `Complimentary Kamar ${params.roomNumber || `#${roomId}`} (Task #${taskId}): ${summaryLabel}`,
-  });
+  const deduction =
+    itemsToDeduct.length > 0
+      ? await deductItemsFromHkpStock(client, {
+          propertyId,
+          operationKey: `HK_CLEANING_COMP_TASK_${taskId}`,
+          items: itemsToDeduct,
+          isComplimentary: true,
+          taskId,
+          roomId,
+          roomNumber: params.roomNumber || null,
+          actorUserId: params.actorUserId || null,
+          actorName: params.actorName || 'Room Attendant',
+          notes: `Complimentary Kamar ${params.roomNumber || `#${roomId}`} (Task #${taskId}): ${summaryLabel}`,
+        })
+      : { deducted: false, operation_id: null, location: ctx.hkp_location, movements: [] };
 
   const meta = {
     processed_at: new Date().toISOString(),
@@ -824,6 +928,7 @@ export async function processCleaningComplimentaryAndRestock(
     location_code: deduction.location?.code || 'HKP',
     operation_id: deduction.operation_id,
     complimentary_items: itemsToDeduct,
+    stocked_minibar_items: stockedMinibarItems,
     movements: deduction.movements,
   };
 

@@ -882,7 +882,8 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
           issue_note: req.body.issue_note,
           estimated_charge: req.body.estimated_charge,
           minibar_items: req.body.minibar_items,
-          complimentary_items: req.body.complimentary_items
+          complimentary_items: req.body.complimentary_items,
+          stocked_minibar_items: req.body.stocked_minibar_items
         },
         actor
       );
