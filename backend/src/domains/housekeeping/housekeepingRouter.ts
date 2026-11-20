@@ -47,6 +47,7 @@ import {
   getMinibarCatalogAndRoomContext,
   upsertRoomMinibarStandard,
   deleteRoomMinibarStandard,
+  stockReadyRoomsMinibarAndComplimentary,
   confirmCheckoutMinibarBilling
 } from './minibarWorkflowService';
 import { authorizeHousekeepingChecklistMutation } from './assignedCrewChecklistAccess';
@@ -1024,6 +1025,31 @@ export function createHousekeepingRouter(pool: Pool, broadcastEvent?: Housekeepi
         standardId,
         req.query.all_room_types !== 'false'
       );
+      await client.query('COMMIT');
+      res.json({ status: 'OK', success: true, data: result });
+    } catch (err: any) {
+      await client.query('ROLLBACK').catch(() => {});
+      const sc = err.statusCode || 500;
+      res.status(sc).json({ status: 'ERROR', code: err.code || 'INTERNAL', message: err.message });
+    } finally {
+      client.release();
+    }
+  });
+
+  router.post('/minibar-stock-ready-rooms', async (req: Request, res: Response) => {
+    const client = await pool.connect();
+    try {
+      const propertyId = parsePropertyId(req.body.property_id || req.body.propertyId);
+      await assertPropertyExists(propertyId);
+      await client.query('BEGIN');
+      const result = await stockReadyRoomsMinibarAndComplimentary(client, {
+        propertyId,
+        roomIds: Array.isArray(req.body.room_ids) ? req.body.room_ids : null,
+        applyAllReadyRooms: req.body.apply_all_ready_rooms === true,
+        deductComplimentary: req.body.deduct_complimentary !== false,
+        actorUserId: req.body.actor_id ? String(req.body.actor_id) : null,
+        actorName: req.body.actor_name || 'Housekeeping',
+      });
       await client.query('COMMIT');
       res.json({ status: 'OK', success: true, data: result });
     } catch (err: any) {

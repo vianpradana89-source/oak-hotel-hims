@@ -516,9 +516,19 @@ export async function getMinibarCatalogAndRoomContext(
     }
   }
 
-  // Also load room_types for Settings management
+  // Also load room_types and ready_rooms for Settings management
   const rtRes = await client.query(
     `SELECT id, name FROM room_types WHERE property_id = $1 ORDER BY id ASC`,
+    [propertyId]
+  );
+
+  const readyRoomsRes = await client.query(
+    `SELECT r.id, r.room_number, r.status, r.room_type_id, COALESCE(rt.name, 'Standard') AS room_type_name
+       FROM rooms r
+       LEFT JOIN room_types rt ON rt.id = r.room_type_id
+      WHERE r.property_id = $1
+        AND UPPER(COALESCE(r.status, '')) IN ('VACANT_CLEAN', 'INSPECTED', 'OCCUPIED_CLEAN')
+      ORDER BY r.room_number ASC`,
     [propertyId]
   );
 
@@ -526,6 +536,13 @@ export async function getMinibarCatalogAndRoomContext(
     hkp_location: hkpLocation,
     room: roomInfo,
     room_types: rtRes.rows.map((rt: any) => ({ id: Number(rt.id), name: String(rt.name || '') })),
+    ready_rooms: readyRoomsRes.rows.map((rr: any) => ({
+      id: Number(rr.id),
+      room_number: String(rr.room_number || ''),
+      status: String(rr.status || 'VACANT_CLEAN'),
+      room_type_id: Number(rr.room_type_id || 0),
+      room_type_name: String(rr.room_type_name || ''),
+    })),
     standards: allPropertyStandards,
     active_room_standards: activeRoomStandards,
     complimentary_defaults: complimentaryDefaults,
@@ -941,6 +958,171 @@ export async function processCleaningComplimentaryAndRestock(
   );
 
   return meta;
+}
+
+/**
+ * Stocks Complimentary & Paid Minibar into rooms that are ALREADY in READY state (VACANT_CLEAN / INSPECTED / OCCUPIED_CLEAN)
+ * without changing their room status or requiring a full re-clean.
+ */
+export async function stockReadyRoomsMinibarAndComplimentary(
+  client: PoolClient,
+  params: {
+    propertyId: number;
+    roomIds?: number[] | null;
+    applyAllReadyRooms?: boolean;
+    deductComplimentary?: boolean;
+    actorUserId?: string | null;
+    actorName?: string | null;
+  }
+) {
+  const { propertyId } = params;
+  const deductComp = params.deductComplimentary !== false;
+  const actorName = params.actorName || 'Housekeeping';
+  const todayKey = new Date().toISOString().slice(0, 10);
+
+  let targetRooms: Array<{ id: number; room_number: string; status: string }> = [];
+  if (!params.applyAllReadyRooms && Array.isArray(params.roomIds) && params.roomIds.length > 0) {
+    const cleanIds = params.roomIds.map(Number).filter((n) => Number.isInteger(n) && n > 0);
+    const rRes = await client.query(
+      `SELECT id, room_number, status FROM rooms WHERE property_id = $1 AND id = ANY($2::int[]) ORDER BY room_number ASC`,
+      [propertyId, cleanIds]
+    );
+    targetRooms = rRes.rows.map((r: any) => ({
+      id: Number(r.id),
+      room_number: String(r.room_number || ''),
+      status: String(r.status || 'VACANT_CLEAN'),
+    }));
+  } else {
+    const rRes = await client.query(
+      `SELECT id, room_number, status
+         FROM rooms
+        WHERE property_id = $1
+          AND UPPER(COALESCE(status, '')) IN ('VACANT_CLEAN', 'INSPECTED', 'OCCUPIED_CLEAN')
+        ORDER BY room_number ASC`,
+      [propertyId]
+    );
+    targetRooms = rRes.rows.map((r: any) => ({
+      id: Number(r.id),
+      room_number: String(r.room_number || ''),
+      status: String(r.status || 'VACANT_CLEAN'),
+    }));
+  }
+
+  if (targetRooms.length === 0) {
+    throw Object.assign(new Error('Tidak ada kamar berstatus Siap Huni (Ready) yang dipilih.'), {
+      statusCode: 400,
+      code: 'NO_READY_ROOMS',
+    });
+  }
+
+  const processedRooms: Array<{
+    room_id: number;
+    room_number: string;
+    complimentary_count: number;
+    minibar_count: number;
+    deducted_hkp: boolean;
+  }> = [];
+
+  for (const rm of targetRooms) {
+    const ctx = await getMinibarCatalogAndRoomContext(client, propertyId, { roomId: rm.id });
+    const rawComp = ctx.complimentary_defaults.map((d) => ({
+      menu_item_id: d.menu_item_id,
+      quantity: d.standard_qty,
+      unit_price: 0,
+    }));
+    const rawMb = ctx.minibar_defaults.map((d) => ({
+      menu_item_id: d.menu_item_id,
+      quantity: d.standard_qty,
+      unit_price: d.unit_price,
+    }));
+
+    const compSnapshot = await normalizeMinibarItemsList(client, propertyId, rawComp, 'COMPLIMENTARY');
+    const mbSnapshot = await normalizeMinibarItemsList(client, propertyId, rawMb, 'PAID_MINIBAR');
+
+    // Find most recent completed cleaning task for this room, or create a completed restock record
+    let targetTaskId: number | null = null;
+    const lastTaskRes = await client.query(
+      `SELECT id
+         FROM housekeeping_tasks
+        WHERE property_id = $1
+          AND room_id = $2
+          AND task_type IN ('ROOM_CLEANING', 'STAYOVER_CLEANING', 'DEEP_CLEAN', 'VIP_ROOM_PREPARATION')
+          AND status IN ('DONE', 'VERIFIED')
+        ORDER BY completed_at DESC NULLS LAST, id DESC
+        LIMIT 1`,
+      [propertyId, rm.id]
+    );
+
+    if ((lastTaskRes.rowCount ?? 0) > 0) {
+      targetTaskId = Number(lastTaskRes.rows[0].id);
+    } else {
+      const taskNo = `HK-MB-INIT-${rm.room_number}-${Date.now().toString().slice(-5)}`;
+      const insTask = await client.query(
+        `INSERT INTO housekeeping_tasks (
+           property_id, task_number, room_id, room_number,
+           task_category, task_type, title, description,
+           priority, status, assigned_department, assigned_user_name_snapshot,
+           cleaned_by_name, completed_at, completion_note, source_type, created_at, updated_at
+         ) VALUES (
+           $1, $2, $3, $4,
+           'ROOM_OPERATIONS', 'ROOM_CLEANING', $5, 'Pengisian Standar Minibar & Complimentary Kamar Siap Huni',
+           'NORMAL', 'DONE', 'Housekeeping', $6,
+           $6, NOW(), 'Pengisian Minibar & Complimentary pada kamar yang sudah Ready', 'READY_ROOM_RESTOCK', NOW(), NOW()
+         ) RETURNING id`,
+        [propertyId, taskNo, rm.id, rm.room_number, `Restock Minibar & Complimentary Kamar ${rm.room_number}`, actorName]
+      );
+      targetTaskId = Number(insTask.rows[0].id);
+    }
+
+    let deductionResult: any = { deducted: false, operation_id: null, movements: [] };
+    if (deductComp && compSnapshot.length > 0) {
+      const summaryLabel = compSnapshot.map((i) => `${i.quantity}x ${i.name}`).join(', ');
+      deductionResult = await deductItemsFromHkpStock(client, {
+        propertyId,
+        operationKey: `HK_READY_COMP_ROOM_${rm.id}_${todayKey}`,
+        items: compSnapshot,
+        isComplimentary: true,
+        taskId: targetTaskId,
+        roomId: rm.id,
+        roomNumber: rm.room_number,
+        actorUserId: params.actorUserId || null,
+        actorName,
+        notes: `Complimentary Kamar Ready ${rm.room_number}: ${summaryLabel}`,
+      });
+    }
+
+    const meta = {
+      processed_at: new Date().toISOString(),
+      processed_by: actorName,
+      source: 'READY_ROOM_RESTOCK',
+      location_code: ctx.hkp_location.code,
+      operation_id: deductionResult.operation_id || null,
+      complimentary_items: compSnapshot,
+      stocked_minibar_items: mbSnapshot,
+      movements: deductionResult.movements || [],
+    };
+
+    await client.query(
+      `UPDATE housekeeping_tasks
+          SET complimentary_restock_meta = $1::jsonb,
+              updated_at = NOW()
+        WHERE id = $2 AND property_id = $3`,
+      [JSON.stringify(meta), targetTaskId, propertyId]
+    );
+
+    processedRooms.push({
+      room_id: rm.id,
+      room_number: rm.room_number,
+      complimentary_count: compSnapshot.reduce((s, i) => s + i.quantity, 0),
+      minibar_count: mbSnapshot.reduce((s, i) => s + i.quantity, 0),
+      deducted_hkp: Boolean(deductionResult.deducted && !deductionResult.replayed),
+    });
+  }
+
+  return {
+    rooms_count: processedRooms.length,
+    processed_rooms: processedRooms,
+  };
 }
 
 /**

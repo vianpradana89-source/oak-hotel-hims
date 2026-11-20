@@ -27,12 +27,16 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
   const [rawStandards, setRawStandards] = useState<any[]>([]);
   const [catalogItems, setCatalogItems] = useState<any[]>([]);
   const [roomTypes, setRoomTypes] = useState<Array<{ id: number; name: string }>>([]);
+  const [readyRooms, setReadyRooms] = useState<Array<{ id: number; room_number: string; status: string; room_type_name: string }>>([]);
   const [hkpLocation, setHkpLocation] = useState<{ id: number; code: string; name: string } | null>(null);
 
   const [selectedMenuItemId, setSelectedMenuItemId] = useState<string>('');
   const [itemRole, setItemRole] = useState<'COMPLIMENTARY' | 'PAID_MINIBAR'>('PAID_MINIBAR');
   const [standardQty, setStandardQty] = useState<string>('2');
   const [selectedRoomTypeId, setSelectedRoomTypeId] = useState<string>('ALL');
+  const [selectedReadyRoomTarget, setSelectedReadyRoomTarget] = useState<string>('ALL');
+  const [deductCompOnReadyStock, setDeductCompOnReadyStock] = useState<boolean>(true);
+  const [stockingReady, setStockingReady] = useState<boolean>(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
@@ -51,6 +55,7 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
         setRawStandards(allStds);
         setCatalogItems(Array.isArray(json.data.catalog_items) ? json.data.catalog_items : []);
         setRoomTypes(Array.isArray(json.data.room_types) ? json.data.room_types : []);
+        setReadyRooms(Array.isArray(json.data.ready_rooms) ? json.data.ready_rooms : []);
         setHkpLocation(json.data.hkp_location || null);
       }
     } catch {
@@ -208,6 +213,40 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
       }
     } catch {
       // ignore
+    }
+  };
+
+  const handleStockReadyRooms = async () => {
+    try {
+      setStockingReady(true);
+      setFeedback(null);
+      const isAllReady = selectedReadyRoomTarget === 'ALL';
+      const res = await authFetch('/api/housekeeping/minibar-stock-ready-rooms', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: propertyId,
+          apply_all_ready_rooms: isAllReady,
+          room_ids: isAllReady ? null : [Number(selectedReadyRoomTarget)],
+          deduct_complimentary: deductCompOnReadyStock,
+        }),
+      });
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal mengisi minibar/complimentary ke kamar Ready.');
+      }
+      const count = Number(json.data?.rooms_count || 0);
+      setFeedback({
+        type: 'success',
+        text: `Berhasil mencatat pengisian Minibar & Complimentary pada ${count} kamar Ready${
+          deductCompOnReadyStock ? ' (stok Complimentary HKP otomatis dipotong)' : ''
+        }.`,
+      });
+      await loadData();
+    } catch (err: any) {
+      setFeedback({ type: 'error', text: err.message || 'Gagal mengisi minibar/complimentary ke kamar Ready.' });
+    } finally {
+      setStockingReady(false);
     }
   };
 
@@ -404,6 +443,75 @@ export const MinibarStandardsSettingsSection: React.FC<MinibarStandardsSettingsS
             </table>
           </div>
         )}
+
+        {/* Panel Pengisian untuk Kamar yang Sudah Terlanjur Ready (VACANT_CLEAN / INSPECTED) */}
+        <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-3 text-xs">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <div className="font-bold text-emerald-950 flex items-center gap-1.5">
+                <span>🏨 Isi Complimentary &amp; Minibar ke Kamar yang Sudah Terlanjur Ready (Siap Huni)</span>
+              </div>
+              <p className="text-[11px] text-emerald-800 mt-0.5">
+                Gunakan fitur ini untuk mengisi/mencatat stok Minibar &amp; Complimentary pada kamar yang saat ini sudah berstatus <strong>VACANT_CLEAN / INSPECTED</strong> tanpa harus mengubah status kamar menjadi kotor.
+              </p>
+            </div>
+            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-900 border border-emerald-300">
+              {readyRooms.length} Kamar Ready Saat Ini
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-center">
+            <div className="md:col-span-4">
+              <label className="block text-[11px] font-bold text-emerald-950 mb-1">
+                Pilih Kamar Siap Huni (Ready)
+              </label>
+              <select
+                value={selectedReadyRoomTarget}
+                onChange={(e) => setSelectedReadyRoomTarget(e.target.value)}
+                className="w-full text-xs bg-white border border-emerald-300 rounded-xl px-3 py-2 text-neutral-800 focus:outline-none focus:ring-2 focus:ring-emerald-600 cursor-pointer"
+              >
+                <option value="ALL">✓ Semua Kamar Ready ({readyRooms.length} Kamar)</option>
+                {readyRooms.map((rm) => (
+                  <option key={rm.id} value={rm.id}>
+                    Kamar {rm.room_number} — {rm.room_type_name} ({rm.status})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="md:col-span-5 pt-3 md:pt-4">
+              <label className="flex items-start gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={deductCompOnReadyStock}
+                  onChange={(e) => setDeductCompOnReadyStock(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-emerald-400 text-[#1b4332] focus:ring-emerald-600 cursor-pointer"
+                />
+                <span className="text-[11px] text-emerald-950 font-medium">
+                  Potong juga stok <strong>Complimentary Gratis (Air Mineral)</strong> dari Gudang HKP sekarang
+                  <span className="block text-[10px] text-emerald-700 font-normal">
+                    (Jika tidak dicentang, sistem hanya mencatat isi kulkas Minibar Berbayar tanpa memotong stok Air Mineral HKP).
+                  </span>
+                </span>
+              </label>
+            </div>
+
+            <div className="md:col-span-3 pt-2 md:pt-4">
+              <button
+                type="button"
+                disabled={stockingReady || readyRooms.length === 0}
+                onClick={handleStockReadyRooms}
+                className="w-full py-2.5 px-3 rounded-xl text-xs font-bold text-white bg-[#1b4332] hover:bg-[#143326] transition shadow-xs cursor-pointer disabled:opacity-50"
+              >
+                {stockingReady
+                  ? 'Memproses Kamar...'
+                  : selectedReadyRoomTarget === 'ALL'
+                  ? `💧 Isi ke Semua Kamar Ready (${readyRooms.length})`
+                  : '💧 Isi ke Kamar Terpilih'}
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

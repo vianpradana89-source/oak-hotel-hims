@@ -343,6 +343,121 @@ export async function snapshotTemplateToChecklist(
   return snapshotItems;
 }
 
+export async function syncActiveTasksWithChecklistTemplates(
+  client: PoolClient | Pool,
+  propertyId: number,
+  specificTaskId?: number | null
+): Promise<void> {
+  try {
+    const taskFilter = specificTaskId && Number.isInteger(Number(specificTaskId)) ? Number(specificTaskId) : null;
+
+    // 1. Remove checklist items from active (unfinished) tasks if their template item or template group was deleted, deactivated, or archived
+    await client.query(
+      `DELETE FROM housekeeping_task_checklist_items tci
+        USING housekeeping_tasks ht
+        WHERE tci.task_id = ht.id
+          AND ht.property_id = $1
+          AND ht.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+          AND COALESCE(ht.is_archived, FALSE) = FALSE
+          AND ($2::int IS NULL OR ht.id = $2)
+          AND (
+            (tci.template_item_id IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM checklist_template_items ti
+               WHERE ti.id = tci.template_item_id
+                 AND ti.is_active = TRUE
+                 AND COALESCE(ti.is_archived, FALSE) = FALSE
+            ))
+            OR
+            (COALESCE(tci.group_id, tci.source_group_id) IS NOT NULL AND NOT EXISTS (
+              SELECT 1 FROM checklist_template_groups tg
+               WHERE tg.id = COALESCE(tci.group_id, tci.source_group_id)
+                 AND tg.is_active = TRUE
+                 AND COALESCE(tg.is_archived, FALSE) = FALSE
+            ))
+          )`,
+      [propertyId, taskFilter]
+    );
+
+    // 2. Sync label, required status, sort order, and group metadata on active task checklist items
+    await client.query(
+      `UPDATE housekeeping_task_checklist_items tci
+          SET label = ti.label,
+              is_required = ti.is_required,
+              requires_note = ti.requires_note,
+              requires_photo = ti.requires_photo,
+              sort_order = ti.sort_order,
+              group_id = ti.group_id,
+              source_group_id = ti.group_id,
+              group_code = tg.code,
+              group_name = COALESCE(tg.name, ti.section, tci.group_name),
+              group_sort_order = COALESCE(tg.sort_order, tci.group_sort_order, 10),
+              section = COALESCE(tg.name, ti.section, tci.section),
+              updated_at = NOW()
+         FROM housekeeping_tasks ht,
+              checklist_template_items ti
+         LEFT JOIN checklist_template_groups tg ON tg.id = ti.group_id
+        WHERE tci.task_id = ht.id
+          AND tci.template_item_id = ti.id
+          AND ht.property_id = $1
+          AND ht.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+          AND COALESCE(ht.is_archived, FALSE) = FALSE
+          AND ($2::int IS NULL OR ht.id = $2)
+          AND (
+            tci.label IS DISTINCT FROM ti.label
+            OR tci.is_required IS DISTINCT FROM ti.is_required
+            OR tci.sort_order IS DISTINCT FROM ti.sort_order
+            OR tci.group_name IS DISTINCT FROM COALESCE(tg.name, ti.section, tci.group_name)
+            OR tci.group_sort_order IS DISTINCT FROM COALESCE(tg.sort_order, tci.group_sort_order, 10)
+          )`,
+      [propertyId, taskFilter]
+    );
+
+    // 3. Insert newly added active template items into active tasks that already use that template
+    await client.query(
+      `INSERT INTO housekeeping_task_checklist_items (
+         task_id, template_item_id, group_id, source_group_id, group_code, group_name, group_sort_order,
+         section, label, sort_order, is_required, requires_note, requires_photo, is_completed, created_at, updated_at
+       )
+       SELECT DISTINCT
+         ht.id,
+         ti.id,
+         ti.group_id,
+         ti.group_id,
+         tg.code,
+         COALESCE(tg.name, ti.section, 'RUANGAN KAMAR'),
+         COALESCE(tg.sort_order, 10),
+         ti.section,
+         ti.label,
+         ti.sort_order,
+         ti.is_required,
+         ti.requires_note,
+         ti.requires_photo,
+         FALSE,
+         NOW(),
+         NOW()
+       FROM housekeeping_tasks ht
+       JOIN housekeeping_task_checklist_items existing_tci ON existing_tci.task_id = ht.id
+       JOIN checklist_template_items existing_ti ON existing_ti.id = existing_tci.template_item_id
+       JOIN checklist_template_items ti ON ti.template_id = existing_ti.template_id
+       LEFT JOIN checklist_template_groups tg ON tg.id = ti.group_id
+       WHERE ht.property_id = $1
+         AND ht.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
+         AND COALESCE(ht.is_archived, FALSE) = FALSE
+         AND ($2::int IS NULL OR ht.id = $2)
+         AND ti.is_active = TRUE
+         AND COALESCE(ti.is_archived, FALSE) = FALSE
+         AND (ti.group_id IS NULL OR (tg.id IS NOT NULL AND tg.is_active = TRUE AND COALESCE(tg.is_archived, FALSE) = FALSE))
+         AND NOT EXISTS (
+           SELECT 1 FROM housekeeping_task_checklist_items check_tci
+            WHERE check_tci.task_id = ht.id AND check_tci.template_item_id = ti.id
+         )`,
+      [propertyId, taskFilter]
+    );
+  } catch (err) {
+    console.warn('[Housekeeping] Non-fatal checklist live-sync warning:', err);
+  }
+}
+
 export async function getTaskChecklistItems(
   client: PoolClient | Pool,
   propertyId: number,
@@ -354,6 +469,10 @@ export async function getTaskChecklistItems(
     throw Object.assign(new Error('Tugas housekeeping tidak ditemukan pada properti ini.'), { statusCode: 404, code: 'NOT_FOUND' });
   }
   const task = taskCheck.rows[0];
+
+  if (['REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED'].includes(task.status) && !task.is_archived) {
+    await syncActiveTasksWithChecklistTemplates(client, propertyId, taskId);
+  }
 
   const res = await client.query(
     `SELECT * FROM housekeeping_task_checklist_items WHERE task_id = $1 ORDER BY COALESCE(group_sort_order, 0) ASC, sort_order ASC, id ASC`,
@@ -718,6 +837,7 @@ export async function getHousekeepingDailyOperations(
   let checklistItemsMap = new Map<number, TaskChecklistItem[]>();
 
   if (taskIds.length > 0) {
+    await syncActiveTasksWithChecklistTemplates(client, propertyId);
     const itemsRes = await client.query(
       `SELECT * FROM housekeeping_task_checklist_items WHERE task_id = ANY($1::int[]) ORDER BY sort_order ASC, id ASC`,
       [taskIds]
@@ -2922,6 +3042,8 @@ export async function updateChecklistTemplateGroup(
     ['HOUSEKEEPING', 'HK_TEMPLATE_GROUP_UPDATED', 'TEMPLATE_GROUP', String(groupId), JSON.stringify(updated), actor?.name || 'Admin', propertyId]
   );
 
+  await syncActiveTasksWithChecklistTemplates(client, propertyId);
+
   return updated;
 }
 
@@ -2968,6 +3090,8 @@ export async function deleteChecklistTemplateGroup(
       ['HOUSEKEEPING', 'HK_TEMPLATE_GROUP_ARCHIVED', 'TEMPLATE_GROUP', String(groupId), JSON.stringify({ is_archived: true, is_active: false }), actor?.name || 'Admin', propertyId]
     );
 
+    await syncActiveTasksWithChecklistTemplates(client, propertyId);
+
     return {
       success: true,
       archived: true,
@@ -2985,6 +3109,8 @@ export async function deleteChecklistTemplateGroup(
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     ['HOUSEKEEPING', 'HK_TEMPLATE_GROUP_DELETED', 'TEMPLATE_GROUP', String(groupId), JSON.stringify({ deleted: true }), actor?.name || 'Admin', propertyId]
   );
+
+  await syncActiveTasksWithChecklistTemplates(client, propertyId);
 
   return {
     success: true,
@@ -3106,6 +3232,8 @@ export async function addChecklistTemplateItem(
     ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_CREATED', 'TEMPLATE_ITEM', String(created.id), JSON.stringify(created), actor?.name || 'Admin', propertyId]
   );
 
+  await syncActiveTasksWithChecklistTemplates(client, propertyId);
+
   return created;
 }
 
@@ -3167,6 +3295,8 @@ export async function updateChecklistTemplateItem(
     ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_UPDATED', 'TEMPLATE_ITEM', String(itemId), JSON.stringify(updated), actor?.name || 'Admin', propertyId]
   );
 
+  await syncActiveTasksWithChecklistTemplates(client, propertyId);
+
   return updated;
 }
 
@@ -3204,6 +3334,7 @@ export async function deleteChecklistTemplateItem(
        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
       ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_ARCHIVED', 'TEMPLATE_ITEM', String(itemId), JSON.stringify({ is_archived: true, is_active: false }), actor?.name || 'Admin', propertyId]
     );
+    await syncActiveTasksWithChecklistTemplates(client, propertyId);
     return { success: true, archived: true, deleted: false, deactivated: true, message: 'Butir checklist telah diarsipkan karena memiliki riwayat tugas operasional.' };
   }
 
@@ -3218,6 +3349,8 @@ export async function deleteChecklistTemplateItem(
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     ['HOUSEKEEPING', 'HK_TEMPLATE_ITEM_DELETED', 'TEMPLATE_ITEM', String(itemId), JSON.stringify({ deleted: true }), actor?.name || 'Admin', propertyId]
   );
+
+  await syncActiveTasksWithChecklistTemplates(client, propertyId);
 
   return { success: true, archived: false, deleted: true, message: 'Butir checklist berhasil dihapus permanen.' };
 }
