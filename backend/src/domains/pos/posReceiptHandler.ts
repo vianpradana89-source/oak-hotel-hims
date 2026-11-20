@@ -173,35 +173,35 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
       return;
     }
 
-    // â”€â”€ 5. Hanya receipt untuk order final PAID â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── 5. Receipt untuk order PAID, BILLED_TO_ROOM, atau OPEN ───────────
     const orderStatus = String(order.status ?? '').toUpperCase();
-    if (orderStatus !== 'PAID') {
+    if (orderStatus !== 'PAID' && orderStatus !== 'BILLED_TO_ROOM' && orderStatus !== 'OPEN') {
       res.status(409).json({
         status: 'CONFLICT',
         code: 'RECEIPT_NOT_AVAILABLE',
-        message: `Receipt hanya tersedia untuk order PAID (status saat ini: ${orderStatus || 'UNKNOWN'})`,
+        message: `Receipt tidak tersedia untuk status order saat ini: ${orderStatus || 'UNKNOWN'}`,
       });
       return;
     }
 
-    // â”€â”€ 6. Read items dari immutable snapshot (TANPA JOIN pos_menu_items) â”€
-    // item_name_snapshot & item_code_snapshot adalah kolom immutable per row.
+    // ── 6. Read items dari immutable snapshot (fallback ke pos_menu_items bila snapshot kosong) ─
     let items: Record<string, unknown>[];
     try {
       items = await queryAll(
         deps,
-        `SELECT menu_item_id,
-                item_name_snapshot,
-                item_code_snapshot,
-                quantity,
-                unit_price,
-                notes,
-                discount_type,
-                discount_value,
-                discount_amount
-         FROM pos_order_items
-         WHERE order_id = $1
-         ORDER BY id`,
+        `SELECT poi.menu_item_id,
+                COALESCE(NULLIF(TRIM(poi.item_name_snapshot), ''), pmi.name, 'Menu Item') AS item_name_snapshot,
+                COALESCE(NULLIF(TRIM(poi.item_code_snapshot), ''), pmi.sku, '') AS item_code_snapshot,
+                poi.quantity,
+                poi.unit_price,
+                poi.notes,
+                poi.discount_type,
+                poi.discount_value,
+                poi.discount_amount
+         FROM pos_order_items poi
+         LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id
+         WHERE poi.order_id = $1
+         ORDER BY poi.id`,
         [orderId],
       );
     } catch {
@@ -209,171 +209,223 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
       return;
     }
 
-    // â”€â”€ 7. Query canonical settlement (status='SUCCESS') â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // pos_settlements.transaction_id adalah BIGINT â†’ pg mengembalikan string.
-    let settlement: Record<string, unknown> | null;
-    try {
-      // Hitung jumlah settlement SUCCESS per order untuk fail-closed.
-      const countRes = await queryOne<{ n: string }>(
-        deps,
-        `SELECT COUNT(*)::text AS n
-         FROM pos_settlements
-         WHERE property_id = $1 AND pos_order_id = $2 AND status = 'SUCCESS'`,
-        [propertyId, orderId],
-      );
-      const settlementCount = Number(countRes?.n ?? '0');
+    let settlement: Record<string, unknown> | null = null;
+    let sale: Record<string, unknown> | null = null;
+    let saleTxType = 'SALE';
+    let saleSourceType = 'POS_ORDER';
+    let saleSourceId = String(orderId);
+    let salePaymentStatus = orderStatus;
+    let salePaymentMethod = orderStatus === 'BILLED_TO_ROOM' ? 'TAGIH KE KAMAR' : 'BELUM BAYAR (OPEN)';
+    let orderTotalNum = Math.round(Number(String(order.total_amount ?? '0')));
+    let orderServiceNum = 0;
+    let orderTaxNum = 0;
 
-      if (settlementCount === 0) {
+    if (orderStatus === 'PAID') {
+      // ── 7. Query canonical settlement (status='SUCCESS') ──────────────────
+      try {
+        const countRes = await queryOne<{ n: string }>(
+          deps,
+          `SELECT COUNT(*)::text AS n
+           FROM pos_settlements
+           WHERE property_id = $1 AND pos_order_id = $2 AND status = 'SUCCESS'`,
+          [propertyId, orderId],
+        );
+        const settlementCount = Number(countRes?.n ?? '0');
+
+        if (settlementCount === 0) {
+          res.status(409).json({
+            status: 'CONFLICT',
+            code: 'RECEIPT_NOT_AVAILABLE',
+            message: 'Tidak ada settlement SUCCESS untuk order ini',
+          });
+          return;
+        }
+        if (settlementCount > 1) {
+          integrityError(res, `Lebih dari satu settlement SUCCESS untuk order ${orderId} (ditemukan ${settlementCount}). Invariant satu settlement per order dilanggar.`);
+          return;
+        }
+
+        settlement = await queryOne(
+          deps,
+          `SELECT id, property_id, pos_order_id,
+                  transaction_id, amount,
+                  payment_method, status,
+                  cash_received, change_due, payment_reference,
+                  created_by, created_at,
+                  verified_by, verified_at
+           FROM pos_settlements
+           WHERE property_id = $1 AND pos_order_id = $2 AND status = 'SUCCESS'
+           LIMIT 1`,
+          [propertyId, orderId],
+        );
+      } catch {
+        res.status(500).json({ status: 'ERROR', code: 'INTERNAL_ERROR', message: 'Database error' });
+        return;
+      }
+
+      if (!settlement) {
         res.status(409).json({
           status: 'CONFLICT',
           code: 'RECEIPT_NOT_AVAILABLE',
-          message: 'Tidak ada settlement SUCCESS untuk order ini',
+          message: 'Settlement tidak ditemukan untuk order ini',
         });
         return;
       }
-      if (settlementCount > 1) {
-        integrityError(res, `Lebih dari satu settlement SUCCESS untuk order ${orderId} (ditemukan ${settlementCount}). Invariant satu settlement per order dilanggar.`);
+
+      // ── 8. Query SALE transaction dari settlement.transaction_id ──────────
+      const settlementTxId = String(settlement.transaction_id);
+
+      try {
+        sale = await queryOne(
+          deps,
+          `SELECT id, property_id, transaction_no,
+                  transaction_type, source_type, source_id,
+                  payment_status, payment_method,
+                  amount, discount_amount, service_amount, tax_amount, net_amount,
+                  created_at
+           FROM transactions
+           WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL
+           LIMIT 1`,
+          [settlementTxId, propertyId],
+        );
+      } catch {
+        res.status(500).json({ status: 'ERROR', code: 'INTERNAL_ERROR', message: 'Database error' });
         return;
       }
 
-      settlement = await queryOne(
-        deps,
-        `SELECT id, property_id, pos_order_id,
-                transaction_id, amount,
-                payment_method, status,
-                cash_received, change_due, payment_reference,
-                created_by, created_at,
-                verified_by, verified_at
-         FROM pos_settlements
-         WHERE property_id = $1 AND pos_order_id = $2 AND status = 'SUCCESS'
-         LIMIT 1`,
-        [propertyId, orderId],
-      );
-    } catch {
-      res.status(500).json({ status: 'ERROR', code: 'INTERNAL_ERROR', message: 'Database error' });
-      return;
-    }
-
-    if (!settlement) {
-      res.status(409).json({
-        status: 'CONFLICT',
-        code: 'RECEIPT_NOT_AVAILABLE',
-        message: 'Settlement tidak ditemukan untuk order ini',
-      });
-      return;
-    }
-
-    // â”€â”€ 8. Query SALE transaction dari settlement.transaction_id â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    // settlement.transaction_id adalah BIGINT â†’ pg mengembalikan string.
-    const settlementTxId = String(settlement.transaction_id);
-
-    let sale: Record<string, unknown> | null;
-    try {
-      sale = await queryOne(
-        deps,
-        `SELECT id, property_id, transaction_no,
-                transaction_type, source_type, source_id,
-                payment_status, payment_method,
-                amount, discount_amount, service_amount, tax_amount, net_amount,
-                created_at
-         FROM transactions
-         WHERE id = $1 AND property_id = $2 AND deleted_at IS NULL
-         LIMIT 1`,
-        [settlementTxId, propertyId],
-      );
-    } catch {
-      res.status(500).json({ status: 'ERROR', code: 'INTERNAL_ERROR', message: 'Database error' });
-      return;
-    }
-
-    if (!sale) {
-      integrityError(res, `SALE transaction ${settlementTxId} tidak ditemukan atau terhapus untuk property ${propertyId}`);
-      return;
-    }
-
-    // â”€â”€ 9. Integrity checks: settlement â†” SALE transaction â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    const saleTxType = String(sale.transaction_type ?? '').toUpperCase();
-    const saleSourceType = String(sale.source_type ?? '').toUpperCase();
-    const saleSourceId = String(sale.source_id ?? '');
-    const salePaymentStatus = String(sale.payment_status ?? '').toUpperCase();
-    const salePaymentMethod = String(sale.payment_method ?? '').toUpperCase();
-    const settlementPaymentMethod = String(settlement.payment_method ?? '').toUpperCase();
-
-    // transaction_type harus SALE
-    if (saleTxType !== 'SALE') {
-      integrityError(res, `Transaction ${settlementTxId} transaction_type='${saleTxType}', expected 'SALE'`);
-      return;
-    }
-    // source_type harus POS_ORDER atau POS
-    if (saleSourceType !== 'POS_ORDER' && saleSourceType !== 'POS') {
-      integrityError(res, `Transaction ${settlementTxId} source_type='${saleSourceType}', expected 'POS_ORDER' or 'POS'`);
-      return;
-    }
-    // source_id harus = String(order.id)
-    if (saleSourceId !== String(orderId)) {
-      integrityError(res, `Transaction ${settlementTxId} source_id='${saleSourceId}', expected '${orderId}'`);
-      return;
-    }
-    // payment_status harus PAID
-    if (salePaymentStatus !== 'PAID') {
-      integrityError(res, `Transaction ${settlementTxId} payment_status='${salePaymentStatus}', expected 'PAID'`);
-      return;
-    }
-    // payment_method settlement dan SALE harus konsisten
-    if (settlementPaymentMethod !== salePaymentMethod) {
-      integrityError(res, `Payment method mismatch: settlement='${settlementPaymentMethod}' vs transaction='${salePaymentMethod}'`);
-      return;
-    }
-    // â”€â”€ Amount integrity: triple authoritative check (whole rupiah) â”€â”€â”€â”€â”€â”€â”€
-    // Ketiga sumber harus EXACT match:
-    //   pos_orders.total_amount === pos_settlements.amount === transactions.net_amount
-    // POS memakai whole rupiah: validasi Number.isSafeInteger + >= 0.
-    const orderTotalNum = Number(String(order.total_amount ?? '0'));
-    const settlementAmountNum = Number(String(settlement.amount ?? '0'));
-    const saleNetAmountNum = Number(String(sale.net_amount ?? '0'));
-
-    for (const [label, val] of [
-      ['order.total_amount', orderTotalNum],
-      ['settlement.amount', settlementAmountNum],
-      ['transaction.net_amount', saleNetAmountNum],
-    ] as const) {
-      if (!Number.isFinite(val) || !Number.isSafeInteger(val) || val <= 0) {
-        integrityError(res, `${label} invalid: ${val} (harus finite safe-integer positif)`);
+      if (!sale) {
+        integrityError(res, `SALE transaction ${settlementTxId} tidak ditemukan atau terhapus untuk property ${propertyId}`);
         return;
       }
-    }
-    if (orderTotalNum !== settlementAmountNum || orderTotalNum !== saleNetAmountNum) {
-      integrityError(res,
-        `Amount mismatch: order.total_amount=${orderTotalNum} vs settlement.amount=${settlementAmountNum} vs transaction.net_amount=${saleNetAmountNum}`);
-      return;
+
+      // ── 9. Integrity checks: settlement ↔ SALE transaction ────────────────
+      saleTxType = String(sale.transaction_type ?? '').toUpperCase();
+      saleSourceType = String(sale.source_type ?? '').toUpperCase();
+      saleSourceId = String(sale.source_id ?? '');
+      salePaymentStatus = String(sale.payment_status ?? '').toUpperCase();
+      salePaymentMethod = String(sale.payment_method ?? '').toUpperCase();
+      const settlementPaymentMethod = String(settlement.payment_method ?? '').toUpperCase();
+
+      if (saleTxType !== 'SALE') {
+        integrityError(res, `Transaction ${settlementTxId} transaction_type='${saleTxType}', expected 'SALE'`);
+        return;
+      }
+      if (saleSourceType !== 'POS_ORDER' && saleSourceType !== 'POS') {
+        integrityError(res, `Transaction ${settlementTxId} source_type='${saleSourceType}', expected 'POS_ORDER' or 'POS'`);
+        return;
+      }
+      if (saleSourceId !== String(orderId)) {
+        integrityError(res, `Transaction ${settlementTxId} source_id='${saleSourceId}', expected '${orderId}'`);
+        return;
+      }
+      if (salePaymentStatus !== 'PAID') {
+        integrityError(res, `Transaction ${settlementTxId} payment_status='${salePaymentStatus}', expected 'PAID'`);
+        return;
+      }
+      if (settlementPaymentMethod !== salePaymentMethod) {
+        integrityError(res, `Payment method mismatch: settlement='${settlementPaymentMethod}' vs transaction='${salePaymentMethod}'`);
+        return;
+      }
+
+      orderTotalNum = Number(String(order.total_amount ?? '0'));
+      const settlementAmountNum = Number(String(settlement.amount ?? '0'));
+      const saleNetAmountNum = Number(String(sale.net_amount ?? '0'));
+
+      for (const [label, val] of [
+        ['order.total_amount', orderTotalNum],
+        ['settlement.amount', settlementAmountNum],
+        ['transaction.net_amount', saleNetAmountNum],
+      ] as const) {
+        if (!Number.isFinite(val) || !Number.isSafeInteger(val) || val <= 0) {
+          integrityError(res, `${label} invalid: ${val} (harus finite safe-integer positif)`);
+          return;
+        }
+      }
+      if (orderTotalNum !== settlementAmountNum || orderTotalNum !== saleNetAmountNum) {
+        integrityError(res,
+          `Amount mismatch: order.total_amount=${orderTotalNum} vs settlement.amount=${settlementAmountNum} vs transaction.net_amount=${saleNetAmountNum}`);
+        return;
+      }
+
+      let saleServiceNum: number;
+      let saleTaxNum: number;
+      try {
+        orderServiceNum = toWholeRupiahNumber(order.service_amount ?? '0', 'pos_orders.service_amount') ?? 0;
+        orderTaxNum     = toWholeRupiahNumber(order.tax_amount ?? '0', 'pos_orders.tax_amount') ?? 0;
+        saleServiceNum  = toWholeRupiahNumber(sale.service_amount ?? '0', 'transactions.service_amount') ?? 0;
+        saleTaxNum      = toWholeRupiahNumber(sale.tax_amount ?? '0', 'transactions.tax_amount') ?? 0;
+      } catch (canonErr) {
+        integrityError(res, canonErr instanceof Error ? canonErr.message : String(canonErr));
+        return;
+      }
+      if (orderServiceNum !== saleServiceNum) {
+        integrityError(res, `service_amount mismatch: order=${orderServiceNum} vs transaction=${saleServiceNum}`);
+        return;
+      }
+      if (orderTaxNum !== saleTaxNum) {
+        integrityError(res, `tax_amount mismatch: order=${orderTaxNum} vs transaction=${saleTaxNum}`);
+        return;
+      }
+    } else {
+      // ── 7b. BILLED_TO_ROOM atau OPEN: buat representasi struk kamar / bill ─
+      orderTotalNum = Math.max(1, Math.round(Number(String(order.total_amount ?? '0'))));
+      orderServiceNum = Math.max(0, Math.round(Number(String(order.service_amount ?? '0'))));
+      orderTaxNum = Math.max(0, Math.round(Number(String(order.tax_amount ?? '0'))));
+
+      let roomRef: string | null = null;
+      if (order.reservation_id) {
+        try {
+          const rmRow = await queryOne<{ room_number: string | null }>(
+            deps,
+            `SELECT rm.room_number
+             FROM reservations r
+             LEFT JOIN rooms rm ON rm.id = r.room_id
+             WHERE r.id = $1
+             LIMIT 1`,
+            [order.reservation_id],
+          );
+          if (rmRow?.room_number) {
+            roomRef = `Kamar ${rmRow.room_number} (Res #${order.reservation_id})`;
+          } else {
+            roomRef = `Reservasi #${order.reservation_id}`;
+          }
+        } catch {
+          roomRef = `Reservasi #${order.reservation_id}`;
+        }
+      }
+
+      const methodStr = orderStatus === 'BILLED_TO_ROOM' ? 'TAGIH KE KAMAR' : 'BELUM BAYAR (OPEN)';
+      salePaymentMethod = methodStr;
+      salePaymentStatus = orderStatus;
+      settlement = {
+        id: Number(order.id),
+        amount: String(orderTotalNum),
+        payment_method: methodStr,
+        status: 'SUCCESS',
+        cash_received: null,
+        change_due: null,
+        payment_reference: roomRef,
+        created_by: null,
+        created_at: order.updated_at ?? order.created_at ?? null,
+        verified_by: null,
+        verified_at: null,
+      };
+      sale = {
+        id: String(order.id),
+        transaction_no: String(order.order_number || `POS-${order.id}`),
+        transaction_type: 'SALE',
+        source_type: 'POS_ORDER',
+        source_id: String(orderId),
+        payment_status: orderStatus,
+        payment_method: methodStr,
+        net_amount: String(orderTotalNum),
+        created_at: order.created_at ?? null,
+      };
     }
 
-
-    // 9b. B4.1: Validate service_amount / tax_amount consistency (fail-closed)
-    let orderServiceNum: number;
-    let orderTaxNum: number;
-    let saleServiceNum: number;
-    let saleTaxNum: number;
-    try {
-      orderServiceNum = toWholeRupiahNumber(order.service_amount ?? '0', 'pos_orders.service_amount') ?? 0;
-      orderTaxNum     = toWholeRupiahNumber(order.tax_amount ?? '0', 'pos_orders.tax_amount') ?? 0;
-      saleServiceNum  = toWholeRupiahNumber(sale.service_amount ?? '0', 'transactions.service_amount') ?? 0;
-      saleTaxNum      = toWholeRupiahNumber(sale.tax_amount ?? '0', 'transactions.tax_amount') ?? 0;
-    } catch (canonErr) {
-      integrityError(res, canonErr instanceof Error ? canonErr.message : String(canonErr));
-      return;
-    }
-    if (orderServiceNum !== saleServiceNum) {
-      integrityError(res, `service_amount mismatch: order=${orderServiceNum} vs transaction=${saleServiceNum}`);
-      return;
-    }
-    if (orderTaxNum !== saleTaxNum) {
-      integrityError(res, `tax_amount mismatch: order=${orderTaxNum} vs transaction=${saleTaxNum}`);
-      return;
-    }
-
-    // 9c. B4.1: Validate snapshot percentage & boolean fields (fail-closed)
+    // 9c. B4.1: Validate snapshot percentage & boolean fields (with safe fallback for non-PAID orders)
     const snapPct = (raw: unknown, label: string): number => {
+      if ((raw === null || raw === undefined) && orderStatus !== 'PAID') return 0;
       const n = Number(raw);
       if (!Number.isFinite(n) || n < 0 || n > 100) {
         throw new Error(`${label} snapshot invalid: ${String(raw)} (harus finite 0-100)`);
@@ -381,6 +433,7 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
       return n;
     };
     const snapBool = (raw: unknown, label: string): boolean => {
+      if ((raw === null || raw === undefined) && orderStatus !== 'PAID') return false;
       if (raw !== true && raw !== false) {
         throw new Error(`${label} snapshot invalid: ${String(raw)} (harus strict boolean)`);
       }

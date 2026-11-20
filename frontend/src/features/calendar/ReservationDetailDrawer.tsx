@@ -584,7 +584,15 @@ export default function ReservationDetailDrawer({
     return () => { cancelled = true; };
   }, [detailData?.primary_guest?.primary_guest_id, activePropId, authFetch, guestCrmRetryCount]);
 
-  // Load complete reservation details
+  useEffect(() => {
+    const targetId = detailData?.id || reservation?.id;
+    if (!posOrdersRefreshVersion || !targetId) return;
+    if (posOrdersRefreshReservationId != null && Number(posOrdersRefreshReservationId) !== Number(targetId)) {
+      return;
+    }
+    void loadFullReservation(Number(targetId));
+    void loadFolio(Number(targetId));
+  }, [posOrdersRefreshVersion, posOrdersRefreshReservationId]);
   const loadFullReservation = async (customId?: number): Promise<any | null> => {
     const targetId = customId || detailData?.id || reservation?.id;
     if (!targetId || !activePropId) return null;
@@ -2761,7 +2769,7 @@ export default function ReservationDetailDrawer({
               posOrdersRefreshReservationId={posOrdersRefreshReservationId}
               onOpenCashPayment={onOpenCashPayment}
               reservationStatus={data?.status}
-              folioRemainingBalance={remainingBalance}
+              folioRemainingBalance={paymentCollectionBalance !== null ? paymentCollectionBalance : remainingBalance}
               onOrderBilledToRoom={() => {
                 if (data?.id) {
                   loadFullReservation(data.id);

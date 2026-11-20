@@ -419,7 +419,6 @@ export default function DepositGuaranteeSection({
           </button>
         )}
         {capabilities.canRefundDeposit &&
-         isMultiRoomBooking &&
          actionableGroupDeposit &&
          actionableGroupDeposit.balance?.remaining > 0 && (
           <button onClick={() => { setError(null); setShowGroupRefund(true); }}

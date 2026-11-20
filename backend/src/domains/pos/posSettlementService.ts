@@ -48,6 +48,7 @@ import type { TransactionRow } from '../transactions/transactionTypes';
 import { computeRequestHash } from '../../utils/hash';
 import { propertyQrisImageExists } from '../propertyPaymentInstructions/qrisImageStorage';
 import { deductStockForPosSale, type PosSaleStockDeductionResult } from './stockInventoryService';
+import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
 
 // =============================================================================
 // Error type
@@ -712,22 +713,7 @@ export async function payPosOrder(
       );
     }
 
-    // Room Charge guard
-    const billedFolioQ = await poolClient.query(
-      `SELECT 1 FROM folio_entries
-       WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2 AND is_voided = FALSE
-       LIMIT 1`,
-      [propertyId, String(orderId)]
-    );
-    if (orderStatus === 'BILLED_TO_ROOM' || (billedFolioQ.rowCount ?? 0) > 0) {
-      throw new PosSettlementError(
-        409,
-        'ALREADY_BILLED_TO_ROOM',
-        `POS order #${orderId} sudah ditagihkan ke folio kamar`
-      );
-    }
-
-    // â”€â”€ Legacy payment guard â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // ── Legacy payment guard ───────────────────────────────────────────
     const legacyPayQ = await poolClient.query(
       `SELECT EXISTS(
          SELECT 1 FROM payment_transactions pt
@@ -751,13 +737,55 @@ export async function payPosOrder(
       );
     }
 
-    // â”€â”€ Validasi order payable â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    if (orderStatus !== 'OPEN') {
+    // ── Validasi order payable (OPEN atau BILLED_TO_ROOM) ──────────────
+    if (orderStatus !== 'OPEN' && orderStatus !== 'BILLED_TO_ROOM') {
       throw new PosSettlementError(
         409,
         'ORDER_NOT_PAYABLE',
-        `POS order #${orderId} berstatus ${orderStatus || 'UNKNOWN'}; hanya status OPEN yang dapat dibayar`
+        `POS order #${orderId} berstatus ${orderStatus || 'UNKNOWN'}; hanya status OPEN atau BILLED_TO_ROOM yang dapat dibayar`
       );
+    }
+
+    // Bila order sebelumnya ditagihkan ke kamar (BILLED_TO_ROOM), lepaskan beban folio kamar
+    // agar tidak terjadi tagihan ganda di folio saat dibayar langsung lewat POS.
+    const billedFolioQ = await poolClient.query(
+      `SELECT id, reservation_id FROM folio_entries
+       WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2
+       FOR UPDATE`,
+      [propertyId, String(orderId)]
+    );
+    if ((billedFolioQ.rowCount ?? 0) > 0) {
+      const affectedResIds = new Set<number>();
+      for (const fRow of billedFolioQ.rows) {
+        const folioId = Number(fRow.id);
+        if (fRow.reservation_id) {
+          affectedResIds.add(Number(fRow.reservation_id));
+        }
+        await poolClient.query(
+          `UPDATE transactions
+              SET transaction_status = 'VOIDED',
+                  deleted_at = COALESCE(deleted_at, NOW()),
+                  deleted_by_user_id = COALESCE(deleted_by_user_id, $1),
+                  deleted_by_name_snapshot = COALESCE(deleted_by_name_snapshot, $2),
+                  delete_reason = COALESCE(delete_reason, 'POS Order dilunasi langsung melalui POS'),
+                  updated_at = NOW()
+            WHERE property_id = $3
+              AND source_type = 'FOLIO'
+              AND source_id = $4`,
+          [input.actorUserId ?? null, input.actorName ?? 'Staff POS', propertyId, String(folioId)]
+        );
+        await poolClient.query(
+          `DELETE FROM folio_entries
+            WHERE id = $1 AND property_id = $2
+              AND NOT EXISTS (SELECT 1 FROM folio_entries rev WHERE rev.reversal_of_entry_id = $1)`,
+          [folioId, propertyId]
+        );
+      }
+      for (const resId of affectedResIds) {
+        if (Number.isInteger(resId) && resId > 0) {
+          await recalculateReservationFinancials(poolClient, resId, propertyId);
+        }
+      }
     }
     if (!Number.isFinite(orderAmount) || orderAmount <= 0) {
       throw new PosSettlementError(

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
+import { Printer, Pencil, Trash2, CreditCard, CheckCircle2 } from 'lucide-react';
 import { useAuth } from '../auth/AuthContext';
 import { safeFetchJson } from '../calendar/calendarApi';
 import type { SafeFetchResult } from '../calendar/calendarApi';
@@ -517,7 +518,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
                     className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase tracking-wide shrink-0 ${
                       statusUpper === 'OPEN'
                         ? 'bg-rose-50 text-rose-700 border border-rose-200'
-                        : statusUpper === 'BILLED_TO_ROOM'
+                        : statusUpper === 'BILLED_TO_ROOM' && (folioRemainingBalance == null || folioRemainingBalance > 0)
                         ? 'bg-sky-50 text-sky-800 border border-sky-200'
                         : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
                     }`}
@@ -525,7 +526,9 @@ const handleConfirmRoomCharge = useCallback(async () => {
                     {statusUpper === 'OPEN'
                       ? 'BELUM LUNAS'
                       : statusUpper === 'BILLED_TO_ROOM'
-                      ? 'TAGIH KAMAR'
+                      ? folioRemainingBalance != null && folioRemainingBalance <= 0
+                        ? 'LUNAS (FOLIO)'
+                        : 'TAGIH KAMAR'
                       : 'LUNAS'}
                   </span>
                 </div>
@@ -565,13 +568,20 @@ const handleConfirmRoomCharge = useCallback(async () => {
                     <span className="text-xs text-stone-500 font-medium">{methodLabel}</span>
                     {statusUpper === 'BILLED_TO_ROOM' && folioRemainingBalance != null && (
                       <span
-                        className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold ${
+                        className={`px-1.5 py-0.5 rounded-full text-[10px] font-bold inline-flex items-center gap-1 ${
                           folioRemainingBalance <= 0
                             ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
                             : 'bg-amber-100 text-amber-800 border border-amber-300'
                         }`}
                       >
-                        {folioRemainingBalance <= 0 ? '✓ Lunas di Folio Kamar' : 'Mengikuti Tagihan Kamar'}
+                        {folioRemainingBalance <= 0 ? (
+                          <>
+                            <CheckCircle2 className="w-3 h-3 text-emerald-700" />
+                            <span>Lunas di Folio Kamar</span>
+                          </>
+                        ) : (
+                          'Mengikuti Tagihan Kamar'
+                        )}
                       </span>
                     )}
                   </div>
@@ -580,10 +590,10 @@ const handleConfirmRoomCharge = useCallback(async () => {
                   </span>
                 </div>
 
-                {/* Baris Aksi Cepat untuk Order OPEN (Tagihkan ke Kamar & Bayar) */}
-                {canEditPos && statusUpper === 'OPEN' && (
+                {/* Baris Aksi Cepat untuk Order OPEN maupun BILLED_TO_ROOM (Tagihkan ke Kamar & Bayar) */}
+                {canEditPos && (statusUpper === 'OPEN' || statusUpper === 'BILLED_TO_ROOM') && (
                   <div className="flex items-center justify-end gap-1.5 pt-0.5">
-                    {(reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
+                    {statusUpper === 'OPEN' && (reservationStatus === 'BOOKED' || reservationStatus === 'CHECKED_IN') && (
                       <button
                         type="button"
                         onClick={(e) => {
@@ -597,7 +607,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
                         Tagihkan ke Kamar
                       </button>
                     )}
-                    {onOpenCashPayment && (
+                    {onOpenCashPayment && (statusUpper === 'OPEN' || folioRemainingBalance == null || folioRemainingBalance > 0) && (
                       <button
                         type="button"
                         onClick={(e) => {
@@ -612,22 +622,22 @@ const handleConfirmRoomCharge = useCallback(async () => {
                             reservationId: order.reservation_id ?? reservationId,
                           });
                         }}
-                        className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-bold bg-emerald-600 text-white hover:bg-emerald-700 transition-colors cursor-pointer shadow-2xs"
                       >
-                        Bayar
+                        <CreditCard className="w-3 h-3" />
+                        <span>{statusUpper === 'BILLED_TO_ROOM' ? 'Bayar Tagihan POS' : 'Bayar'}</span>
                       </button>
                     )}
                   </div>
                 )}
 
-                {/* Baris 5: Tombol Aksi Terpadu — Bukti | Ubah | Hapus (Gambar 5) */}
+                {/* Baris 5: Tombol Aksi Terpadu — Bukti | Ubah | Hapus (Ikon Lucide) */}
                 <div className="grid grid-cols-3 gap-1.5 pt-1.5 border-t border-stone-100">
                   <button
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
                       if (
-                        statusUpper === 'PAID' &&
                         Number.isInteger(order.id) &&
                         order.id > 0 &&
                         Number.isInteger(propertyId) &&
@@ -644,9 +654,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
                     }}
                     className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold text-stone-600 hover:text-stone-900 hover:bg-stone-100 transition-colors cursor-pointer"
                   >
-                    <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
-                    </svg>
+                    <Printer className="w-3.5 h-3.5 shrink-0" />
                     <span>Bukti</span>
                   </button>
 
@@ -665,9 +673,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
                       disabled={isDeletingThis}
                       className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold bg-emerald-50 text-emerald-800 hover:bg-emerald-100 border border-emerald-200/70 transition-colors disabled:opacity-40 cursor-pointer"
                     >
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-                      </svg>
+                      <Pencil className="w-3.5 h-3.5 shrink-0" />
                       <span>Ubah</span>
                     </button>
                   ) : (
@@ -684,9 +690,7 @@ const handleConfirmRoomCharge = useCallback(async () => {
                       disabled={isDeletingThis || deletingOrderId !== null}
                       className="inline-flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-lg text-[11px] font-semibold text-red-600 hover:text-red-700 hover:bg-red-50 transition-colors disabled:opacity-40 cursor-pointer"
                     >
-                      <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
+                      <Trash2 className="w-3.5 h-3.5 shrink-0" />
                       <span>{isDeletingThis ? 'Menghapus…' : 'Hapus'}</span>
                     </button>
                   ) : (

@@ -772,24 +772,16 @@ export async function refundDeposit(pool: Pool, input: RefundDepositInput): Prom
           state.releaseBlockReason || 'Group guarantee is not eligible for release');
       }
 
-      // CUSTODY-FIRST RULE: refund requires all GROUP identity custody to be returned.
-      // Only same BOOKING_GROUP custody blocks; ROOM_RESERVATION custody is irrelevant.
-      // Uses FOR UPDATE NOWAIT — if returnIdentity currently owns the custody row,
-      // PostgreSQL raises 55P03 immediately, preventing a deadlock cycle:
-      //   return: holds custody, waits booking   vs   refund: holds booking, waits custody
-      let heldCustody = false;
+      // Lock group custody rows if present to serialize concurrent operations,
+      // without blocking deposit refund when identity custody is still held.
       try {
-        heldCustody = await hasHeldGroupCustody(client, propertyId, lockedBookingId);
+        await hasHeldGroupCustody(client, propertyId, lockedBookingId);
       } catch (err: unknown) {
         if (isLockNotAvailable(err)) {
           throw domainError(409, 'BOOKING_GROUP_LIFECYCLE_BUSY',
             'Group guarantee is currently being modified by another operation. Please retry.');
         }
         throw err;
-      }
-      if (heldCustody) {
-        throw domainError(409, 'BOOKING_GROUP_CUSTODY_STILL_HELD',
-          'Identitas grup masih ditahan dan harus dikembalikan sebelum refund deposit');
       }
 
       // Lock the anchor reservation NOW — booking and children are already secured,

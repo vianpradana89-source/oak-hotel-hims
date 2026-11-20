@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { recalculateReservationFinancials } from '../stayCharges/stayChargesService';
 import type {
   DuplicateCandidate,
   DuplicateCandidateCluster,
@@ -2157,12 +2158,54 @@ export async function redeemPointsForReservation(
            remaining_balance = $2,
            payment_status = $3,
            special_requests = $4,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $5`,
-      [newTotalPrice, newRemainingBalance, newPaymentStatus, updatedSpecialRequests, reservationId]
+           discount_amount = COALESCE(discount_amount, 0) + $5
+       WHERE id = $6`,
+      [newTotalPrice, newRemainingBalance, newPaymentStatus, updatedSpecialRequests, effectiveDiscountIdr, reservationId]
     );
 
-    // Also sync bookings.total_amount and transactions if present
+    const ledgerRes = await client.query(
+      `INSERT INTO guest_loyalty_ledger (
+         property_id, guest_id, entry_type, points, description, reference_no, created_by
+       ) VALUES ($1, $2, 'REDEEM', $3, $4, $5, $6)
+       RETURNING *`,
+      [
+        propertyId,
+        guestId,
+        -Math.abs(pointsToRedeem),
+        `Potong Tagihan Reservasi ${resv.bid || '#' + reservationId} (-Rp ${effectiveDiscountIdr.toLocaleString('id-ID')})`,
+        resv.bid || `RESV-${reservationId}`,
+        input.created_by || 'Front Office',
+      ]
+    );
+
+    const ledgerRow = ledgerRes.rows[0];
+
+    // Insert Folio Credit Entry so Rincian Folio Transaksi & calculateReservationFinancials reflect the point redemption
+    const folioDesc = `Potong Tagihan Poin Loyalitas (${pointsToRedeem} Poin)`;
+    await client.query(
+      `INSERT INTO folio_entries (
+         reservation_id, property_id, entry_type, source_type, source_id,
+         description, amount, direction, base_amount, unit_price, quantity,
+         tax_amount, service_amount, status, notes, revenue_category,
+         actor_user_id, actor_name_snapshot, actor_role_snapshot
+       ) VALUES (
+         $1, $2, 'LOYALTY_REDEEM_REVERSAL', 'LOYALTY_REDEEM', $3,
+         $4, $5, 'CREDIT', $5, $5, 1,
+         0, 0, 'POSTED', $4, 'DISCOUNT',
+         $6, $7, 'STAFF'
+       )`,
+      [
+        reservationId,
+        propertyId,
+        String(ledgerRow.id),
+        folioDesc,
+        effectiveDiscountIdr,
+        actorUserId ? String(actorUserId) : null,
+        input.created_by || 'Front Office',
+      ]
+    );
+
+    // Sync bookings.total_amount and transactions if present
     await client.query(
       `UPDATE bookings
        SET total_amount = GREATEST(0, COALESCE(total_amount, 0) - $1),
@@ -2183,22 +2226,9 @@ export async function redeemPointsForReservation(
       [effectiveDiscountIdr, propertyId, reservationId, resv.booking_id]
     );
 
-    const ledgerRes = await client.query(
-      `INSERT INTO guest_loyalty_ledger (
-         property_id, guest_id, entry_type, points, description, reference_no, created_by
-       ) VALUES ($1, $2, 'REDEEM', $3, $4, $5, $6)
-       RETURNING *`,
-      [
-        propertyId,
-        guestId,
-        -Math.abs(pointsToRedeem),
-        `Potong Tagihan Reservasi ${resv.bid || '#' + reservationId} (-Rp ${effectiveDiscountIdr.toLocaleString('id-ID')})`,
-        resv.bid || `RESV-${reservationId}`,
-        input.created_by || 'Front Office',
-      ]
-    );
-
-    const ledgerRow = ledgerRes.rows[0];
+    const recalcFin = await recalculateReservationFinancials(client, reservationId, propertyId);
+    const finalTotalPrice = Number(recalcFin.total_price ?? newTotalPrice);
+    const finalRemainingBalance = Number(recalcFin.remaining_balance ?? newRemainingBalance);
     await writeGuestAudit(client, {
       action: 'GUEST_LOYALTY',
       entity: 'GUEST',
@@ -2209,8 +2239,8 @@ export async function redeemPointsForReservation(
         bid: resv.bid,
         points_redeemed: pointsToRedeem,
         discount_amount_idr: effectiveDiscountIdr,
-        new_total_price: newTotalPrice,
-        new_remaining_balance: newRemainingBalance,
+        new_total_price: finalTotalPrice,
+        new_remaining_balance: finalRemainingBalance,
       },
       propertyId,
       correlationId,
@@ -2232,8 +2262,8 @@ export async function redeemPointsForReservation(
       },
       redeemed_points: pointsToRedeem,
       discount_amount_idr: effectiveDiscountIdr,
-      new_total_price: newTotalPrice,
-      new_remaining_balance: newRemainingBalance,
+      new_total_price: finalTotalPrice,
+      new_remaining_balance: finalRemainingBalance,
     };
   } catch (err) {
     await client.query('ROLLBACK');

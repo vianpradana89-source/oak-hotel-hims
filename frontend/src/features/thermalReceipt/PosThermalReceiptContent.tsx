@@ -249,7 +249,13 @@ export default function PosThermalReceiptContent({
 
       {/* Status badge */}
       <div className="thermal-status">
-        {settlement.payment_method === 'COMPLIMENTARY' ? 'COMPLIMENTARY' : 'PAID'}
+        {settlement.payment_method === 'COMPLIMENTARY'
+          ? 'COMPLIMENTARY'
+          : order.status === 'BILLED_TO_ROOM' || settlement.payment_method === 'TAGIH KE KAMAR'
+          ? 'TAGIH KE KAMAR (ROOM CHARGE)'
+          : order.status === 'OPEN'
+          ? 'TAGIHAN SEMENTARA (OPEN)'
+          : 'PAID'}
       </div>
 
       {/* 7. FOOTER */}

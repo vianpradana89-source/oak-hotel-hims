@@ -137,42 +137,24 @@ export function deriveGroupGuaranteeStateFromChildren(
     };
   }
 
-  // CANONICAL SAFETY RULE: releaseEligible requires ALL children to be recognized terminal states.
+  // Flexible operational rule: group guarantees (identity custody & security deposit)
+  // can be returned/refunded at any time without waiting for all group rooms to check out.
   const recognizedTerminalCount = checkedOutCount + cancelledCount;
   const allChildrenRecognizedTerminal = recognizedTerminalCount === total;
   const terminal = activeCount === 0 && unknownCount === 0 && allChildrenRecognizedTerminal;
-  const releaseEligible = terminal;
-
-  // Identity custody (KTP Grup) release eligibility (Opsi A):
-  // - Eligible when all children are terminal (CHECKED_OUT / CANCELLED), OR
-  // - Eligible before any room in the group has started check-in/stay
-  //   (checkedInCount === 0 && checkedOutCount === 0 && bookedCount > 0 && unknownCount === 0).
-  const preCheckInCustodyEligible =
-    total > 0 &&
-    unknownCount === 0 &&
-    checkedInCount === 0 &&
-    checkedOutCount === 0 &&
-    bookedCount > 0;
-  const custodyReleaseEligible = terminal || preCheckInCustodyEligible;
+  const releaseEligible = total > 0 && unknownCount === 0;
+  const custodyReleaseEligible = total > 0 && unknownCount === 0;
 
   const lifecycleStatus = deriveLifecycleStatus(activeCount, checkedOutCount, cancelledCount, unknownCount, total);
-  const releaseBlockReason = terminal
+  const releaseBlockReason = releaseEligible
     ? null
-    : activeCount > 0
-      ? activeCount === 1
-        ? '1 kamar masih aktif'
-        : `${activeCount} kamar masih aktif`
-      : unknownCount > 0
-        ? 'Status reservasi tercakup tidak dikenali'
-        : 'Data tidak lengkap';
+    : unknownCount > 0
+      ? 'Status reservasi tercakup tidak dikenali'
+      : 'Data tidak lengkap';
 
   const custodyReleaseBlockReason = custodyReleaseEligible
     ? null
-    : checkedInCount > 0
-      ? checkedInCount === 1
-        ? '1 kamar sedang check-in (check-out kamar terlebih dahulu)'
-        : `${checkedInCount} kamar sedang check-in (check-out kamar terlebih dahulu)`
-      : releaseBlockReason;
+    : releaseBlockReason;
 
   return {
     bookingId,

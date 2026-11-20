@@ -181,6 +181,9 @@ export const LoginPage: React.FC = () => {
                 </div>
                 <input
                   type="text"
+                  name="username"
+                  autoComplete="username"
+                  data-no-uppercase="true"
                   value={emailOrUsername}
                   onChange={(e) => setEmailOrUsername(e.target.value)}
                   placeholder="admin / user@oaklawang.com"
@@ -241,6 +244,9 @@ export const LoginPage: React.FC = () => {
                 </div>
                 <input
                   type={showPassword ? 'text' : 'password'}
+                  name="password"
+                  autoComplete="current-password"
+                  data-no-uppercase="true"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••"

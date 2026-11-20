@@ -195,12 +195,13 @@ export async function fetchPosReceipt(
 
   // ── Order ──────────────────────────────────────────────────────────
   const order = (data as any).order;
+  const validStatuses = ['PAID', 'BILLED_TO_ROOM', 'OPEN'];
   if (
     !order ||
     typeof order !== 'object' ||
     order.id !== orderId ||
     order.property_id !== propertyId ||
-    order.status !== 'PAID' ||
+    !validStatuses.includes(String(order.status)) ||
     typeof order.order_number !== 'string'
   ) {
     throw new Error('Data struk POS tidak valid.');
@@ -229,7 +230,7 @@ export async function fetchPosReceipt(
     !sale ||
     typeof sale !== 'object' ||
     sale.transaction_type !== 'SALE' ||
-    sale.payment_status !== 'PAID' ||
+    !validStatuses.includes(String(sale.payment_status)) ||
     typeof sale.id !== 'string' ||
     typeof sale.payment_method !== 'string'
   ) {

@@ -25,7 +25,12 @@ if (typeof document !== 'undefined') {
       ) {
         return;
       }
-      if (target.dataset.noUppercase === 'true' || target.readOnly || target.disabled) {
+      if (
+        target.dataset.noUppercase === 'true' ||
+        target.closest('[data-no-uppercase="true"]') ||
+        target.readOnly ||
+        target.disabled
+      ) {
         return;
       }
 
@@ -50,6 +55,7 @@ if (typeof document !== 'undefined') {
         nameAndPlaceholder.includes('password') ||
         nameAndPlaceholder.includes('username') ||
         nameAndPlaceholder.includes('kata sandi') ||
+        nameAndPlaceholder.includes('••') ||
         nameAndPlaceholder.includes('http') ||
         nameAndPlaceholder.includes('{nama}')
       ) {
