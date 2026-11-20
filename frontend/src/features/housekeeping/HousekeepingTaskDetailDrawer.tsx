@@ -791,13 +791,46 @@ export const HousekeepingTaskDetailDrawer: React.FC<HousekeepingTaskDetailDrawer
 
                     {/* Bagian B: Isi Kulkas Minibar Berbayar di Kamar Ini (ONLY PAID_MINIBAR STANDARDS) */}
                     <div className="bg-white rounded-lg border border-amber-200 overflow-hidden">
-                      <div className="px-2.5 py-1.5 bg-amber-100/60 border-b border-amber-200 font-bold text-[11px] text-amber-950 flex justify-between">
+                      <div className="px-2.5 py-1.5 bg-amber-100/60 border-b border-amber-200 font-bold text-[11px] text-amber-950 flex items-center justify-between gap-2 flex-wrap">
                         <span>2. Isi Kulkas Minibar Berbayar di Kamar Ini</span>
-                        <span>Jumlah di Kamar</span>
+                        <div className="flex items-center gap-2">
+                          {minibarDefaults.length > 0 && (
+                            stockedMinibarItems.length > 0 ? (
+                              <button
+                                type="button"
+                                onClick={() => setStockedMinibarItems([])}
+                                className="px-2 py-0.5 rounded bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold transition cursor-pointer"
+                              >
+                                Kosongkan (Tanpa Kulkas)
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setStockedMinibarItems(
+                                    minibarDefaults.map((d: any) => ({
+                                      menu_item_id: Number(d.menu_item_id),
+                                      name: String(d.item_name || d.name || ''),
+                                      sku: String(d.sku || ''),
+                                      quantity: Number(d.standard_qty ?? 1),
+                                      unit_price: Number(d.unit_price || 0),
+                                      subtotal: Number(d.standard_qty ?? 1) * Number(d.unit_price || 0),
+                                      base_unit_code: String(d.base_unit_code || 'PCS'),
+                                    }))
+                                  )
+                                }
+                                className="px-2 py-0.5 rounded bg-amber-700 hover:bg-amber-800 text-white text-[10px] font-bold transition cursor-pointer"
+                              >
+                                Isi Standar
+                              </button>
+                            )
+                          )}
+                          <span>Jumlah di Kamar</span>
+                        </div>
                       </div>
                       {stockedMinibarItems.length === 0 ? (
                         <div className="p-2.5 text-center text-neutral-500 text-[11px]">
-                          Belum ada produk Minibar Berbayar untuk kamar ini.
+                          Minibar dikosongkan (Kamar tanpa kulkas / 0 produk minibar berbayar).
                         </div>
                       ) : (
                         <div className="divide-y divide-neutral-100">

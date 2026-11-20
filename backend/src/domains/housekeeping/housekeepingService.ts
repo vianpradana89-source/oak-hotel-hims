@@ -182,10 +182,61 @@ export async function updatePropertyHousekeepingSettings(
   return formatted;
 }
 
+let _checklistRoomTypeScopeColumnChecked = false;
+async function ensureChecklistItemRoomTypeScopeColumn(client: PoolClient | Pool): Promise<void> {
+  if (_checklistRoomTypeScopeColumnChecked) return;
+  try {
+    await client.query(`
+      ALTER TABLE IF EXISTS checklist_template_items
+      ADD COLUMN IF NOT EXISTS applicable_room_type_ids JSONB DEFAULT NULL
+    `);
+    _checklistRoomTypeScopeColumnChecked = true;
+  } catch {
+    // non-fatal
+  }
+}
+
+export function normalizeApplicableRoomTypeIds(raw: unknown): number[] | null {
+  if (raw === null || raw === undefined) return null;
+  let arr: unknown[] | null = null;
+  if (Array.isArray(raw)) {
+    arr = raw;
+  } else if (typeof raw === 'string' && raw.trim().startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) arr = parsed;
+    } catch {
+      arr = null;
+    }
+  }
+  if (!arr || arr.length === 0) return null;
+  const ids = Array.from(
+    new Set(
+      arr
+        .map((v) => Number(v))
+        .filter((n) => Number.isInteger(n) && n > 0)
+    )
+  );
+  return ids.length > 0 ? ids : null;
+}
+
+export function isChecklistItemApplicableToRoomType(
+  applicableIds: unknown,
+  roomTypeId: number | null | undefined
+): boolean {
+  const normalized = normalizeApplicableRoomTypeIds(applicableIds);
+  // null or empty array = Semua Tipe Kamar
+  if (!normalized || normalized.length === 0) return true;
+  // If task has no room / room_type_id, include by default
+  if (!roomTypeId || !Number.isInteger(Number(roomTypeId))) return true;
+  return normalized.includes(Number(roomTypeId));
+}
+
 export async function getChecklistTemplates(
   client: PoolClient | Pool,
   propertyId: number
 ): Promise<ChecklistTemplate[]> {
+  await ensureChecklistItemRoomTypeScopeColumn(client);
   const tRes = await client.query(
     `SELECT * FROM checklist_templates WHERE property_id = $1 ORDER BY sort_order ASC, id ASC`,
     [propertyId]
@@ -296,9 +347,28 @@ export async function snapshotTemplateToChecklist(
   propertyId: number,
   templateCode: string
 ): Promise<TaskChecklistItem[]> {
+  await ensureChecklistItemRoomTypeScopeColumn(client);
   const template = await getChecklistTemplateByCode(client, propertyId, templateCode);
   if (!template || !template.items || template.items.length === 0) {
     return [];
+  }
+
+  // Resolve room_type_id of the task's room (if any) so facility-specific items (e.g. Bathtub) only apply to matching room types
+  let taskRoomTypeId: number | null = null;
+  try {
+    const rtRes = await client.query(
+      `SELECT r.room_type_id
+         FROM housekeeping_tasks ht
+         LEFT JOIN rooms r ON r.id = ht.room_id
+        WHERE ht.id = $1
+        LIMIT 1`,
+      [taskId]
+    );
+    if (hasRows(rtRes) && rtRes.rows[0].room_type_id) {
+      taskRoomTypeId = Number(rtRes.rows[0].room_type_id);
+    }
+  } catch {
+    // non-fatal
   }
 
   // Find active group IDs
@@ -313,6 +383,8 @@ export async function snapshotTemplateToChecklist(
     if (!item.is_active || item.is_archived) continue;
     // If item belongs to a group that is inactive or archived, exclude it!
     if (item.group_id && !activeGroupIds.has(item.group_id)) continue;
+    // Filter by room_type_id scope when applicable_room_type_ids is configured
+    if (!isChecklistItemApplicableToRoomType(item.applicable_room_type_ids, taskRoomTypeId)) continue;
 
     const groupName = item.group_name || item.section || 'RUANGAN KAMAR';
     const groupSort = item.group_sort_order !== undefined ? item.group_sort_order : 10;
@@ -349,12 +421,14 @@ export async function syncActiveTasksWithChecklistTemplates(
   specificTaskId?: number | null
 ): Promise<void> {
   try {
+    await ensureChecklistItemRoomTypeScopeColumn(client);
     const taskFilter = specificTaskId && Number.isInteger(Number(specificTaskId)) ? Number(specificTaskId) : null;
 
-    // 1. Remove checklist items from active (unfinished) tasks if their template item or template group was deleted, deactivated, or archived
+    // 1. Remove checklist items from active (unfinished) tasks if their template item or template group was deleted, deactivated, archived, or no longer matches the room's room_type_id
     await client.query(
       `DELETE FROM housekeeping_task_checklist_items tci
         USING housekeeping_tasks ht
+        LEFT JOIN rooms r ON r.id = ht.room_id
         WHERE tci.task_id = ht.id
           AND ht.property_id = $1
           AND ht.status IN ('REQUESTED', 'PENDING', 'ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS', 'BLOCKED')
@@ -366,6 +440,13 @@ export async function syncActiveTasksWithChecklistTemplates(
                WHERE ti.id = tci.template_item_id
                  AND ti.is_active = TRUE
                  AND COALESCE(ti.is_archived, FALSE) = FALSE
+                 AND (
+                   ti.applicable_room_type_ids IS NULL
+                   OR jsonb_typeof(ti.applicable_room_type_ids) != 'array'
+                   OR jsonb_array_length(ti.applicable_room_type_ids) = 0
+                   OR r.room_type_id IS NULL
+                   OR (ti.applicable_room_type_ids @> to_jsonb(r.room_type_id))
+                 )
             ))
             OR
             (COALESCE(tci.group_id, tci.source_group_id) IS NOT NULL AND NOT EXISTS (
@@ -412,7 +493,7 @@ export async function syncActiveTasksWithChecklistTemplates(
       [propertyId, taskFilter]
     );
 
-    // 3. Insert newly added active template items into active tasks that already use that template
+    // 3. Insert newly added active template items into active tasks that already use that template (respecting applicable_room_type_ids)
     await client.query(
       `INSERT INTO housekeeping_task_checklist_items (
          task_id, template_item_id, group_id, source_group_id, group_code, group_name, group_sort_order,
@@ -436,6 +517,7 @@ export async function syncActiveTasksWithChecklistTemplates(
          NOW(),
          NOW()
        FROM housekeeping_tasks ht
+       LEFT JOIN rooms r ON r.id = ht.room_id
        JOIN housekeeping_task_checklist_items existing_tci ON existing_tci.task_id = ht.id
        JOIN checklist_template_items existing_ti ON existing_ti.id = existing_tci.template_item_id
        JOIN checklist_template_items ti ON ti.template_id = existing_ti.template_id
@@ -447,6 +529,13 @@ export async function syncActiveTasksWithChecklistTemplates(
          AND ti.is_active = TRUE
          AND COALESCE(ti.is_archived, FALSE) = FALSE
          AND (ti.group_id IS NULL OR (tg.id IS NOT NULL AND tg.is_active = TRUE AND COALESCE(tg.is_archived, FALSE) = FALSE))
+         AND (
+           ti.applicable_room_type_ids IS NULL
+           OR jsonb_typeof(ti.applicable_room_type_ids) != 'array'
+           OR jsonb_array_length(ti.applicable_room_type_ids) = 0
+           OR r.room_type_id IS NULL
+           OR (ti.applicable_room_type_ids @> to_jsonb(r.room_type_id))
+         )
          AND NOT EXISTS (
            SELECT 1 FROM housekeeping_task_checklist_items check_tci
             WHERE check_tci.task_id = ht.id AND check_tci.template_item_id = ti.id
@@ -492,6 +581,14 @@ export async function getTaskChecklistItems(
     }
 
     if (templateCodeToUse) {
+      let taskRoomTypeId: number | null = null;
+      if (task.room_id) {
+        const rtRes = await client.query('SELECT room_type_id FROM rooms WHERE id = $1 LIMIT 1', [task.room_id]);
+        if (hasRows(rtRes) && rtRes.rows[0].room_type_id) {
+          taskRoomTypeId = Number(rtRes.rows[0].room_type_id);
+        }
+      }
+
       const template = await getChecklistTemplateByCode(client, propertyId, templateCodeToUse);
       if (template && template.is_active && !template.is_archived && template.items && template.items.length > 0) {
         const activeGroupIds = new Set(
@@ -504,6 +601,7 @@ export async function getTaskChecklistItems(
         for (const item of template.items) {
           if (!item.is_active || item.is_archived) continue;
           if (item.group_id && !activeGroupIds.has(item.group_id)) continue;
+          if (!isChecklistItemApplicableToRoomType(item.applicable_room_type_ids, taskRoomTypeId)) continue;
 
           const groupName = item.group_name || item.section || 'RUANGAN KAMAR';
           const groupSort = item.group_sort_order !== undefined ? item.group_sort_order : 10;
@@ -3225,11 +3323,14 @@ export async function addChecklistTemplateItem(
     sortOrder = Number(maxRes.rows[0]?.next_sort || 10);
   }
 
+  await ensureChecklistItemRoomTypeScopeColumn(client);
+  const applicableRoomTypeIds = normalizeApplicableRoomTypeIds(payload.applicable_room_type_ids);
+
   const res = await client.query(
     `INSERT INTO checklist_template_items (
-      template_id, group_id, section, label, description, sort_order, is_required, requires_note, requires_photo, is_active, is_archived, created_at, updated_at
+      template_id, group_id, section, label, description, sort_order, is_required, requires_note, requires_photo, is_active, is_archived, applicable_room_type_ids, created_at, updated_at
     ) VALUES (
-      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, NOW(), NOW()
+      $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, FALSE, $11::jsonb, NOW(), NOW()
     ) RETURNING *`,
     [
       templateId,
@@ -3241,7 +3342,8 @@ export async function addChecklistTemplateItem(
       payload.is_required !== undefined && payload.is_required !== null ? Boolean(payload.is_required) : true,
       payload.requires_note !== undefined && payload.requires_note !== null ? Boolean(payload.requires_note) : false,
       payload.requires_photo !== undefined && payload.requires_photo !== null ? Boolean(payload.requires_photo) : false,
-      payload.is_active !== undefined && payload.is_active !== null ? Boolean(payload.is_active) : true
+      payload.is_active !== undefined && payload.is_active !== null ? Boolean(payload.is_active) : true,
+      applicableRoomTypeIds ? JSON.stringify(applicableRoomTypeIds) : null
     ]
   );
 
@@ -3266,6 +3368,7 @@ export async function updateChecklistTemplateItem(
   payload: UpdateChecklistTemplateItemPayload,
   actor?: { id?: number; name?: string; role?: string }
 ): Promise<ChecklistTemplateItem> {
+  await ensureChecklistItemRoomTypeScopeColumn(client);
   const itemCheck = await client.query(
     `SELECT i.* FROM checklist_template_items i
      JOIN checklist_templates t ON t.id = i.template_id
@@ -3298,14 +3401,33 @@ export async function updateChecklistTemplateItem(
   const reqPhoto = payload.requires_photo !== undefined ? Boolean(payload.requires_photo) : current.requires_photo;
   const isActive = payload.is_active !== undefined ? Boolean(payload.is_active) : current.is_active;
   const isArchived = payload.is_archived !== undefined ? Boolean(payload.is_archived) : (current.is_archived || false);
+  const applicableRoomTypeIds =
+    payload.applicable_room_type_ids !== undefined
+      ? normalizeApplicableRoomTypeIds(payload.applicable_room_type_ids)
+      : normalizeApplicableRoomTypeIds(current.applicable_room_type_ids);
 
   const res = await client.query(
     `UPDATE checklist_template_items
      SET group_id = $1, section = $2, label = $3, description = $4, sort_order = $5, is_required = $6,
-         requires_note = $7, requires_photo = $8, is_active = $9, is_archived = $10, updated_at = NOW()
-     WHERE id = $11 AND template_id = $12
+         requires_note = $7, requires_photo = $8, is_active = $9, is_archived = $10,
+         applicable_room_type_ids = $11::jsonb, updated_at = NOW()
+     WHERE id = $12 AND template_id = $13
      RETURNING *`,
-    [groupId, section, label, description, sortOrder, isRequired, reqNote, reqPhoto, isActive, isArchived, itemId, templateId]
+    [
+      groupId,
+      section,
+      label,
+      description,
+      sortOrder,
+      isRequired,
+      reqNote,
+      reqPhoto,
+      isActive,
+      isArchived,
+      applicableRoomTypeIds ? JSON.stringify(applicableRoomTypeIds) : null,
+      itemId,
+      templateId
+    ]
   );
 
   const updated: ChecklistTemplateItem = res.rows[0];

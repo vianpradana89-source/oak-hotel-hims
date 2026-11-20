@@ -2273,10 +2273,48 @@ export const HousekeepingMobileCrewView: React.FC<HousekeepingMobileCrewViewProp
 
                 {/* 2. Isi Kulkas Minibar Berbayar */}
                 <div className="bg-white rounded-xl border border-amber-200 overflow-hidden">
-                  <div className="px-2.5 py-1.5 bg-amber-100/70 border-b border-amber-200 font-bold text-[10px] text-amber-950 flex justify-between">
+                  <div className="px-2.5 py-1.5 bg-amber-100/70 border-b border-amber-200 font-bold text-[10px] text-amber-950 flex items-center justify-between gap-2 flex-wrap">
                     <span>2. Isi Kulkas Minibar Berbayar di Kamar Ini</span>
-                    <span>Isi Kamar</span>
+                    <div className="flex items-center gap-1.5">
+                      {mobileMinibarCatalog.length > 0 && (
+                        mobileStockedMinibarItems.some((it) => it.quantity > 0) ? (
+                          <button
+                            type="button"
+                            onClick={() => setMobileStockedMinibarItems([])}
+                            className="px-2 py-0.5 rounded-md bg-rose-600 hover:bg-rose-700 text-white text-[10px] font-bold shadow-2xs transition cursor-pointer"
+                          >
+                            Kosongkan (Tanpa Kulkas)
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setMobileStockedMinibarItems(
+                                mobileMinibarCatalog.map((d: any) => ({
+                                  menu_item_id: Number(d.menu_item_id),
+                                  name: String(d.item_name || d.name || ''),
+                                  sku: String(d.sku || ''),
+                                  quantity: Number(d.standard_qty ?? 1),
+                                  unit_price: Number(d.unit_price || 0),
+                                  subtotal: Number(d.standard_qty ?? 1) * Number(d.unit_price || 0),
+                                  base_unit_code: String(d.base_unit_code || 'PCS'),
+                                }))
+                              )
+                            }
+                            className="px-2 py-0.5 rounded-md bg-amber-700 hover:bg-amber-800 text-white text-[10px] font-bold shadow-2xs transition cursor-pointer"
+                          >
+                            Isi Standar
+                          </button>
+                        )
+                      )}
+                      <span>Isi Kamar</span>
+                    </div>
                   </div>
+                  {mobileMinibarCatalog.length > 0 && !mobileStockedMinibarItems.some((it) => it.quantity > 0) && (
+                    <div className="px-2.5 py-1.5 bg-stone-100 border-b border-stone-200 text-[10px] font-semibold text-stone-700 flex items-center justify-between">
+                      <span>Minibar dikosongkan (Kamar tanpa kulkas / 0 produk minibar).</span>
+                    </div>
+                  )}
                   {mobileMinibarCatalog.length === 0 ? (
                     <div className="p-2 text-center text-neutral-500 text-[11px]">
                       Belum ada standar Minibar Berbayar untuk kamar ini.

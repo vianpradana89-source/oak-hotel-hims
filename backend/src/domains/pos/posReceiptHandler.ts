@@ -191,7 +191,7 @@ export function createPosReceiptHandler(deps: PosReceiptDeps) {
         deps,
         `SELECT poi.menu_item_id,
                 COALESCE(NULLIF(TRIM(poi.item_name_snapshot), ''), pmi.name, 'Menu Item') AS item_name_snapshot,
-                COALESCE(NULLIF(TRIM(poi.item_code_snapshot), ''), pmi.sku, '') AS item_code_snapshot,
+                COALESCE(NULLIF(TRIM(poi.item_code_snapshot), ''), pmi.item_code, '') AS item_code_snapshot,
                 poi.quantity,
                 poi.unit_price,
                 poi.notes,

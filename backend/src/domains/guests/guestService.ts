@@ -2189,10 +2189,10 @@ export async function redeemPointsForReservation(
          tax_amount, service_amount, status, notes, revenue_category,
          actor_user_id, actor_name_snapshot, actor_role_snapshot
        ) VALUES (
-         $1, $2, 'LOYALTY_REDEEM_REVERSAL', 'LOYALTY_REDEEM', $3,
-         $4, $5, 'CREDIT', $5, $5, 1,
-         0, 0, 'POSTED', $4, 'DISCOUNT',
-         $6, $7, 'STAFF'
+         $1::int, $2::int, 'LOYALTY_REDEEM_REVERSAL', 'LOYALTY_REDEEM', $3::varchar,
+         $4::varchar, $5::numeric, 'CREDIT', $6::numeric, $7::numeric, 1,
+         0, 0, 'POSTED', $8::text, 'DISCOUNT',
+         $9::varchar, $10::varchar, 'STAFF'
        )`,
       [
         reservationId,
@@ -2200,6 +2200,9 @@ export async function redeemPointsForReservation(
         String(ledgerRow.id),
         folioDesc,
         effectiveDiscountIdr,
+        effectiveDiscountIdr,
+        effectiveDiscountIdr,
+        folioDesc,
         actorUserId ? String(actorUserId) : null,
         input.created_by || 'Front Office',
       ]
@@ -2208,22 +2211,22 @@ export async function redeemPointsForReservation(
     // Sync bookings.total_amount and transactions if present
     await client.query(
       `UPDATE bookings
-       SET total_amount = GREATEST(0, COALESCE(total_amount, 0) - $1),
+       SET total_amount = GREATEST(0, COALESCE(total_amount, 0) - $1::numeric),
            updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2`,
-      [effectiveDiscountIdr, resv.booking_id]
+       WHERE id = $2::int`,
+      [effectiveDiscountIdr, Number(resv.booking_id)]
     );
 
     await client.query(
       `UPDATE transactions
-       SET discount_amount = COALESCE(discount_amount, 0) + $1,
-           net_amount = GREATEST(0, COALESCE(net_amount, 0) - $1),
+       SET discount_amount = COALESCE(discount_amount, 0) + $1::numeric,
+           net_amount = GREATEST(0, COALESCE(net_amount, 0) - $1::numeric),
            updated_at = CURRENT_TIMESTAMP
-       WHERE property_id = $2
-         AND (reservation_id = $3 OR (reservation_id IS NULL AND booking_id = $4))
+       WHERE property_id = $2::int
+         AND (reservation_id = $3::int OR (reservation_id IS NULL AND booking_id = $4::int))
          AND transaction_type = 'SALE'
          AND deleted_at IS NULL`,
-      [effectiveDiscountIdr, propertyId, reservationId, resv.booking_id]
+      [effectiveDiscountIdr, propertyId, reservationId, Number(resv.booking_id)]
     );
 
     const recalcFin = await recalculateReservationFinancials(client, reservationId, propertyId);

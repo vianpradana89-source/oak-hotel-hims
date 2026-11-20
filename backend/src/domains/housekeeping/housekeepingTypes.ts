@@ -182,6 +182,7 @@ export interface ChecklistTemplateItem {
   requires_photo: boolean;
   is_active: boolean;
   is_archived?: boolean;
+  applicable_room_type_ids?: number[] | null;
   created_at: string;
   updated_at?: string;
 }
@@ -379,6 +380,7 @@ export interface CreateChecklistTemplateItemPayload {
   requires_note?: boolean;
   requires_photo?: boolean;
   is_active?: boolean;
+  applicable_room_type_ids?: number[] | null;
 }
 
 export interface UpdateChecklistTemplateItemPayload {
@@ -392,4 +394,5 @@ export interface UpdateChecklistTemplateItemPayload {
   requires_photo?: boolean;
   is_active?: boolean;
   is_archived?: boolean;
+  applicable_room_type_ids?: number[] | null;
 }

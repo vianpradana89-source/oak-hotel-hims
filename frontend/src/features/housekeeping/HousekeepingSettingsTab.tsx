@@ -110,6 +110,8 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   // Checklist Item Modal State
   const [itemModalOpen, setItemModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<ChecklistTemplateItem | null>(null);
+  const [roomTypes, setRoomTypes] = useState<Array<{ id: number; name: string }>>([]);
+  const [itemRoomTypeScopeMode, setItemRoomTypeScopeMode] = useState<'ALL' | 'SPECIFIC'>('ALL');
   const [itemForm, setItemForm] = useState<{
     group_id: number | null;
     section: string;
@@ -119,6 +121,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     requires_note: boolean;
     requires_photo: boolean;
     is_active: boolean;
+    applicable_room_type_ids: number[];
   }>({
     group_id: null,
     section: 'BEDROOM',
@@ -127,7 +130,8 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
     is_required: true,
     requires_note: false,
     requires_photo: false,
-    is_active: true
+    is_active: true,
+    applicable_room_type_ids: []
   });
   const [isTemplateItemSaving, setIsTemplateItemSaving] = useState(false);
 
@@ -235,6 +239,26 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       fetchFindingTypes();
     }
   }, [subTab, fetchFindingTypes]);
+
+  useEffect(() => {
+    let active = true;
+    const loadRoomTypes = async () => {
+      try {
+        const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/minibar-catalog?property_id=${propertyId}`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (active && Array.isArray(json?.data?.room_types)) {
+          setRoomTypes(json.data.room_types);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    loadRoomTypes();
+    return () => {
+      active = false;
+    };
+  }, [apiBaseUrl, propertyId]);
 
   const selectedTemplate = templates.find((t) => t.id === selectedTemplateId) || templates[0];
 
@@ -566,6 +590,7 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       defaultGroupId = selectedTemplate.groups[0].id;
     }
 
+    setItemRoomTypeScopeMode('ALL');
     setItemForm({
       group_id: defaultGroupId,
       section: selectedTemplate?.code === 'CHECKOUT_INSPECTION' ? 'CHECKOUT_INSPECTION' : 'BEDROOM',
@@ -574,13 +599,18 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       is_required: true,
       requires_note: false,
       requires_photo: false,
-      is_active: true
+      is_active: true,
+      applicable_room_type_ids: []
     });
     setItemModalOpen(true);
   };
 
   const handleOpenEditTemplateItem = (item: ChecklistTemplateItem) => {
     setEditingItem(item);
+    const scopedIds = Array.isArray(item.applicable_room_type_ids)
+      ? item.applicable_room_type_ids.map((id) => Number(id)).filter((id) => Number.isInteger(id) && id > 0)
+      : [];
+    setItemRoomTypeScopeMode(scopedIds.length > 0 ? 'SPECIFIC' : 'ALL');
     setItemForm({
       group_id: item.group_id ?? null,
       section: item.section,
@@ -589,7 +619,8 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       is_required: item.is_required,
       requires_note: item.requires_note,
       requires_photo: item.requires_photo,
-      is_active: item.is_active
+      is_active: item.is_active,
+      applicable_room_type_ids: scopedIds
     });
     setItemModalOpen(true);
   };
@@ -597,21 +628,33 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   const handleSaveTemplateItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedTemplate) return;
+    if (itemRoomTypeScopeMode === 'SPECIFIC' && itemForm.applicable_room_type_ids.length === 0) {
+      setFeedbackMsg({ type: 'error', text: 'Pilih minimal 1 Tipe Kamar jika cakupan diatur Hanya Tipe Kamar Tertentu.' });
+      return;
+    }
     setIsTemplateItemSaving(true);
     setFeedbackMsg(null);
+    const payload = {
+      property_id: propertyId,
+      ...itemForm,
+      applicable_room_type_ids:
+        itemRoomTypeScopeMode === 'SPECIFIC' && itemForm.applicable_room_type_ids.length > 0
+          ? itemForm.applicable_room_type_ids
+          : null
+    };
     try {
       if (editingItem) {
         const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items/${editingItem.id}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ property_id: propertyId, ...itemForm })
+          body: JSON.stringify(payload)
         });
         if (!res.ok) throw new Error('Gagal mengubah butir checklist');
       } else {
         const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/templates/${selectedTemplate.id}/items`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ property_id: propertyId, ...itemForm })
+          body: JSON.stringify(payload)
         });
         if (!res.ok) throw new Error('Gagal menambahkan butir checklist');
       }
@@ -1577,6 +1620,17 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
                                               Catatan
                                             </span>
                                           )}
+                                          {Array.isArray(item.applicable_room_type_ids) && item.applicable_room_type_ids.length > 0 ? (
+                                            <span className="text-[9px] font-bold text-teal-900 bg-teal-50 px-1.5 py-0.2 rounded border border-teal-200">
+                                              Khusus Tipe: {item.applicable_room_type_ids
+                                                .map((rtId) => roomTypes.find((rt) => Number(rt.id) === Number(rtId))?.name || `#${rtId}`)
+                                                .join(', ')}
+                                            </span>
+                                          ) : (
+                                            <span className="text-[9px] font-medium text-neutral-500 bg-neutral-100 px-1.5 py-0.2 rounded">
+                                              Semua Tipe Kamar
+                                            </span>
+                                          )}
                                         </div>
                                       </div>
                                     </div>
@@ -1997,6 +2051,96 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
                   placeholder="Keterangan standar pengecekan untuk crew..."
                   className="w-full bg-white border border-neutral-300 rounded-xl px-3 py-2 text-neutral-800 text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500"
                 />
+              </div>
+
+              <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                <div>
+                  <label className="block font-bold text-neutral-800">Cakupan Fasilitas / Tipe Kamar</label>
+                  <p className="text-[11px] text-neutral-500">
+                    Atur apakah butir checklist ini berlaku untuk semua kamar atau hanya tipe kamar yang memiliki fasilitas tersebut (misal: Bathtub).
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setItemRoomTypeScopeMode('ALL');
+                      setItemForm((prev) => ({ ...prev, applicable_room_type_ids: [] }));
+                    }}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                      itemRoomTypeScopeMode === 'ALL'
+                        ? 'bg-[#1b4332] text-white border-[#1b4332]'
+                        : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                    }`}
+                  >
+                    Semua Tipe Kamar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setItemRoomTypeScopeMode('SPECIFIC')}
+                    className={`flex-1 py-1.5 px-2.5 rounded-lg text-[11px] font-bold border transition cursor-pointer ${
+                      itemRoomTypeScopeMode === 'SPECIFIC'
+                        ? 'bg-[#1b4332] text-white border-[#1b4332]'
+                        : 'bg-white text-neutral-700 border-neutral-300 hover:bg-neutral-100'
+                    }`}
+                  >
+                    Hanya Tipe Kamar Tertentu
+                  </button>
+                </div>
+
+                {itemRoomTypeScopeMode === 'SPECIFIC' && (
+                  <div className="pt-1.5 space-y-1.5">
+                    <div className="flex items-center justify-between text-[10px] text-neutral-500">
+                      <span>Pilih tipe kamar yang memiliki fasilitas ini:</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setItemForm((prev) => ({
+                            ...prev,
+                            applicable_room_type_ids:
+                              prev.applicable_room_type_ids.length === roomTypes.length
+                                ? []
+                                : roomTypes.map((rt) => Number(rt.id))
+                          }))
+                        }
+                        className="font-bold text-emerald-800 hover:underline cursor-pointer"
+                      >
+                        {itemForm.applicable_room_type_ids.length === roomTypes.length ? 'Kosongkan Pilihan' : 'Pilih Semua'}
+                      </button>
+                    </div>
+                    <div className="grid grid-cols-2 gap-1.5 max-h-36 overflow-y-auto p-2 bg-white rounded-lg border border-neutral-200">
+                      {roomTypes.map((rt) => {
+                        const checked = itemForm.applicable_room_type_ids.includes(Number(rt.id));
+                        return (
+                          <label
+                            key={rt.id}
+                            className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border text-[11px] cursor-pointer transition ${
+                              checked
+                                ? 'bg-emerald-50 border-emerald-400 text-emerald-950 font-bold'
+                                : 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                const id = Number(rt.id);
+                                setItemForm((prev) => ({
+                                  ...prev,
+                                  applicable_room_type_ids: e.target.checked
+                                    ? Array.from(new Set([...prev.applicable_room_type_ids, id]))
+                                    : prev.applicable_room_type_ids.filter((x) => x !== id)
+                                }));
+                              }}
+                              className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-500"
+                            />
+                            <span className="truncate">{rt.name}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
               </div>
 
               <div className="space-y-2 pt-2 border-t border-neutral-100">

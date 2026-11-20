@@ -7472,5 +7472,8 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
       VALUES ('housekeeping_minibar_hkp_seed_excel_v1')
       ON CONFLICT (version) DO NOTHING;
     END $$;
+
+    ALTER TABLE IF EXISTS checklist_template_items
+      ADD COLUMN IF NOT EXISTS applicable_room_type_ids JSONB DEFAULT NULL;
   `);
 }
