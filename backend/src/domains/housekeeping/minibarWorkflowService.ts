@@ -234,7 +234,19 @@ export async function getMinibarCatalogAndRoomContext(
   }
   const activeRoomStandards = Array.from(roomStandardsMap.values());
 
-  // Load all active catalog items with HKP balance
+  // Ensure any product with HKP. or HK. SKU prefix is linked to hkpLocation.id if default_location_id is unset
+  await client
+    .query(
+      `UPDATE pos_menu_items
+          SET default_location_id = $2
+        WHERE property_id = $1
+          AND default_location_id IS NULL
+          AND UPPER(BTRIM(COALESCE(item_code, ''))) ~ '^(HKP|HK)[.\\-_]'`,
+      [propertyId, hkpLocation.id]
+    )
+    .catch(() => {});
+
+  // Load ONLY catalog items that belong to or are stored in Gudang HKP
   const catRes = await client.query(
     `SELECT pmi.id AS menu_item_id,
             pmi.name,
@@ -254,13 +266,23 @@ export async function getMinibarCatalogAndRoomContext(
       WHERE pmi.property_id = $1
         AND COALESCE(pmi.is_deleted, FALSE) = FALSE
         AND COALESCE(pmi.is_active, TRUE) = TRUE
+        AND COALESCE(UPPER(BTRIM(pmi.product_type)), 'FINISHED_GOOD') <> 'RAW_MATERIAL'
+        AND UPPER(BTRIM(COALESCE(pmi.name, ''))) NOT IN ('AYAM', 'TELUR')
+        AND (
+          pmi.default_location_id = $2
+          OR UPPER(BTRIM(COALESCE(pmi.item_code, ''))) ~ '^(HKP|HK)[.\\-_]'
+          OR UPPER(BTRIM(COALESCE(pmi.storage_sublocation, ''))) ~ '(^HKP$|^HK$|HOUSEKEEPING)'
+          OR (
+            COALESCE(sb.quantity, 0) > 0
+            AND (pmi.default_location_id IS NULL OR pmi.default_location_id = $2)
+            AND UPPER(BTRIM(COALESCE(pmi.item_code, ''))) !~ '^(RCP|CCR|KCH|GAR)[.\\-_]'
+          )
+        )
       ORDER BY
         CASE
-          WHEN pmi.default_location_id = $2 OR UPPER(COALESCE(pmi.item_code, '')) LIKE 'HKP.%' THEN 0
+          WHEN pmi.default_location_id = $2 OR UPPER(BTRIM(COALESCE(pmi.item_code, ''))) ~ '^(HKP|HK)[.\\-_]' THEN 0
           WHEN COALESCE(sb.quantity, 0) > 0 THEN 1
-          WHEN UPPER(COALESCE(pmc.name, '')) ~ '(MINIBAR|MINUMAN|DRINK|SNACK|AMENIT)' THEN 2
-          WHEN UPPER(COALESCE(pmi.name, '')) ~ '(MINERAL|AQUA|POCARI|COCA|SPRITE|FANTA|TEH|KOPI|SNACK|CHITATO|POP MIE)' THEN 3
-          ELSE 4
+          ELSE 2
         END,
         pmi.name ASC`,
     [propertyId, hkpLocation.id]
