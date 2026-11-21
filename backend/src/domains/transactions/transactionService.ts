@@ -165,6 +165,7 @@ export function deriveOperationalSheet(row: {
   receiving_status?: string | null;
   purchase_workflow_status?: string | null;
   expense_workflow_status?: string | null;
+  approval_status?: string | null;
   deleted_at?: string | null;
   source_type?: string | null;
   reservation_id?: unknown;
@@ -189,8 +190,11 @@ export function deriveOperationalSheet(row: {
       ? 'SELESAI'
       : 'PROSES';
   }
-  // EXPENSE-1B: Expense workflow status takes precedence for EXPENSE type.
+  // EXPENSE-1B: Expense workflow status & approval status for EXPENSE type.
   if (type === 'EXPENSE') {
+    if (String(row.approval_status || '').toUpperCase() === 'REJECTED') {
+      return 'BATAL';
+    }
     if (row.expense_workflow_status === 'SELESAI') {
       return 'SELESAI';
     }
@@ -3087,8 +3091,9 @@ export async function createExpenseTransaction(
     const txDate = dto.transaction_date || getHotelDateToday();
     const txNumber = await generateTransactionNumber(client, propertyId, txDate);
     const paymentMethod = dto.payment_method || 'CASH';
-    const isPaid = dto.is_paid !== false; // Default: true (immediate payment)
+    const isPaid = dto.is_paid === true; // Default: false (Pengajuan dulu -> Menunggu Persetujuan & Belum Bayar)
     const paymentStatus = isPaid ? 'PAID' : 'UNPAID';
+    const initialApprovalStatus = isPaid ? 'APPROVED' : 'PENDING_APPROVAL';
 
     const insertTx = await client.query(
       `INSERT INTO transactions (
@@ -3100,7 +3105,7 @@ export async function createExpenseTransaction(
         supplier_id, receiving_status, received_at, verification_status,
         notes, metadata, created_by,
         recipient_bank_name, recipient_bank_account, recipient_bank_holder,
-        expense_workflow_status
+        expense_workflow_status, approval_status
       ) VALUES (
         $1, $2, $3, CURRENT_TIMESTAMP,
         'EXPENSE', 'MANUAL_EXPENSE', $4, $5,
@@ -3110,7 +3115,7 @@ export async function createExpenseTransaction(
         $13, NULL, NULL, 'UNVERIFIED',
         $14, $15, $16,
         $17, $18, $19,
-        'PROSES'
+        'PROSES', $20
       ) RETURNING *`,
       [
         propertyId,
@@ -3132,6 +3137,7 @@ export async function createExpenseTransaction(
         dto.recipient_bank_name?.trim() || null,
         dto.recipient_bank_account?.trim() || null,
         dto.recipient_bank_holder?.trim() || null,
+        initialApprovalStatus,
       ]
     );
 
@@ -3238,6 +3244,7 @@ export async function updateExpenseTransaction(
     // 1. Row-lock and validate
     const prevRes = await client.query(
       `SELECT id, transaction_no, transaction_type, transaction_status,
+              payment_status, approval_status,
               verification_status, expense_workflow_status,
               verified_by_user_id, verified_by_name_snapshot, verified_at, deleted_at,
               party_name, description, amount, payment_method,
@@ -3919,7 +3926,7 @@ export async function settleTransactionPayment(
 
     const txRes = await client.query(
       `SELECT t.id, t.transaction_no, t.transaction_type, t.net_amount, t.payment_status,
-              t.source_type,
+              t.source_type, t.approval_status,
               t.reservation_id, t.booking_id,
               COALESCE(pmt.total_paid, 0)::bigint AS paid_amount,
               COALESCE(b.payment_responsibility, 'HOTEL_COLLECT') AS payment_responsibility
@@ -3942,6 +3949,20 @@ export async function settleTransactionPayment(
     }
 
     const tx = txRes.rows[0];
+
+    // Guard for EXPENSE & PURCHASE: must be APPROVED before payment can be settled.
+    const txTypeUpper = String(tx.transaction_type || '').trim().toUpperCase();
+    if (txTypeUpper === 'EXPENSE' || txTypeUpper === 'PURCHASE') {
+      const appUpper = String(tx.approval_status || 'APPROVED').trim().toUpperCase();
+      if (appUpper !== 'APPROVED') {
+        const err: any = new Error(
+          `Transaksi ${tx.transaction_no} belum disetujui (status: ${appUpper === 'REJECTED' ? 'Ditolak' : 'Menunggu Persetujuan'}). Silakan setujui (Approve) terlebih dahulu sebelum mencatat pembayaran.`
+        );
+        err.statusCode = 409;
+        err.code = 'APPROVAL_REQUIRED_BEFORE_PAYMENT';
+        throw err;
+      }
+    }
 
     // A. Guard: POS_ORDER/POS tidak boleh dilunasi manual — harus melalui pembayaran POS.
     const txSourceType = String(tx.source_type || '').trim().toUpperCase();
@@ -7236,6 +7257,12 @@ interface LockedExpenseRow {
   transaction_no: string;
   transaction_type: string;
   transaction_status: string;
+  payment_status: string | null;
+  approval_status: string | null;
+  approved_by_user_id: string | null;
+  approved_by_name_snapshot: string | null;
+  approved_at: string | null;
+  rejection_reason: string | null;
   verification_status: string | null;
   expense_workflow_status: string | null;
   verified_by_user_id: string | null;
@@ -7251,6 +7278,7 @@ async function fetchLockedExpense(
 ): Promise<LockedExpenseRow> {
   const res = await client.query(
     `SELECT id, transaction_no, transaction_type, transaction_status,
+            payment_status, approval_status, approved_by_user_id, approved_by_name_snapshot, approved_at, rejection_reason,
             verification_status, expense_workflow_status,
             verified_by_user_id, verified_by_name_snapshot, verified_at, deleted_at
      FROM transactions
@@ -7342,7 +7370,7 @@ export async function executeExpenseLifecycle(
   }
 
   const actionUpper = String(action).toUpperCase();
-  if (actionUpper !== 'SET_VERIFICATION' && actionUpper !== 'SET_WORKFLOW') {
+  if (actionUpper !== 'SET_VERIFICATION' && actionUpper !== 'SET_WORKFLOW' && actionUpper !== 'SET_APPROVAL') {
     const err: any = new Error(`Action '${action}' tidak valid untuk EXPENSE lifecycle`);
     err.statusCode = 400;
     throw err;
@@ -7353,7 +7381,9 @@ export async function executeExpenseLifecycle(
     await client.query('BEGIN');
 
     const prev = await fetchLockedExpense(client, propertyId, id);
-    assertNonTerminal(prev.transaction_status);
+    if (actionUpper !== 'SET_APPROVAL') {
+      assertNonTerminal(prev.transaction_status);
+    }
 
     if (prev.deleted_at) {
       const err: any = new Error(`Transaksi #${id} telah dihapus dan tidak dapat diubah.`);
@@ -7366,17 +7396,115 @@ export async function executeExpenseLifecycle(
     let newVerifiedByName: string | null = prev.verified_by_name_snapshot;
     let newVerifiedAt: string | null = prev.verified_at;
     let newWorkflow: string | null = prev.expense_workflow_status;
+    let newApprovalStatus: string | null = prev.approval_status || 'PENDING_APPROVAL';
+    let newApprovedByUserId: string | null = prev.approved_by_user_id;
+    let newApprovedByName: string | null = prev.approved_by_name_snapshot;
+    let newApprovedAt: string | null = prev.approved_at;
+    let newRejectionReason: string | null = prev.rejection_reason;
+    let newTransactionStatus: string = prev.transaction_status || 'POSTED';
     const autoRules = {
       verified_forced_workflow_complete: false,
       workflow_process_forced_unverify: false,
     };
 
-    if (actionUpper === 'SET_VERIFICATION') {
+    if (actionUpper === 'SET_APPROVAL') {
+      const app = String(dto.approval_status || '').toUpperCase();
+      if (!app || !['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(app)) {
+        const err: any = new Error(`approval_status '${dto.approval_status}' tidak valid`);
+        err.statusCode = 400;
+        throw err;
+      }
+      if (app === 'REJECTED' && String(prev.payment_status || '').toUpperCase() === 'PAID') {
+        const err: any = new Error('Pengeluaran yang sudah dibayar (PAID) tidak dapat ditolak. Gunakan Void jika ingin membatalkan.');
+        err.statusCode = 409;
+        throw err;
+      }
+      newApprovalStatus = app;
+      if (app === 'APPROVED') {
+        newApprovedByUserId = actorUserId;
+        newApprovedByName = actor;
+        newApprovedAt = new Date().toISOString();
+        newRejectionReason = null;
+        if (newTransactionStatus === 'CANCELLED' || newTransactionStatus === 'VOIDED') {
+          newTransactionStatus = 'POSTED';
+        }
+        newWorkflow = 'PROSES';
+      } else if (app === 'REJECTED') {
+        newApprovedByUserId = actorUserId;
+        newApprovedByName = actor;
+        newApprovedAt = new Date().toISOString();
+        newRejectionReason = reason || 'Pengajuan pengeluaran ditolak';
+        newTransactionStatus = 'CANCELLED';
+        newVerification = 'UNVERIFIED';
+        newVerifiedByUserId = null;
+        newVerifiedByName = null;
+        newVerifiedAt = null;
+      } else if (app === 'PENDING_APPROVAL') {
+        newApprovedByUserId = null;
+        newApprovedByName = null;
+        newApprovedAt = null;
+        newRejectionReason = null;
+        if (newTransactionStatus === 'CANCELLED' || newTransactionStatus === 'VOIDED') {
+          newTransactionStatus = 'POSTED';
+        }
+        newWorkflow = 'PROSES';
+      }
+
+      await client.query(
+        `UPDATE transactions
+            SET approval_status = $1,
+                approved_by_user_id = $2,
+                approved_by_name_snapshot = $3,
+                approved_at = $4,
+                rejection_reason = $5,
+                transaction_status = $6,
+                verification_status = $7,
+                verified_by_user_id = $8,
+                verified_by_name_snapshot = $9,
+                verified_at = $10,
+                purchase_workflow_status = $11,
+                expense_workflow_status = $11,
+                notes = CASE
+                  WHEN $1 = 'REJECTED' AND $5::text IS NOT NULL
+                    THEN COALESCE(notes || ' | ', '') || 'Ditolak: ' || $5::text
+                  ELSE notes
+                END,
+                updated_at = NOW()
+          WHERE id = $12 AND property_id = $13`,
+        [
+          newApprovalStatus,
+          newApprovedByUserId,
+          newApprovedByName,
+          newApprovedAt,
+          newRejectionReason,
+          newTransactionStatus,
+          newVerification,
+          newVerifiedByUserId,
+          newVerifiedByName,
+          newVerifiedAt,
+          newWorkflow,
+          id,
+          propertyId,
+        ]
+      );
+    } else if (actionUpper === 'SET_VERIFICATION') {
        const v = dto.verification_status;
        if (!v || !['UNVERIFIED', 'VERIFIED', 'REJECTED'].includes(v)) {
          const err: any = new Error(`verification_status '${v}' tidak valid`);
          err.statusCode = 400;
          throw err;
+       }
+       if (v === 'VERIFIED') {
+         if (String(prev.approval_status || 'APPROVED').toUpperCase() !== 'APPROVED') {
+           const err: any = new Error('Pengeluaran harus disetujui (APPROVED) terlebih dahulu sebelum dapat diverifikasi.');
+           err.statusCode = 409;
+           throw err;
+         }
+         if (String(prev.payment_status || 'UNPAID').toUpperCase() !== 'PAID') {
+           const err: any = new Error('Pengeluaran harus dibayar (Sudah Bayar) terlebih dahulu sebelum dapat diverifikasi sebagai Selesai.');
+           err.statusCode = 409;
+           throw err;
+         }
        }
        // Capture canonical row from the shared helper — audit payload must use
        // actual DB state (RETURNING *), not stale local variables.
@@ -7406,6 +7534,18 @@ export async function executeExpenseLifecycle(
          err.statusCode = 400;
          throw err;
        }
+       if (w === 'SELESAI') {
+         if (String(prev.approval_status || 'APPROVED').toUpperCase() !== 'APPROVED') {
+           const err: any = new Error('Pengeluaran harus disetujui (APPROVED) terlebih dahulu sebelum diubah menjadi Selesai.');
+           err.statusCode = 409;
+           throw err;
+         }
+         if (String(prev.payment_status || 'UNPAID').toUpperCase() !== 'PAID') {
+           const err: any = new Error('Pengeluaran harus dibayar (Sudah Bayar) terlebih dahulu sebelum diubah menjadi Selesai.');
+           err.statusCode = 409;
+           throw err;
+         }
+       }
        newWorkflow = w;
        if (w === 'PROSES') {
          newVerification = 'UNVERIFIED';
@@ -7429,7 +7569,7 @@ export async function executeExpenseLifecycle(
           WHERE id = $2 AND property_id = $3`,
          [newWorkflow, id, propertyId]
        );
-     } else {
+     } else if (actionUpper === 'SET_WORKFLOW') {
        // SET_WORKFLOW: also reset verification_status/verified fields when switching to PROSES
        await client.query(
          `UPDATE transactions

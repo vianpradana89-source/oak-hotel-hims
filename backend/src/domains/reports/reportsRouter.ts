@@ -1617,6 +1617,7 @@ export function createReportsRouter(pool: Pool): Router {
               t.department_code,
               COALESCE(t.net_amount, 0)::numeric AS net_amount,
               UPPER(COALESCE(t.payment_status, 'PAID')) AS payment_status,
+              UPPER(COALESCE(t.approval_status, 'APPROVED')) AS approval_status,
               t.reservation_id,
               t.booking_id
             FROM transactions t
@@ -1629,14 +1630,14 @@ export function createReportsRouter(pool: Pool): Router {
             (
               COALESCE((SELECT SUM(CASE WHEN tx_type = 'DEPOSIT_REFUND' THEN -amount ELSE amount END) FROM pt_cash WHERE p_date < $2::date), 0)
               + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('SALE', 'INCOME') AND reservation_id IS NULL AND booking_id IS NULL AND payment_status = 'PAID'), 0)
-              - COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('EXPENSE', 'PURCHASE') AND payment_status = 'PAID'), 0)
+              - COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('EXPENSE', 'PURCHASE') AND payment_status = 'PAID' AND approval_status = 'APPROVED'), 0)
             )::numeric(14,2) AS opening_cash_balance,
             (
               COALESCE((SELECT SUM(amount) FROM pt_cash WHERE p_date >= $2::date AND p_date <= $3::date AND tx_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT', 'DEPOSIT')), 0)
               + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'SALE' AND reservation_id IS NULL AND booking_id IS NULL), 0)
             )::numeric(14,2) AS customer_receipts,
             (
-              COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'PURCHASE'), 0)
+              COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'PURCHASE' AND payment_status = 'PAID' AND approval_status = 'APPROVED'), 0)
               + COALESCE((
                 SELECT SUM(ppo.total_estimated_amount)
                 FROM pos_purchase_orders ppo
@@ -1658,6 +1659,8 @@ export function createReportsRouter(pool: Pool): Router {
               SELECT SUM(net_amount) FROM tx_cash
               WHERE t_date >= $2::date AND t_date <= $3::date
                 AND transaction_type = 'EXPENSE'
+                AND payment_status = 'PAID'
+                AND approval_status = 'APPROVED'
                 AND UPPER(COALESCE(department_code, '')) NOT LIKE '%MAINT%'
                 AND UPPER(COALESCE(category_code, '')) NOT LIKE '%MAINT%'
             ), 0)::numeric(14,2) AS operating_expenses,
@@ -1665,6 +1668,8 @@ export function createReportsRouter(pool: Pool): Router {
               SELECT SUM(net_amount) FROM tx_cash
               WHERE t_date >= $2::date AND t_date <= $3::date
                 AND transaction_type = 'EXPENSE'
+                AND payment_status = 'PAID'
+                AND approval_status = 'APPROVED'
                 AND (UPPER(COALESCE(department_code, '')) LIKE '%MAINT%' OR UPPER(COALESCE(category_code, '')) LIKE '%MAINT%')
             ), 0)::numeric(14,2) AS maintenance_expenses,
             COALESCE((
@@ -1710,8 +1715,8 @@ export function createReportsRouter(pool: Pool): Router {
                 SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS booking_total,
                 SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS pos_total,
                 SUM(CASE WHEN t.transaction_type = 'INCOME' THEN t.net_amount ELSE 0 END) AS income_total,
-                SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN t.net_amount ELSE 0 END) AS purchase_total,
-                SUM(CASE WHEN t.transaction_type = 'EXPENSE' THEN t.net_amount ELSE 0 END) AS expense_total
+                SUM(CASE WHEN t.transaction_type = 'PURCHASE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED' AND UPPER(COALESCE(t.payment_status, 'PAID')) = 'PAID' THEN t.net_amount ELSE 0 END) AS purchase_total,
+                SUM(CASE WHEN t.transaction_type = 'EXPENSE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED' AND UPPER(COALESCE(t.payment_status, 'PAID')) = 'PAID' THEN t.net_amount ELSE 0 END) AS expense_total
               FROM transactions t
               WHERE t.property_id = $1
                 AND t.deleted_at IS NULL

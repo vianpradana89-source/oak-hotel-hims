@@ -629,7 +629,8 @@ export async function updateExpenseLifecycleApi(
   id: number | string,
   data: {
     property_id: number;
-    action: 'SET_VERIFICATION' | 'SET_WORKFLOW';
+    action: 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL';
+    approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | null;
     verification_status?: string | null;
     workflow_status?: string | null;
     reason?: string | null;

@@ -11,7 +11,7 @@ export type PurchaseApprovalStatus = 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED
 export type PurchaseLifecycleAction = 'SET_RECEIVING' | 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL' | 'ARCHIVE' | 'UNARCHIVE';
 
 /** EXPENSE-1C: canonical lifecycle action for inline expense controls. */
-export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW';
+export type ExpenseLifecycleAction = 'SET_VERIFICATION' | 'SET_WORKFLOW' | 'SET_APPROVAL';
 
 export type SupplierEntityType = 'SUPPLIER' | 'VENDOR' | 'BOTH';
 export type SupplierStatus = 'ACTIVE' | 'INACTIVE' | 'BLACKLISTED';
@@ -614,6 +614,27 @@ export function mapToOperationalStatus(tx: {
   }
 
   const type = String(tx.transaction_type || '').toUpperCase();
+  if (type === 'EXPENSE') {
+    if (String((tx as any).approval_status || '').toUpperCase() === 'REJECTED') {
+      return {
+        label: 'Ditolak / Batal',
+        group: 'BATAL',
+        badgeClass: 'bg-rose-50 text-rose-700 border-rose-200'
+      };
+    }
+    if (String((tx as any).expense_workflow_status || '').toUpperCase() === 'SELESAI') {
+      return {
+        label: 'Selesai',
+        group: 'SELESAI',
+        badgeClass: 'bg-emerald-50 text-emerald-700 border-emerald-200'
+      };
+    }
+    return {
+      label: 'Proses',
+      group: 'PROSES',
+      badgeClass: 'bg-amber-50 text-amber-700 border-amber-200'
+    };
+  }
   if (type === 'PURCHASE') {
     const recStatus = String(tx.receiving_status || '').toUpperCase();
     if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(recStatus)) {

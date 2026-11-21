@@ -19,6 +19,7 @@ import {
   deleteTransactionAttachmentApi,
   settleTransactionPaymentApi,
   updatePurchaseLifecycleApi,
+  updateExpenseLifecycleApi,
   verifyTransactionApi,
 } from './transactionClient';
 import { useSecureDocumentBlob } from '../common/useSecureDocumentBlob';
@@ -102,6 +103,7 @@ interface TransactionDetailDrawerProps {
   onNavigateToFolio?: (reservationId: number) => void;
   onTransactionUpdated?: () => void;
   onNavigateToInventory?: () => void;
+  initialOpenSettle?: boolean;
 }
 
 export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = ({
@@ -118,7 +120,8 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   onNavigateToReservation,
   onNavigateToFolio,
   onTransactionUpdated,
-  onNavigateToInventory
+  onNavigateToInventory,
+  initialOpenSettle = false,
 }) => {
   const [data, setData] = useState<TransactionRecord | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -129,6 +132,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   const [settleAmount, setSettleAmount] = useState<number | string>('');
   const [settleMethod, setSettleMethod] = useState<string>('TRANSFER');
   const [settleNotes, setSettleNotes] = useState<string>('');
+  const [settleProofFile, setSettleProofFile] = useState<File | null>(null);
   const [isSettling, setIsSettling] = useState(false);
 
   // Verification Form State
@@ -187,6 +191,14 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
     try {
       const res = await fetchTransactionDetailApi(transactionId, propertyId);
       setData(res);
+      if (initialOpenSettle && res.payment_status !== 'PAID') {
+        const rem = Number(res.outstanding_amount ?? res.net_amount ?? 0);
+        if (rem > 0) {
+          setSettleAmount(String(rem));
+          setSettleMethod(res.payment_method || 'TRANSFER');
+          setShowSettleForm(true);
+        }
+      }
     } catch (err: any) {
       setError(err.message || 'Gagal memuat detail transaksi');
     } finally {
@@ -254,9 +266,23 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
         notes: settleNotes.trim() || undefined,
         actor_name: currentStaffName
       });
+      if (settleProofFile) {
+        try {
+          await uploadTransactionAttachmentApi(
+            tx.id,
+            propertyId,
+            settleProofFile,
+            'PAYMENT_PROOF',
+            currentStaffName
+          );
+        } catch (_e) {
+          console.error('Gagal mengunggah bukti pembayaran saat pelunasan:', _e);
+        }
+      }
       setShowSettleForm(false);
       setSettleAmount('');
       setSettleNotes('');
+      setSettleProofFile(null);
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
@@ -314,27 +340,42 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   };
 
   const handleApprovalChange = async (newApproval: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED') => {
-    if (!tx || isUpdatingApproval || tx.transaction_type !== 'PURCHASE') return;
+    if (!tx || isUpdatingApproval || (tx.transaction_type !== 'PURCHASE' && tx.transaction_type !== 'EXPENSE')) return;
     let reason: string | null = null;
     if (newApproval === 'REJECTED') {
-      const input = window.prompt('Masukkan alasan penolakan persetujuan pembelian:');
-      if (!input || !input.trim()) return;
-      reason = input.trim();
+      const input = window.prompt(
+        tx.transaction_type === 'EXPENSE'
+          ? 'Masukkan alasan penolakan pengajuan pengeluaran:'
+          : 'Masukkan alasan penolakan persetujuan pembelian:'
+      );
+      if (input === null) return;
+      reason = input.trim() || 'Ditolak oleh manajemen';
     }
     setIsUpdatingApproval(true);
     try {
-      await updatePurchaseLifecycleApi(tx.id, {
-        property_id: propertyId,
-        action: 'SET_APPROVAL',
-        approval_status: newApproval,
-        reason,
-        actor_name: currentStaffName,
-        actor_user_id: currentUserId || undefined
-      });
+      if (tx.transaction_type === 'EXPENSE') {
+        await updateExpenseLifecycleApi(tx.id, {
+          property_id: propertyId,
+          action: 'SET_APPROVAL',
+          approval_status: newApproval,
+          reason,
+          actor_name: currentStaffName,
+          actor_user_id: currentUserId || undefined
+        });
+      } else {
+        await updatePurchaseLifecycleApi(tx.id, {
+          property_id: propertyId,
+          action: 'SET_APPROVAL',
+          approval_status: newApproval,
+          reason,
+          actor_name: currentStaffName,
+          actor_user_id: currentUserId || undefined
+        });
+      }
       await loadDetail();
       if (onTransactionUpdated) onTransactionUpdated();
     } catch (err: any) {
-      alert(err.message || 'Gagal memperbarui status persetujuan pembelian');
+      alert(err.message || 'Gagal memperbarui status persetujuan');
     } finally {
       setIsUpdatingApproval(false);
     }
@@ -398,7 +439,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
   // Can settle when reservation-linked with remaining collectible, or non-reservation with outstanding.
   // Use canonical displayPaymentStatus (not legacy tx.payment_status) so OTA_COLLECT rooms
   // with hotelCollectibleRemaining=0 don't get blocked from UI by an old UNPAID status.
-  const canSettle = displayPaymentStatus !== 'PAID' && !isSettling
+  const isApprovedForSettlement =
+    tx?.transaction_type === 'EXPENSE' || tx?.transaction_type === 'PURCHASE'
+      ? String(tx?.approval_status || 'APPROVED').toUpperCase() === 'APPROVED'
+      : true;
+  const canSettle = displayPaymentStatus !== 'PAID' && !isSettling && isApprovedForSettlement
     ? (isReservationLinked ? hotelCollectibleRemaining > 0 : outstanding > 0)
     : false;
   // For OTA_COLLECT and HOTEL_COLLECT reservations, settlement ceiling is canonical remaining.
@@ -533,6 +578,35 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     </button>
                   </div>
                 </div>
+
+                {tx.transaction_type === 'EXPENSE' && (
+                  <div>
+                    <span className="text-[10px] text-slate-400 font-bold uppercase block">Persetujuan Pengajuan</span>
+                    {(() => {
+                      const appStatus = tx.approval_status || (tx.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                      const appClass =
+                        appStatus === 'APPROVED'
+                          ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                          : appStatus === 'REJECTED'
+                          ? 'bg-rose-50 border-rose-200 text-rose-800'
+                          : 'bg-amber-50 border-amber-200 text-amber-800';
+                      return (
+                        <div className="flex items-center gap-1.5 mt-1">
+                          <select
+                            value={appStatus}
+                            onChange={(e) => handleApprovalChange(e.target.value as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED')}
+                            disabled={isUpdatingApproval || tx.payment_status === 'PAID'}
+                            className={`text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer border ${appClass} disabled:opacity-60`}
+                          >
+                            <option value="PENDING_APPROVAL">Menunggu</option>
+                            <option value="APPROVED">Disetujui</option>
+                            <option value="REJECTED">Ditolak</option>
+                          </select>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                )}
 
                 {tx.transaction_type === 'PURCHASE' && (
                   <>
@@ -1203,6 +1277,16 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                         value={settleNotes}
                         onChange={(e) => setSettleNotes(e.target.value)}
                         className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-xs"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-slate-700 mb-1">Upload Bukti Pembayaran / Transfer (Opsional)</label>
+                      <input
+                        type="file"
+                        accept="image/jpeg,image/png,application/pdf"
+                        onChange={(e) => setSettleProofFile(e.target.files?.[0] || null)}
+                        className="w-full text-xs text-slate-600 file:mr-2.5 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-xs file:font-semibold file:bg-emerald-100 file:text-emerald-800 hover:file:bg-emerald-200 cursor-pointer"
                       />
                     </div>
 

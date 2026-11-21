@@ -175,7 +175,7 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
 
         onSuccess(updated.id);
       } else {
-        // CREATE mode (unchanged)
+        // CREATE mode: Pengajuan Pengeluaran (is_paid: false -> Menunggu Persetujuan & Belum Bayar)
         const created = await createExpenseTransactionApi({
           property_id: propertyId,
           transaction_date: txDate,
@@ -188,6 +188,7 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           amount: numAmount,
           payment_method: paymentMethod,
           source_reference: sourceRef.trim() || null,
+          is_paid: false,
           notes: notes.trim() || null,
           actor_name: actorName,
           recipient_bank_name: recipientBankName.trim() || null,
@@ -195,18 +196,18 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           recipient_bank_holder: recipientBankHolder.trim() || null,
         });
 
-        // Upload Payment Proof Attachment
+        // Upload Supporting Invoice/Receipt Attachment if provided during submission
         if (paymentProofFile) {
           try {
             await uploadTransactionAttachmentApi(
               created.id,
               propertyId,
               paymentProofFile,
-              'PAYMENT_PROOF',
+              'RECEIPT',
               actorName
             );
           } catch (_e) {
-            console.error('Failed to upload expense payment proof', _e);
+            console.error('Failed to upload expense attachment', _e);
           }
         }
 
@@ -234,12 +235,12 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           </button>
           <div>
             <h2 className="text-lg font-bold text-slate-800">
-              {editMode ? 'Edit Transaksi Pengeluaran' : 'Transaksi Pengeluaran Operasional'}
+              {editMode ? 'Edit Pengajuan / Transaksi Pengeluaran' : 'Pengajuan Pengeluaran Operasional'}
             </h2>
             <p className="text-xs text-slate-500">
               {editMode
                 ? `Edit transaksi ${initialData?.transaction_no || ''} — hanya bisa diedit saat status PROSES`
-                : 'Catat biaya utilitas, gaji/upah harian, operasional front desk, marketing, perbaikan gedung, atau kas kecil'}
+                : 'Ajukan biaya utilitas, gaji/upah tukang & harian, operasional front desk, atau perbaikan. Pembayaran dilakukan setelah disetujui.'}
             </p>
           </div>
         </div>
@@ -510,7 +511,7 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
 
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Metode Pembayaran <span className="text-rose-500">*</span>
+                    Rencana Metode Pembayaran <span className="text-rose-500">*</span>
                   </label>
                   <select
                     value={paymentMethod}
@@ -522,6 +523,11 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
                     <option value="QRIS">QRIS</option>
                     <option value="EDC">Debit / Kartu Kredit Perusahaan</option>
                   </select>
+                  {!editMode && (
+                    <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5 mt-2">
+                      <strong>Alur Pengajuan:</strong> Pengeluaran akan tercatat sebagai <strong>Menunggu Persetujuan (Belum Bayar)</strong>. Setelah <strong>Disetujui</strong>, otomatis masuk ke daftar <strong>Hutang</strong> dan siap dilunasi dengan klik tombol <strong>Bayar</strong>.
+                    </p>
+                  )}
                 </div>
               </div>
             </div>
@@ -532,13 +538,13 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
                 <svg className="w-4 h-4 text-emerald-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
                 </svg>
-                4. Lampiran Bukti Pembayaran
+                4. Lampiran Nota / Dokumen Pengajuan
               </h3>
 
               <div className="space-y-4">
                 <div>
                   <label className="block text-xs font-bold text-slate-700 mb-1">
-                    Bukti Nota / Struk / Slip Transfer
+                    Lampiran Nota Tagihan / Bon / Bukti Pendukung (Opsional)
                   </label>
                   <input
                     type="file"
@@ -580,8 +586,8 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
               </svg>
               {submitting
-                ? (editMode ? 'Menyimpan Perubahan...' : 'Menyimpan Pengeluaran...')
-                : editMode ? 'Simpan Perubahan' : 'Simpan Transaksi Pengeluaran'}
+                ? (editMode ? 'Menyimpan Perubahan...' : 'Mengajukan Pengeluaran...')
+                : editMode ? 'Simpan Perubahan' : 'Ajukan Pengeluaran'}
             </button>
           </div>
         </form>

@@ -442,10 +442,20 @@ export function createTransactionsRouter(pool: Pool): Router {
       // For non-PURCHASE, retain legacy verify path without workflow side-effects.
       const txCheck = await getTransactionById(pool, propertyId, id).catch(() => null);
       const isPurchase = txCheck?.transaction_type === 'PURCHASE';
+      const isExpense = txCheck?.transaction_type === 'EXPENSE';
 
       let updated: any;
       if (isPurchase) {
         updated = await executePurchaseLifecycle(pool, id, {
+          property_id: propertyId,
+          action: 'SET_VERIFICATION',
+          verification_status,
+          reason: verification_note ? String(verification_note).trim() : null,
+          actor_name: actor_name || (req as any).user?.name || 'Supervisor',
+          actor_user_id: actor_user_id || (req as any).user?.id || null,
+        });
+      } else if (isExpense) {
+        updated = await executeExpenseLifecycle(pool, id, {
           property_id: propertyId,
           action: 'SET_VERIFICATION',
           verification_status,
@@ -608,6 +618,7 @@ export function createTransactionsRouter(pool: Pool): Router {
 
        const id = req.params.id;
        const action = req.body?.action;
+       const approvalStatus = req.body?.approval_status;
        const verificationStatus = req.body?.verification_status;
        const workflowStatus = req.body?.workflow_status;
        const reason = req.body?.reason ? String(req.body.reason).trim() : null;
@@ -621,6 +632,7 @@ export function createTransactionsRouter(pool: Pool): Router {
        const updated = await executeExpenseLifecycle(pool, id, {
          property_id: scoped.propertyId,
          action,
+         approval_status: approvalStatus,
          verification_status: verificationStatus,
          workflow_status: workflowStatus,
          reason,

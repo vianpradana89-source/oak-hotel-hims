@@ -201,6 +201,8 @@ export async function queryPresentedPage(
         t.transaction_status,
         t.receiving_status,
         t.purchase_workflow_status,
+        t.expense_workflow_status,
+        t.approval_status,
         t.source_type, t.source_id,
         t.category_code,
         t.department_code,

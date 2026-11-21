@@ -248,6 +248,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const [isSoftDeleting, setIsSoftDeleting] = useState<boolean>(false);
   const [softDeleteError, setSoftDeleteError] = useState<string | null>(null);
   const [detailDrawerOpen, setDetailDrawerOpen] = useState<boolean>(false);
+  const [detailDrawerOpenSettle, setDetailDrawerOpenSettle] = useState<boolean>(false);
   const [selectedTxIdForDetail, setSelectedTxIdForDetail] = useState<number | string | null>(null);
   const [bookingDetailOpen, setBookingDetailOpen] = useState<boolean>(false);
   const [selectedBookingIdForDetail, setSelectedBookingIdForDetail] = useState<number | string | null>(null);
@@ -565,10 +566,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     setActiveEditor(null);
   };
 
-  const openDetailDrawer = (txId: number | string) => {
+  const openDetailDrawer = (txId: number | string, openSettle = false) => {
     setBookingDetailOpen(false);
     setSelectedBookingIdForDetail(null);
     setSelectedTxIdForDetail(txId);
+    setDetailDrawerOpenSettle(openSettle);
     setDetailDrawerOpen(true);
   };
 
@@ -780,11 +782,12 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     }
   };
 
-  // EXPENSE-1C: inline lifecycle mutation handler for expense verification & workflow
+  // EXPENSE-1C: inline lifecycle mutation handler for expense approval, verification & workflow
   const handleExpenseLifecycleMutation = async (
     tx: TransactionRecord,
     action: ExpenseLifecycleAction,
-    value: string
+    value: string,
+    reason?: string
   ) => {
     const key = `exp:${String(tx.id)}:${action}`;
     setLifecycleSaving(prev => ({ ...prev, [key]: true }));
@@ -793,10 +796,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       const payload: {
         property_id: number;
         action: ExpenseLifecycleAction;
+        approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | null;
         verification_status?: string | null;
         workflow_status?: string | null;
+        reason?: string | null;
       } = { property_id: propertyId, action };
-      if (action === 'SET_VERIFICATION') {
+      if (action === 'SET_APPROVAL') {
+        payload.approval_status = value as any;
+        payload.reason = reason || null;
+      } else if (action === 'SET_VERIFICATION') {
         payload.verification_status = value;
       } else if (action === 'SET_WORKFLOW') {
         payload.workflow_status = value;
@@ -807,6 +815,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
     } catch (err: any) {
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
+      window.alert(msg);
       console.error(`EXPENSE-1C: ${action} failed:`, err);
     } finally {
       setLifecycleSaving(prev => {
@@ -2757,7 +2766,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                   </svg>
-                  <span>+ Catat Pengeluaran</span>
+                  <span>+ Ajukan Pengeluaran</span>
                 </button>
               )}
               {activeTab === 'INCOME' && (
@@ -3113,6 +3122,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3 bg-slate-50">Kategori</th>
                         <th className="py-3 px-4 bg-slate-50">Keterangan</th>
                         <th className="py-3 px-3 text-right bg-slate-50">Nominal</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Persetujuan</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Pembayaran</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Status</th>
@@ -3693,20 +3703,96 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
                               {formatIdr(displayTransactionNet(t))}
                             </td>
-                            {/* Pembayaran — read-only badge */}
-                            <td className="py-3 px-2 text-center whitespace-nowrap">
-                              <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
-                                t.payment_status === 'PAID'
-                                  ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                  : 'bg-amber-50 text-amber-700 border-amber-200'
-                              }`}>
-                                {t.payment_status === 'PAID' ? 'Sudah Bayar' : 'Belum Bayar'}
-                              </span>
+                            {/* Persetujuan — inline dropdown */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {(() => {
+                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                                const ac = getPurchaseApprovalClass(appStatus);
+                                return (
+                                  <select
+                                    value={appStatus}
+                                    onChange={async (e) => {
+                                      e.stopPropagation();
+                                      const nextVal = e.target.value;
+                                      let reason: string | undefined;
+                                      if (nextVal === 'REJECTED') {
+                                        const promptRes = window.prompt('Masukkan alasan penolakan pengajuan pengeluaran:');
+                                        if (promptRes === null) return;
+                                        reason = promptRes.trim() || 'Ditolak oleh manajemen';
+                                      }
+                                      await handleExpenseLifecycleMutation(t, 'SET_APPROVAL', nextVal, reason);
+                                    }}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_APPROVAL`] || t.payment_status === 'PAID'}
+                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${ac.bg} ${ac.border} ${ac.text} hover:bg-opacity-80`}
+                                  >
+                                    <option value="PENDING_APPROVAL">Menunggu</option>
+                                    <option value="APPROVED">Disetujui</option>
+                                    <option value="REJECTED">Ditolak</option>
+                                  </select>
+                                );
+                              })()}
+                            </td>
+                            {/* Pembayaran & Bukti */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {(() => {
+                                const ps = String(t.payment_status || 'UNPAID').toUpperCase();
+                                const isPaid = ps === 'PAID';
+                                const isPartial = ps === 'PARTIAL' || ps === 'PARTIALLY_PAID';
+                                return (
+                                  <div className="inline-flex flex-col items-center gap-0.5">
+                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
+                                      isPaid
+                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                                        : isPartial
+                                        ? 'bg-blue-50 text-blue-700 border-blue-200'
+                                        : 'bg-amber-50 text-amber-700 border-amber-200'
+                                    }`}>
+                                      {isPaid ? 'Sudah Bayar' : isPartial ? 'Dibayar Sebagian' : 'Belum Bayar'}
+                                    </span>
+                                    {t.payment_proof_attachment ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const attach = t.payment_proof_attachment;
+                                          if (attach) {
+                                            setPaymentProofModal({
+                                              filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
+                                              title: `Bukti Pengeluaran — ${t.transaction_no}`,
+                                              uploadId: `HIMS-PUR-${t.id}`,
+                                            });
+                                          }
+                                        }}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 cursor-pointer"
+                                        title="Lihat Bukti Bayar / Lampiran"
+                                      >
+                                        <span>📎 Bukti</span>
+                                      </button>
+                                    ) : isPaid ? (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          setPaymentProofModal({
+                                            filePath: null,
+                                            title: `Bukti Bayar — ${t.transaction_no}`,
+                                            uploadId: `HIMS-PUR-${t.id}`,
+                                          });
+                                        }}
+                                        className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-slate-50 text-slate-600 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-700 cursor-pointer"
+                                        title="Unggah Bukti Bayar"
+                                      >
+                                        <span>+ Bukti</span>
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                );
+                              })()}
                             </td>
                             {/* Verifikasi — inline dropdown */}
                             <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                               {(() => {
                                 const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
+                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                                const canVerify = appStatus === 'APPROVED' && t.payment_status === 'PAID';
                                 return (
                                   <select
                                     value={t.verification_status || 'UNVERIFIED'}
@@ -3714,7 +3800,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                       e.stopPropagation();
                                       await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
                                     }}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t)}
+                                    title={!canVerify ? 'Setujui dan bayar pengeluaran terlebih dahulu sebelum memverifikasi' : undefined}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t) || !canVerify}
                                     className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
                                   >
                                     <option value="UNVERIFIED">Belum Diperiksa</option>
@@ -3743,6 +3830,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                     </span>
                                   );
                                 }
+                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                                const canFinish = appStatus === 'APPROVED' && t.payment_status === 'PAID';
                                 return (
                                   <select
                                     value={ws}
@@ -3750,7 +3839,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                       e.stopPropagation();
                                       await handleExpenseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
                                     }}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`]}
+                                    title={!canFinish ? 'Setujui dan bayar pengeluaran terlebih dahulu sebelum mengubah ke Selesai' : undefined}
+                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`] || (!canFinish && ws === 'PROSES')}
                                     className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
                                   >
                                     <option value="PROSES">Proses</option>
@@ -3761,6 +3851,33 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             </td>
                             <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                               <div className="flex items-center justify-center gap-1">
+                                {(() => {
+                                  const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                                  const isUnpaid = t.payment_status !== 'PAID' && t.operational_sheet !== 'BATAL' && !t.deleted_at;
+                                  if (!isUnpaid) return null;
+                                  if (appStatus === 'APPROVED') {
+                                    return (
+                                      <button
+                                        type="button"
+                                        onClick={() => openDetailDrawer(t.id, true)}
+                                        className="px-2.5 py-1 text-[10px] font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer shadow-2xs"
+                                        title="Catat pembayaran / pelunasan pengeluaran yang sudah disetujui"
+                                      >
+                                        Bayar
+                                      </button>
+                                    );
+                                  }
+                                  return (
+                                    <button
+                                      type="button"
+                                      disabled
+                                      className="px-2 py-1 text-[10px] font-semibold text-slate-400 bg-slate-100 border border-slate-200 rounded-lg cursor-not-allowed opacity-70"
+                                      title="Pengajuan harus Disetujui terlebih dahulu sebelum dapat dibayar"
+                                    >
+                                      Bayar
+                                    </button>
+                                  );
+                                })()}
                                 <button
                                   onClick={() => openDetailDrawer(t.id)}
                                   className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"
@@ -3809,7 +3926,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           </tr>
                           {isExpanded && (
                             <tr className="bg-slate-50/60">
-                              <td colSpan={10} className="px-4 py-3">
+                              <td colSpan={11} className="px-4 py-3">
                                 <div className="rounded-lg border border-slate-200 bg-white/90 overflow-hidden">
                                   <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
                                     Rincian Operasional Pengeluaran
@@ -4481,8 +4598,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
         propertyId={propertyId}
         currentStaffName={currentStaffName}
         currentUserId={currentUserId}
+        initialOpenSettle={detailDrawerOpenSettle}
         onClose={() => {
           setDetailDrawerOpen(false);
+          setDetailDrawerOpenSettle(false);
           setSelectedTxIdForDetail(null);
         }}
         onEditPurchase={(tx) => {
@@ -4576,7 +4695,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     role="menuitem"
                     onClick={() => {
                       closePurchaseActionMenu();
-                      openDetailDrawer(tx.id);
+                      openDetailDrawer(tx.id, true);
                     }}
                     className="w-full px-3.5 py-2 text-left font-semibold text-amber-800 hover:bg-amber-50 flex items-center justify-between cursor-pointer"
                   >

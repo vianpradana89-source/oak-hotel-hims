@@ -361,7 +361,7 @@ export async function calculateFinancials(
   `;
   const incomeByMethodRes = await pool.query(incomeByMethodQuery, [propertyId, startDate, endDate]);
 
-  // 2. Expense (EXPENSE transaction type, reporting-eligible)
+  // 2. Expense (EXPENSE transaction type, reporting-eligible: APPROVED and not REJECTED/PENDING_APPROVAL)
   const expenseQuery = `
     SELECT
       COALESCE(SUM(t.net_amount), 0)::numeric(14,2) AS total,
@@ -371,6 +371,8 @@ export async function calculateFinancials(
       AND t.transaction_type = 'EXPENSE'
       AND t.deleted_at IS NULL
       AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED'
+      AND UPPER(COALESCE(t.payment_status, 'PAID')) = 'PAID'
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
   `;
@@ -389,6 +391,8 @@ export async function calculateFinancials(
       AND t.transaction_type = 'EXPENSE'
       AND t.deleted_at IS NULL
       AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED'
+      AND UPPER(COALESCE(t.payment_status, 'PAID')) = 'PAID'
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY t.category_code, COALESCE(t.category_name, t.category_code)
@@ -406,6 +410,8 @@ export async function calculateFinancials(
       AND t.transaction_type = 'EXPENSE'
       AND t.deleted_at IS NULL
       AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED'
+      AND UPPER(COALESCE(t.payment_status, 'PAID')) = 'PAID'
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     GROUP BY t.department_code
@@ -452,6 +458,7 @@ export async function calculateFinancials(
       AND t.transaction_type = 'EXPENSE'
       AND t.deleted_at IS NULL
       AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+      AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED'
       AND t.transaction_date >= $2::date
       AND t.transaction_date <= $3::date
     ORDER BY t.transaction_date DESC, t.id DESC

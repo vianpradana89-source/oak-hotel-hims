@@ -338,10 +338,14 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       `SELECT * FROM (
          SELECT
            t.id,
+           t.transaction_type,
            t.transaction_no,
            to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
            COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
-           COALESCE(NULLIF(BTRIM(t.description), ''), 'Pembelian Operasional / PO') AS notes,
+           COALESCE(
+             NULLIF(BTRIM(t.description), ''),
+             CASE WHEN t.transaction_type = 'EXPENSE' THEN COALESCE(t.category_name, 'Pengeluaran Operasional') ELSE 'Pembelian Operasional / PO' END
+           ) AS notes,
            COALESCE(t.net_amount, 0)::numeric(16,2) AS total_amount,
            CASE
              WHEN UPPER(COALESCE(t.payment_status, 'UNPAID')) = 'PAID' THEN COALESCE(t.net_amount, 0)
@@ -350,9 +354,9 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            NULL::text AS due_date,
            COALESCE(NULLIF(BTRIM(t.payment_method), ''), 'Cash') AS payment_method,
            UPPER(COALESCE(t.payment_status, 'UNPAID')) AS payment_status,
-           s.bank_name,
-           s.bank_account,
-           s.bank_holder,
+           COALESCE(NULLIF(BTRIM(t.recipient_bank_name), ''), s.bank_name) AS bank_name,
+           COALESCE(NULLIF(BTRIM(t.recipient_bank_account), ''), s.bank_account) AS bank_account,
+           COALESCE(NULLIF(BTRIM(t.recipient_bank_holder), ''), s.bank_holder) AS bank_holder,
            s.email AS supplier_email,
            COALESCE(
              sl_po.code,
@@ -363,7 +367,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
                WHERE (gr.transaction_id = t.id OR (t.po_id IS NOT NULL AND gr.po_id = t.po_id))
                LIMIT 1
              ),
-             '—'
+             CASE WHEN t.transaction_type = 'EXPENSE' THEN COALESCE(t.department_code, '—') ELSE '—' END
            ) AS warehouse_code,
            (
              SELECT json_build_object(
@@ -389,15 +393,18 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              AND pt.transaction_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT')
          ) pmt ON TRUE
          WHERE t.property_id = $1
-           AND t.transaction_type = 'PURCHASE'
            AND t.deleted_at IS NULL
            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-           AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED'
+           AND (
+             (t.transaction_type = 'PURCHASE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED')
+             OR (t.transaction_type = 'EXPENSE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED')
+           )
 
          UNION ALL
 
          SELECT
            ppo.id,
+           'PURCHASE'::text AS transaction_type,
            ppo.po_number AS transaction_no,
            to_char(ppo.order_date, 'YYYY-MM-DD') AS tx_date,
            COALESCE(ps.name, 'Supplier PO') AS supplier_name,
@@ -551,6 +558,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   const payablesItems: Array<{
     id: string;
     source: 'HIMS_PURCHASE' | 'MANUAL';
+    tx_type?: string;
     raw_id: number;
     supplier_name: string;
     transaction_no: string;
@@ -583,6 +591,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     payablesItems.push({
       id: `HIMS-PUR-${p.id}`,
       source: 'HIMS_PURCHASE',
+      tx_type: String(p.transaction_type || 'PURCHASE').toUpperCase(),
       raw_id: Number(p.id),
       supplier_name: String(p.supplier_name || '-'),
       transaction_no: String(p.transaction_no || `PO-${p.id}`),
@@ -998,6 +1007,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   }
 
   for (const pur of payablesItems) {
+    if (pur.tx_type === 'EXPENSE') continue;
     if (pur.tx_date < ctx.startDate || pur.tx_date > ctx.endDate) continue;
     const paidAmt = Math.round(Number(pur.paid_amount) || 0);
     if (paidAmt <= 0) continue;

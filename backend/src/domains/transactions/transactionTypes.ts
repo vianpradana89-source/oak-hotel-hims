@@ -29,6 +29,8 @@ export const PURCHASE_WORKFLOW_SHEET_SQL = `
  */
 export const EXPENSE_WORKFLOW_SHEET_SQL = `
   WHEN UPPER(t.transaction_type) = 'EXPENSE'
+    AND UPPER(COALESCE(t.approval_status, 'PENDING_APPROVAL')) = 'REJECTED' THEN 'BATAL'
+  WHEN UPPER(t.transaction_type) = 'EXPENSE'
     AND UPPER(COALESCE(t.expense_workflow_status, 'PROSES')) = 'SELESAI' THEN 'SELESAI'
   WHEN UPPER(t.transaction_type) = 'EXPENSE' THEN 'PROSES'`;
 
