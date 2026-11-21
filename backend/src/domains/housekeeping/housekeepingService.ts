@@ -37,7 +37,23 @@ function hasRows(result: any): boolean {
   return Array.isArray(result?.rows) && result.rows.length > 0;
 }
 
+let _hkAlarmColumnChecked = false;
+async function ensureHkAlarmColumn(client: PoolClient | Pool): Promise<void> {
+  if (_hkAlarmColumnChecked) return;
+  try {
+    await client.query(`
+      ALTER TABLE IF EXISTS property_housekeeping_settings
+      ADD COLUMN IF NOT EXISTS alarm_repeat_mode VARCHAR(20) NOT NULL DEFAULT '3x'
+    `);
+    _hkAlarmColumnChecked = true;
+  } catch {
+    // non-fatal
+  }
+}
+
 export function formatSettingsRecord(row: any): PropertyHousekeepingSettings {
+  const validModes = ['1x', '3x', '5x', '10x', 'loop'];
+  const rawMode = String(row.alarm_repeat_mode || '3x').trim();
   return {
     id: Number(row.id),
     property_id: Number(row.property_id),
@@ -49,6 +65,7 @@ export function formatSettingsRecord(row: any): PropertyHousekeepingSettings {
     default_room_cleaning_template_code: row.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING',
     default_checkout_template_code: row.default_checkout_template_code || 'CHECKOUT_INSPECTION',
     default_checkout_inspection_template_code: row.default_checkout_template_code || 'CHECKOUT_INSPECTION',
+    alarm_repeat_mode: validModes.includes(rawMode) ? rawMode : '3x',
     created_at: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
     updated_at: row.updated_at ? new Date(row.updated_at).toISOString() : new Date().toISOString()
   };
@@ -58,6 +75,7 @@ export async function getPropertyHousekeepingSettings(
   client: PoolClient | Pool,
   propertyId: number
 ): Promise<PropertyHousekeepingSettings> {
+  await ensureHkAlarmColumn(client);
   const res = await client.query(
     'SELECT * FROM property_housekeeping_settings WHERE property_id = $1',
     [propertyId]
@@ -145,6 +163,12 @@ export async function updatePropertyHousekeepingSettings(
     defaultCheckoutTemplate = trimmed;
   }
 
+  const validAlarmModes = ['1x', '3x', '5x', '10x', 'loop'];
+  const alarmRepeatMode =
+    settings.alarm_repeat_mode && validAlarmModes.includes(String(settings.alarm_repeat_mode).trim())
+      ? String(settings.alarm_repeat_mode).trim()
+      : (current.alarm_repeat_mode || '3x');
+
   // 3. Atomic UPSERT
   const res = await client.query(
     `INSERT INTO property_housekeeping_settings (
@@ -155,9 +179,10 @@ export async function updatePropertyHousekeepingSettings(
        housekeeping_category_bulk_check_enabled,
        default_cleaning_template_code,
        default_checkout_template_code,
+       alarm_repeat_mode,
        updated_at
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
      ON CONFLICT (property_id) DO UPDATE
      SET require_final_inspection = EXCLUDED.require_final_inspection,
          require_checkout_room_check = EXCLUDED.require_checkout_room_check,
@@ -165,9 +190,10 @@ export async function updatePropertyHousekeepingSettings(
          housekeeping_category_bulk_check_enabled = EXCLUDED.housekeeping_category_bulk_check_enabled,
          default_cleaning_template_code = EXCLUDED.default_cleaning_template_code,
          default_checkout_template_code = EXCLUDED.default_checkout_template_code,
+         alarm_repeat_mode = EXCLUDED.alarm_repeat_mode,
          updated_at = NOW()
      RETURNING *`,
-    [propertyId, requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, categoryBulkCheckEnabled, defaultCleaningTemplate, defaultCheckoutTemplate]
+    [propertyId, requireFinalInspection, requireCheckoutRoomCheck, allowCalendarOverride, categoryBulkCheckEnabled, defaultCleaningTemplate, defaultCheckoutTemplate, alarmRepeatMode]
   );
 
   const formatted = formatSettingsRecord(res.rows[0]);

@@ -174,6 +174,23 @@ export function isPiutangPresentedRow(row: any): boolean {
   const txType = String(row.transaction_type || '').toUpperCase();
   if (txType !== 'SALE') return false;
 
+  const rowTxStat = String(row.transaction_status || '').toUpperCase();
+  const rowOpSheet = String(
+    row.booking_bid_group?.operational_sheet ||
+    row.booking_bid_group?.canonical_operational_sheet ||
+    row.operational_sheet ||
+    row.canonical_operational_sheet ||
+    row.sheet ||
+    ''
+  ).toUpperCase();
+  if (
+    rowOpSheet === 'BATAL' ||
+    rowOpSheet === 'HAPUS' ||
+    ['VOIDED', 'REVERSED', 'CANCELLED'].includes(rowTxStat)
+  ) {
+    return false;
+  }
+
   const payResp = String(
     row.booking_bid_group?.payment_responsibility ||
     row.payment_responsibility ||
@@ -453,9 +470,11 @@ function worstVerificationStatus(statuses: Array<string | null | undefined>): 'U
 }
 
 export function buildChild(reservationId: number | null, members: any[], includePosStats?: boolean): PenjualanBidChild {
-  const primary = members[0];
-  const gross = members.reduce((sum, row) => sum + roundIdr(row.amount), 0);
-  const discount = members.reduce((sum, row) => sum + roundIdr(row.discount_amount), 0);
+  const activeMembers = members.filter((row) => operationalSheetOf(row) !== 'BATAL');
+  const finMembers = activeMembers.length > 0 ? activeMembers : members;
+  const primary = activeMembers[0] || members[0];
+  const gross = finMembers.reduce((sum, row) => sum + Math.abs(roundIdr(row.amount)), 0);
+  const discount = finMembers.reduce((sum, row) => sum + Math.abs(roundIdr(row.discount_amount)), 0);
   const net = members.reduce((sum, row) => sum + saleNet(row), 0);
 
   // Split members into POS and room (non-POS) groups so that the room
@@ -674,10 +693,15 @@ function buildGroup(
     parentCanonicalSheet
   );
 
+  const groupPrimary =
+    members.find(
+      (m) => String(m.transaction_status || '').toUpperCase() === 'POSTED' && operationalSheetOf(m) !== 'BATAL'
+    ) || members[0];
+
   return {
     bid,
     booking_id: bookingId,
-    guest_name: String(members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
+    guest_name: String(groupPrimary.party_name || groupPrimary.guest_name_snapshot || members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
     room_count: children.length,
     stay_type_label: stayTypeLabel(children.map((child) => child.stay_type)),
     totals_scope: 'PERIOD_ACTIVITY',
@@ -694,7 +718,7 @@ function buildGroup(
     canonical_operational_sheet: parentCanonicalSheet,
     audit_verification_status: parentVerification,
     children,
-    primary: members[0],
+    primary: groupPrimary,
     members,
   };
 }

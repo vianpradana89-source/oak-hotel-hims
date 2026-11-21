@@ -1373,7 +1373,100 @@ export async function deleteFolioEntry(
     );
   }
 
-  // 6. Delete the folio_entries rows
+  // 6. If this is a Loyalty Point Redemption entry, restore the guest's points and revert discount
+  if (entryTypeUpper === 'LOYALTY_REDEEM_REVERSAL' || sourceTypeUpper === 'LOYALTY_REDEEM') {
+    const redeemAmount = Math.max(0, Math.round(Number(revalidatedEntry.amount || 0)));
+    const ledgerId = Number(revalidatedEntry.source_id);
+    let restoredViaLedgerDelete = false;
+
+    if (Number.isInteger(ledgerId) && ledgerId > 0) {
+      const delLedger = await client.query(
+        `DELETE FROM guest_loyalty_ledger
+         WHERE id = $1 AND property_id = $2
+         RETURNING id, guest_id, points`,
+        [ledgerId, propertyId]
+      );
+      if ((delLedger.rowCount ?? 0) > 0) {
+        restoredViaLedgerDelete = true;
+      }
+    }
+
+    if (!restoredViaLedgerDelete) {
+      // Fallback: match points from description e.g. "(735 Poin)" and restore to primary guest
+      const ptsMatch = String(revalidatedEntry.description || '').match(/\((\d+)\s*Poin\)/i);
+      const ptsToRestore = ptsMatch ? Number(ptsMatch[1]) : 0;
+      if (ptsToRestore > 0) {
+        const resGuest = await client.query(
+          `SELECT COALESCE(
+             (SELECT rg.guest_id FROM reservation_guests rg WHERE rg.reservation_id = r.id ORDER BY CASE WHEN rg.role = 'PRIMARY_GUEST' THEN 0 ELSE 1 END, rg.id ASC LIMIT 1),
+             b.customer_id
+           ) AS guest_id,
+           b.bid
+           FROM reservations r
+           LEFT JOIN bookings b ON b.id = r.booking_id
+           WHERE r.id = $1`,
+          [targetReservationId]
+        );
+        const targetGuestId = Number(resGuest.rows[0]?.guest_id || 0);
+        const refBid = resGuest.rows[0]?.bid || `RESV-${targetReservationId}`;
+        if (targetGuestId > 0) {
+          // Try deleting matching REDEEM ledger entry first
+          const delMatch = await client.query(
+            `DELETE FROM guest_loyalty_ledger
+             WHERE id IN (
+               SELECT id FROM guest_loyalty_ledger
+               WHERE property_id = $1
+                 AND guest_id = $2
+                 AND entry_type = 'REDEEM'
+                 AND ABS(points) = $3
+               ORDER BY id DESC
+               LIMIT 1
+             )`,
+            [propertyId, targetGuestId, ptsToRestore]
+          );
+          if ((delMatch.rowCount ?? 0) === 0) {
+            await client.query(
+              `INSERT INTO guest_loyalty_ledger (
+                 property_id, guest_id, entry_type, points, description, reference_no, created_by
+               ) VALUES ($1, $2, 'ADJUST', $3, $4, $5, 'System')`,
+              [
+                propertyId,
+                targetGuestId,
+                ptsToRestore,
+                `Pengembalian Poin Pembatalan Potong Tagihan ${refBid} (+${ptsToRestore} Poin)`,
+                refBid,
+              ]
+            );
+          }
+        }
+      }
+    }
+
+    if (redeemAmount > 0) {
+      await client.query(
+        `UPDATE reservations
+         SET discount_amount = GREATEST(0, COALESCE(discount_amount, 0) - $1),
+             special_requests = NULLIF(BTRIM(REGEXP_REPLACE(COALESCE(special_requests, ''), '\\[Redeem[^\\]]*\\]', '', 'gi')), '')
+         WHERE id = $2`,
+        [redeemAmount, targetReservationId]
+      );
+
+      await client.query(
+        `UPDATE transactions
+         SET discount_amount = GREATEST(0, COALESCE(discount_amount, 0) - $1::bigint),
+             net_amount = COALESCE(net_amount, 0) + $1::bigint,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE property_id = $2::int
+           AND reservation_id = $3::int
+           AND transaction_type = 'SALE'
+           AND source_type IN ('ROOM_CHARGE', 'DAY_USE_ROOM')
+           AND deleted_at IS NULL`,
+        [redeemAmount, propertyId, targetReservationId]
+      );
+    }
+  }
+
+  // 7. Delete the folio_entries rows
   await client.query(
     'DELETE FROM folio_entries WHERE id = ANY($1::int[])',
     [allFolioIds]

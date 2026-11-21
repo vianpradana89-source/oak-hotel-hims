@@ -675,6 +675,7 @@ export default function ReservationDetailDrawer({
       }
       await loadFolio(targetReservationId);
       await loadFullReservation(targetReservationId);
+      setGuestCrmRetryCount((c) => c + 1);
       auditLog.retry();
       onRefresh();
     } catch (err: any) {
@@ -2356,88 +2357,123 @@ export default function ReservationDetailDrawer({
                   </div>
 
                   {/* Loyalty Point Redemption Box inside Reservation Detail */}
-                  {Number(guestCrmData.loyalty_points || 0) > 0 && !isCancelled && !isCheckedOut && (
-                    <div className="p-2.5 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[11px] font-bold text-[#1E392A]">
-                          Gunakan Poin (Potong Tagihan)
-                        </span>
-                        <span className="text-[10px] font-semibold text-emerald-800">
-                          Nilai Tukar: Rp {Math.round(Number(guestCrmData.point_value_idr || 0)).toLocaleString('id-ID')}
-                        </span>
+                  {Number(guestCrmData.loyalty_points || 0) > 0 && !isCancelled && !isCheckedOut && (() => {
+                    const totalPts = Math.max(0, Number(guestCrmData.loyalty_points || 0));
+                    const totalValIdr = Math.max(0, Number(guestCrmData.point_value_idr || 0));
+                    const perPointIdr = totalPts > 0 && totalValIdr > 0 ? totalValIdr / totalPts : 250;
+                    const isAlreadyPaid = remainingBalance <= 0;
+                    const maxRedeemablePts = isAlreadyPaid
+                      ? 0
+                      : Math.min(totalPts, Math.max(1, Math.ceil(remainingBalance / perPointIdr)));
+                    const effectivePts = isAlreadyPaid
+                      ? 0
+                      : redeemPointsDraft !== ''
+                      ? Math.min(maxRedeemablePts, Math.max(0, Math.round(Number(redeemPointsDraft) || 0)))
+                      : maxRedeemablePts;
+                    const estimatedCutIdr = isAlreadyPaid
+                      ? 0
+                      : Math.min(remainingBalance, Math.round(effectivePts * perPointIdr));
+
+                    return (
+                      <div className={`p-2.5 rounded-xl border space-y-2 ${isAlreadyPaid ? 'bg-stone-100 border-stone-200' : 'bg-emerald-50/70 border-emerald-200'}`}>
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="text-[11px] font-bold text-[#1E392A]">
+                            Gunakan Poin (Potong Tagihan)
+                          </span>
+                          <span className="text-[10px] font-semibold text-emerald-800">
+                            {isAlreadyPaid
+                              ? `Nilai Tukar Saldo: Rp ${Math.round(totalValIdr).toLocaleString('id-ID')}`
+                              : `Potongan: Rp ${estimatedCutIdr.toLocaleString('id-ID')} (Maks Sisa: Rp ${remainingBalance.toLocaleString('id-ID')})`}
+                          </span>
+                        </div>
+                        {isAlreadyPaid ? (
+                          <div className="text-[11px] font-semibold text-stone-500 bg-white/80 px-2.5 py-1.5 rounded-lg border border-stone-200">
+                            🔒 Tagihan sudah lunas (Sisa Tagihan Rp 0). Poin hanya dapat digunakan jika masih ada sisa tagihan.
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-1.5">
+                            <input
+                              type="number"
+                              min={1}
+                              max={maxRedeemablePts}
+                              value={redeemPointsDraft !== '' ? redeemPointsDraft : String(maxRedeemablePts)}
+                              onChange={(e) => {
+                                const raw = e.target.value;
+                                if (raw === '') {
+                                  setRedeemPointsDraft('');
+                                  return;
+                                }
+                                const capped = Math.min(maxRedeemablePts, Math.max(1, Math.round(Number(raw) || 1)));
+                                setRedeemPointsDraft(String(capped));
+                              }}
+                              placeholder="Jml poin"
+                              className="w-24 px-2.5 py-1 text-xs font-semibold bg-white border border-emerald-300 rounded-lg focus:outline-hidden"
+                            />
+                            <button
+                              type="button"
+                              disabled={redeemingPoints || effectivePts <= 0}
+                              onClick={async () => {
+                                const targetReservationId = Number(detailData?.id || reservation?.id);
+                                const pts = effectivePts;
+                                if (!targetReservationId || !primaryGuestId || !activePropId || pts <= 0) return;
+                                setRedeemingPoints(true);
+                                setRedeemFeedback(null);
+                                try {
+                                  const res = await safeFetchJson<{ status?: string; data?: any; message?: string }>(
+                                    '/api/guests/redeem-reservation-points',
+                                    {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({
+                                        property_id: activePropId,
+                                        reservation_id: targetReservationId,
+                                        guest_id: primaryGuestId,
+                                        points_to_redeem: pts,
+                                      }),
+                                    },
+                                    'Gagal menukarkan poin loyalitas',
+                                    authFetch
+                                  );
+                                  if (!res.ok) {
+                                    setRedeemFeedback({
+                                      type: 'error',
+                                      text: res.errorMessage || 'Gagal menukarkan poin.',
+                                    });
+                                    return;
+                                  }
+                                  const cutIdr = Number(res.data?.data?.discount_amount_idr || 0);
+                                  const usedPts = Number(res.data?.data?.redeemed_points || pts);
+                                  setRedeemFeedback({
+                                    type: 'success',
+                                    text: `Berhasil menukar ${usedPts} poin (-Rp ${cutIdr.toLocaleString('id-ID')}).`,
+                                  });
+                                  setRedeemPointsDraft('');
+                                  setGuestCrmRetryCount((c) => c + 1);
+                                  await loadFullReservation(targetReservationId);
+                                  await loadFolio(targetReservationId);
+                                  onRefresh();
+                                } finally {
+                                  setRedeemingPoints(false);
+                                }
+                              }}
+                              className="flex-1 px-3 py-1 bg-[#1E392A] hover:bg-[#162a1f] text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
+                            >
+                              {redeemingPoints ? 'Memproses...' : `Potong Tagihan (-Rp ${estimatedCutIdr.toLocaleString('id-ID')})`}
+                            </button>
+                          </div>
+                        )}
+                        {redeemFeedback && (
+                          <p
+                            className={`text-[11px] font-medium ${
+                              redeemFeedback.type === 'success' ? 'text-emerald-800' : 'text-rose-700'
+                            }`}
+                          >
+                            {redeemFeedback.text}
+                          </p>
+                        )}
                       </div>
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="number"
-                          min={1}
-                          max={Number(guestCrmData.loyalty_points || 0)}
-                          value={redeemPointsDraft || String(guestCrmData.loyalty_points || '')}
-                          onChange={(e) => setRedeemPointsDraft(e.target.value)}
-                          placeholder="Jml poin"
-                          className="w-24 px-2.5 py-1 text-xs font-semibold bg-white border border-emerald-300 rounded-lg focus:outline-hidden"
-                        />
-                        <button
-                          type="button"
-                          disabled={redeemingPoints}
-                          onClick={async () => {
-                            const targetReservationId = Number(detailData?.id || reservation?.id);
-                            const pts = Math.round(Number(redeemPointsDraft || guestCrmData.loyalty_points || 0));
-                            if (!targetReservationId || !primaryGuestId || !activePropId || pts <= 0) return;
-                            setRedeemingPoints(true);
-                            setRedeemFeedback(null);
-                            try {
-                              const res = await safeFetchJson<{ status?: string; data?: any; message?: string }>(
-                                '/api/guests/redeem-reservation-points',
-                                {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({
-                                    property_id: activePropId,
-                                    reservation_id: targetReservationId,
-                                    guest_id: primaryGuestId,
-                                    points_to_redeem: pts,
-                                  }),
-                                },
-                                'Gagal menukarkan poin loyalitas',
-                                authFetch
-                              );
-                              if (!res.ok) {
-                                setRedeemFeedback({
-                                  type: 'error',
-                                  text: res.errorMessage || 'Gagal menukarkan poin.',
-                                });
-                                return;
-                              }
-                              const cutIdr = Number(res.data?.data?.discount_amount_idr || 0);
-                              setRedeemFeedback({
-                                type: 'success',
-                                text: `Berhasil menukar ${pts} poin (-Rp ${cutIdr.toLocaleString('id-ID')}).`,
-                              });
-                              setRedeemPointsDraft('');
-                              setGuestCrmRetryCount((c) => c + 1);
-                              await loadFullReservation(targetReservationId);
-                              await loadFolio(targetReservationId);
-                              onRefresh();
-                            } finally {
-                              setRedeemingPoints(false);
-                            }
-                          }}
-                          className="flex-1 px-3 py-1 bg-[#1E392A] hover:bg-[#162a1f] text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50 cursor-pointer"
-                        >
-                          {redeemingPoints ? 'Memproses...' : 'Potong Tagihan'}
-                        </button>
-                      </div>
-                      {redeemFeedback && (
-                        <p
-                          className={`text-[11px] font-medium ${
-                            redeemFeedback.type === 'success' ? 'text-emerald-800' : 'text-rose-700'
-                          }`}
-                        >
-                          {redeemFeedback.text}
-                        </p>
-                      )}
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               ) : guestCrmStatus === 'empty' ? (
                 <p className="text-stone-400 italic">

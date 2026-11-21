@@ -253,6 +253,7 @@ export interface PropertyHousekeepingSettings {
   default_checkout_inspection_template_code?: string;
   default_final_inspection_template_code?: string;
   housekeeping_category_bulk_check_enabled?: boolean;
+  alarm_repeat_mode?: string;
   created_at: string;
   updated_at: string;
 }

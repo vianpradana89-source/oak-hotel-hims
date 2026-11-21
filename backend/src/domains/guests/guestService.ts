@@ -2130,24 +2130,32 @@ export async function redeemPointsForReservation(
       throw httpError(403, 'PROPERTY_MISMATCH', 'Reservasi bukan milik properti ini');
     }
 
-    const currentTotal = Math.max(0, Number(resv.total_price || 0));
-    const amountPaid = Math.max(0, Number(resv.amount_paid || 0));
-    const currentRemaining = Math.max(0, Number(resv.remaining_balance ?? (currentTotal - amountPaid)));
+    const preCalc = await recalculateReservationFinancials(client, reservationId, propertyId);
+    const currentTotal = Math.max(0, Number(preCalc.total_price ?? resv.total_price ?? 0));
+    const amountPaid = Math.max(0, Number(preCalc.amount_paid ?? resv.amount_paid ?? 0));
+    const currentRemaining = Math.max(0, Number(preCalc.remaining_balance ?? 0));
 
-    const rawDiscountIdr = Math.round(pointsToRedeem * Number(settings.point_value_idr || 350));
-    const maxCuttable = currentRemaining > 0 ? currentRemaining : currentTotal;
-    if (maxCuttable <= 0) {
-      throw httpError(400, 'NOTHING_TO_DISCOUNT', 'Tagihan reservasi sudah Rp 0.');
+    if (currentRemaining <= 0) {
+      throw httpError(
+        400,
+        'ALREADY_PAID',
+        'Tagihan reservasi sudah lunas (Sisa Tagihan Rp 0). Potongan poin hanya dapat digunakan jika masih ada sisa tagihan.'
+      );
     }
-    const effectiveDiscountIdr = Math.min(rawDiscountIdr, maxCuttable);
+
+    const pointValueIdr = Math.max(1, Number(settings.point_value_idr || 350));
+    const maxPointsForRemaining = Math.max(1, Math.ceil(currentRemaining / pointValueIdr));
+    const effectivePointsToRedeem = Math.min(pointsToRedeem, maxPointsForRemaining);
+    const rawDiscountIdr = Math.round(effectivePointsToRedeem * pointValueIdr);
+    const effectiveDiscountIdr = Math.min(rawDiscountIdr, currentRemaining);
     const newTotalPrice = Math.max(0, currentTotal - effectiveDiscountIdr);
-    const newRemainingBalance = Math.max(0, newTotalPrice - amountPaid);
+    const newRemainingBalance = Math.max(0, currentRemaining - effectiveDiscountIdr);
     const newPaymentStatus =
       newRemainingBalance <= 0 && (amountPaid > 0 || newTotalPrice === 0)
         ? 'PAID'
         : resv.payment_status;
 
-    const noteTag = `[Redeem ${pointsToRedeem} Poin = -Rp ${effectiveDiscountIdr.toLocaleString('id-ID')}]`;
+    const noteTag = `[Redeem ${effectivePointsToRedeem} Poin = -Rp ${effectiveDiscountIdr.toLocaleString('id-ID')}]`;
     const updatedSpecialRequests = resv.special_requests
       ? `${resv.special_requests} ${noteTag}`
       : noteTag;
@@ -2171,7 +2179,7 @@ export async function redeemPointsForReservation(
       [
         propertyId,
         guestId,
-        -Math.abs(pointsToRedeem),
+        -Math.abs(effectivePointsToRedeem),
         `Potong Tagihan Reservasi ${resv.bid || '#' + reservationId} (-Rp ${effectiveDiscountIdr.toLocaleString('id-ID')})`,
         resv.bid || `RESV-${reservationId}`,
         input.created_by || 'Front Office',
@@ -2181,7 +2189,7 @@ export async function redeemPointsForReservation(
     const ledgerRow = ledgerRes.rows[0];
 
     // Insert Folio Credit Entry so Rincian Folio Transaksi & calculateReservationFinancials reflect the point redemption
-    const folioDesc = `Potong Tagihan Poin Loyalitas (${pointsToRedeem} Poin)`;
+    const folioDesc = `Potong Tagihan Poin Loyalitas (${effectivePointsToRedeem} Poin)`;
     await client.query(
       `INSERT INTO folio_entries (
          reservation_id, property_id, entry_type, source_type, source_id,
@@ -2232,7 +2240,7 @@ export async function redeemPointsForReservation(
         action: 'REDEEM_FOR_RESERVATION',
         reservation_id: reservationId,
         bid: resv.bid,
-        points_redeemed: pointsToRedeem,
+        points_redeemed: effectivePointsToRedeem,
         discount_amount_idr: effectiveDiscountIdr,
         new_total_price: finalTotalPrice,
         new_remaining_balance: finalRemainingBalance,
@@ -2255,7 +2263,7 @@ export async function redeemPointsForReservation(
         created_by: ledgerRow.created_by,
         created_at: ledgerRow.created_at,
       },
-      redeemed_points: pointsToRedeem,
+      redeemed_points: effectivePointsToRedeem,
       discount_amount_idr: effectiveDiscountIdr,
       new_total_price: finalTotalPrice,
       new_remaining_balance: finalRemainingBalance,

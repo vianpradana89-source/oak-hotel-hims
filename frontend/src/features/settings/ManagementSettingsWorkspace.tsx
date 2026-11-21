@@ -14,6 +14,13 @@ import { PurchaseOperationalSettingsTab } from './PurchaseOperationalSettingsTab
 import type { PropertyHousekeepingSettings, ChecklistTemplate } from '../housekeeping/housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
 import { uploadPropertyLogo, deletePropertyLogo } from '../propertySettings/propertyBrandingApi';
+import {
+  MOBILE_ALARM_REPEAT_OPTIONS,
+  playUrgentHousekeepingAlarm,
+  stopUrgentHousekeepingAlarm,
+  setMobileAlarmRepeatMode,
+  type MobileAlarmRepeatMode,
+} from '../employee/mobileAlarmAndBadge';
 
 export type SettingsCategoryKey =
   | 'property'
@@ -880,8 +887,74 @@ export const ManagementSettingsWorkspace: React.FC<ManagementSettingsWorkspacePr
             <RolePermissionsTab propertyId={propertyId} />
           )}
 
+          {activeCategory === 'notifications' && (
+            <div className="bg-white rounded-2xl border border-neutral-200/90 overflow-hidden shadow-xs">
+              <div className="px-5 py-4 bg-neutral-50/80 border-b border-neutral-200/90 flex flex-wrap items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-bold text-neutral-900">
+                    🔔 Pengaturan Bunyi Alarm Periksa Kamar (HP Room Attendant)
+                  </h3>
+                  <p className="text-xs text-neutral-500">
+                    Mengatur berapa kali / berapa lama alarm notifikasi berbunyi di HP Room Attendant saat Front Office menekan tombol &ldquo;Periksa Kamar&rdquo;.
+                  </p>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      playUrgentHousekeepingAlarm(
+                        (hkSettings?.alarm_repeat_mode as MobileAlarmRepeatMode) || '3x'
+                      )
+                    }
+                    className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold cursor-pointer"
+                  >
+                    🔊 Tes Bunyi Alarm
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => stopUrgentHousekeepingAlarm()}
+                    className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 text-neutral-700 text-xs font-bold cursor-pointer"
+                  >
+                    🔇 Stop
+                  </button>
+                </div>
+              </div>
+              <div className="p-5">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  {MOBILE_ALARM_REPEAT_OPTIONS.map((opt) => {
+                    const currentMode = (hkSettings?.alarm_repeat_mode as MobileAlarmRepeatMode) || '3x';
+                    const active = currentMode === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={async () => {
+                          setMobileAlarmRepeatMode(opt.value);
+                          await handleSaveHkSettings({ alarm_repeat_mode: opt.value });
+                        }}
+                        className={`p-3.5 rounded-xl border text-left transition flex flex-col justify-between gap-2 cursor-pointer ${
+                          active
+                            ? 'bg-emerald-50 border-[#1b4332] ring-1 ring-[#1b4332] text-[#1b4332]'
+                            : 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div>
+                          <div className="text-xs font-bold">{opt.label}</div>
+                          <div className="text-[11px] text-neutral-500 mt-0.5">{opt.desc}</div>
+                        </div>
+                        <div className="text-[11px] font-extrabold text-right">
+                          {active ? '✓ Aktif' : 'Pilih'}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Other Categories: Roadmap / Configured Placeholders */}
-          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'pos', 'users_permissions'].includes(activeCategory) && (
+          {!['housekeeping', 'features', 'branding', 'property', 'hr', 'front_office', 'transactions', 'pos', 'users_permissions', 'notifications'].includes(activeCategory) && (
             <div className="bg-white rounded-2xl border border-neutral-200/90 p-8 text-center space-y-3 shadow-xs">
               <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center mx-auto">
                 <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">

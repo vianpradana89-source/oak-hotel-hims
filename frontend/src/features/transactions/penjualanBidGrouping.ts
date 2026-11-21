@@ -308,13 +308,15 @@ export function worstVerificationStatus(
 }
 
 function buildChild(reservationId: number | null, members: TransactionRecord[]): PenjualanBidChild {
-  const primary = members[0];
-  const gross = members.reduce((sum, tx) => sum + roundIdr(tx.amount), 0);
-  const discount = members.reduce((sum, tx) => sum + roundIdr(tx.discount_amount), 0);
+  const activeMembers = members.filter((tx) => operationalSheetOf(tx) !== 'BATAL');
+  const finMembers = activeMembers.length > 0 ? activeMembers : members;
+  const primary = activeMembers[0] || members[0];
+  const gross = finMembers.reduce((sum, tx) => sum + Math.abs(roundIdr(tx.amount)), 0);
+  const discount = finMembers.reduce((sum, tx) => sum + Math.abs(roundIdr(tx.discount_amount)), 0);
   const net = members.reduce((sum, tx) => sum + saleNet(tx), 0);
   const paid = reservationPaid(primary);
   const remaining = reservationRemaining(primary, net, paid);
-  const canonicalSheet = operationalSheetOf(primary);
+  const canonicalSheet = deriveGroupOperationalSheet(members.map((tx) => operationalSheetOf(tx)));
   // DEFECT 2 FIX: use worst verification status across ALL members, not just primary
   const aggregatedVerification = worstVerificationStatus(members.map((tx) => tx.verification_status));
   // BUG 1 FIX: overlay must read aggregatedVerification, not primary.verification_status
@@ -408,9 +410,13 @@ function buildGroup(
     ...children.map((child) => child.operational_sheet),
     ...unattachedMembers.map((tx) => operationalSheetOf(tx)),
   ];
-  const statusSheets = lifetimeSheets.length > 0
-    ? lifetimeSheets
-    : (periodSheets.length > 0 ? periodSheets : members.map((tx) => operationalSheetOf(tx)));
+  const periodIsFullyBatal =
+    periodSheets.length > 0 && periodSheets.every((sheet) => sheet === 'BATAL');
+  const statusSheets: OperationalSheet[] = periodIsFullyBatal
+    ? ['BATAL']
+    : (lifetimeSheets.length > 0
+        ? lifetimeSheets
+        : (periodSheets.length > 0 ? periodSheets : members.map((tx) => operationalSheetOf(tx))));
 
   // UI-1: Apply audit overlay to parent BID.
   // Must re-evaluate after lifetimeSheets to prevent them from masking REJECTED overlay.
@@ -429,10 +435,15 @@ function buildGroup(
     parentCanonicalSheet
   );
 
+  const groupPrimary =
+    members.find(
+      (tx) => String(tx.transaction_status || '').toUpperCase() === 'POSTED' && operationalSheetOf(tx) !== 'BATAL'
+    ) || members[0];
+
   return {
     bid,
     booking_id: bookingId,
-    guest_name: String(members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
+    guest_name: String(groupPrimary.party_name || groupPrimary.guest_name_snapshot || members[0].party_name || members[0].guest_name_snapshot || '').trim() || '-',
     room_count: children.length,
     stay_type_label: stayTypeLabel(children.map((child) => child.stay_type)),
     totals_scope: 'PERIOD_ACTIVITY',
@@ -448,7 +459,7 @@ function buildGroup(
       canonical_operational_sheet: parentCanonicalSheet,
       audit_verification_status: parentVerification,
       children,
-      primary: members[0],
+      primary: groupPrimary,
       members
     };
 }

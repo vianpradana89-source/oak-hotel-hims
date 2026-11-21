@@ -9,9 +9,7 @@ import {
   requestMobileNotificationPermission,
   playUrgentHousekeepingAlarm,
   stopUrgentHousekeepingAlarm,
-  getMobileAlarmRepeatMode,
   setMobileAlarmRepeatMode,
-  MOBILE_ALARM_REPEAT_OPTIONS,
   type MobileAlarmRepeatMode,
 } from './mobileAlarmAndBadge';
 import type { EmployeeAttendanceStatus } from './attendanceTypes';
@@ -171,12 +169,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
 
   // Live WIB Clock
   const [currentTimeWib, setCurrentTimeWib] = useState<string>('');
-  const [alarmRepeatMode, setAlarmRepeatMode] = useState<MobileAlarmRepeatMode>(() => getMobileAlarmRepeatMode());
-
-  const handleChangeAlarmRepeatMode = (mode: MobileAlarmRepeatMode) => {
-    setAlarmRepeatMode(mode);
-    setMobileAlarmRepeatMode(mode);
-  };
 
   // Clock Out Modal State
   const [showClockOutModal, setShowClockOutModal] = useState(false);
@@ -333,12 +325,24 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
   // Fetch task statistics & trigger alarm/badge for urgent FO requests
   const fetchTaskStats = async () => {
     try {
-      const [activeRes, histRes] = await Promise.all([
+      const [activeRes, histRes, hkSettingsRes] = await Promise.all([
         authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=active`),
-        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`)
+        authenticatedFetch(`/api/housekeeping/tasks?property_id=${propertyId}&scope=history`),
+        authenticatedFetch(`/api/housekeeping/settings?property_id=${propertyId}`).catch(() => null),
       ]);
       const activeData = await activeRes.json();
       const histData = await histRes.json();
+      if (hkSettingsRes && hkSettingsRes.ok) {
+        try {
+          const hkSettingsJson = await hkSettingsRes.json();
+          const propAlarmMode = hkSettingsJson?.data?.alarm_repeat_mode as MobileAlarmRepeatMode | undefined;
+          if (propAlarmMode) {
+            setMobileAlarmRepeatMode(propAlarmMode);
+          }
+        } catch {
+          // ignore
+        }
+      }
 
       const activeTasks = activeRes.ok && activeData.status === 'OK' ? (activeData.data || []) : [];
       const historyTasks = histRes.ok && histData.status === 'OK' ? (histData.data || []) : [];
@@ -873,64 +877,10 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
         )}
 
         {activeTab === 'NOTIF' && (
-          <div className="space-y-3.5 pb-20">
-            <div className="bg-white border border-neutral-200/90 rounded-2xl p-3.5 shadow-xs space-y-2.5">
-              <div className="flex items-center justify-between gap-2">
-                <div>
-                  <h4 className="text-xs font-bold text-neutral-900">Pengaturan Bunyi Alarm Periksa Kamar</h4>
-                  <p className="text-[11px] text-neutral-500">
-                    Atur berapa kali / lama alarm berbunyi saat FO klik &ldquo;Periksa Kamar&rdquo;
-                  </p>
-                </div>
-                <div className="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => playUrgentHousekeepingAlarm(alarmRepeatMode)}
-                    className="px-2.5 py-1 rounded-lg bg-[#1b4332] hover:bg-[#143225] text-white text-[10px] font-bold cursor-pointer"
-                  >
-                    🔊 Tes
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => stopUrgentHousekeepingAlarm()}
-                    className="px-2 py-1 rounded-lg bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 text-neutral-700 text-[10px] font-bold cursor-pointer"
-                  >
-                    🔇 Stop
-                  </button>
-                </div>
-              </div>
-              <div className="grid grid-cols-1 gap-1.5">
-                {MOBILE_ALARM_REPEAT_OPTIONS.map((opt) => {
-                  const active = alarmRepeatMode === opt.value;
-                  return (
-                    <button
-                      key={opt.value}
-                      type="button"
-                      onClick={() => handleChangeAlarmRepeatMode(opt.value)}
-                      className={`w-full px-3 py-2 rounded-xl border text-left transition flex items-center justify-between cursor-pointer ${
-                        active
-                          ? 'bg-emerald-50 border-[#1b4332] text-[#1b4332] font-bold'
-                          : 'bg-neutral-50 border-neutral-200 text-neutral-700 hover:bg-neutral-100'
-                      }`}
-                    >
-                      <div>
-                        <div className="text-xs font-bold">{opt.label}</div>
-                        <div className="text-[10px] text-neutral-500">{opt.desc}</div>
-                      </div>
-                      <span className="text-xs font-extrabold">
-                        {active ? '✓ Aktif' : 'Pilih'}
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-
-            <EmployeeNotificationCenter
-              propertyId={propertyId}
-              employeeName={employeeIdentity.employeeName}
-            />
-          </div>
+          <EmployeeNotificationCenter
+            propertyId={propertyId}
+            employeeName={employeeIdentity.employeeName}
+          />
         )}
 
         {activeTab === 'PROFILE' && (
@@ -971,59 +921,6 @@ export const EmployeeMobileWorkspace: React.FC<EmployeeMobileWorkspaceProps> = (
               </div>
 
               {renderSelfSchedulePanel()}
-
-              {/* Pengaturan Bunyi Alarm Periksa Kamar */}
-              <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 text-left space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <div>
-                    <h4 className="text-xs font-bold text-neutral-900">🔔 Pengaturan Bunyi Alarm Periksa Kamar</h4>
-                    <p className="text-[10px] text-neutral-500">
-                      Berapa kali / lama bunyi notifikasi saat FO klik &ldquo;Periksa Kamar&rdquo;
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => playUrgentHousekeepingAlarm(alarmRepeatMode)}
-                      className="px-2 py-1 rounded-lg bg-[#1b4332] hover:bg-[#143225] text-white text-[10px] font-bold cursor-pointer"
-                    >
-                      🔊 Tes
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => stopUrgentHousekeepingAlarm()}
-                      className="px-2 py-1 rounded-lg bg-white hover:bg-neutral-100 border border-neutral-300 text-neutral-700 text-[10px] font-bold cursor-pointer"
-                    >
-                      🔇 Stop
-                    </button>
-                  </div>
-                </div>
-                <div className="grid grid-cols-1 gap-1.5">
-                  {MOBILE_ALARM_REPEAT_OPTIONS.map((opt) => {
-                    const active = alarmRepeatMode === opt.value;
-                    return (
-                      <button
-                        key={opt.value}
-                        type="button"
-                        onClick={() => handleChangeAlarmRepeatMode(opt.value)}
-                        className={`w-full px-3 py-2 rounded-xl border text-left transition flex items-center justify-between cursor-pointer ${
-                          active
-                            ? 'bg-emerald-50 border-[#1b4332] text-[#1b4332] font-bold'
-                            : 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-100'
-                        }`}
-                      >
-                        <div>
-                          <div className="text-xs font-bold">{opt.label}</div>
-                          <div className="text-[10px] text-neutral-500">{opt.desc}</div>
-                        </div>
-                        <span className="text-xs font-extrabold">
-                          {active ? '✓ Aktif' : 'Pilih'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
 
               {clockOutAvailable && (
                 <button

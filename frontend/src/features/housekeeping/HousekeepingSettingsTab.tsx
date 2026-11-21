@@ -8,6 +8,13 @@ import type {
   FindingSeverity
 } from './housekeepingTypes';
 import { authenticatedFetch } from '../../lib/authenticatedFetch';
+import {
+  MOBILE_ALARM_REPEAT_OPTIONS,
+  playUrgentHousekeepingAlarm,
+  stopUrgentHousekeepingAlarm,
+  setMobileAlarmRepeatMode,
+  type MobileAlarmRepeatMode,
+} from '../employee/mobileAlarmAndBadge';
 
 interface HousekeepingSettingsTabProps {
   propertyId: number;
@@ -56,6 +63,9 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
   );
   const [finalInspectionTemplateCode, setFinalInspectionTemplateCode] = useState<string>(
     settings?.default_final_inspection_template_code || 'FINAL_INSPECTION'
+  );
+  const [alarmRepeatMode, setAlarmRepeatMode] = useState<MobileAlarmRepeatMode>(
+    (settings?.alarm_repeat_mode as MobileAlarmRepeatMode) || '3x'
   );
 
   const [localFlags, setLocalFlags] = useState<Record<string, boolean>>(featureFlags);
@@ -188,6 +198,10 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
       setFinalInspectionTemplateCode(
         settings.default_final_inspection_template_code || 'FINAL_INSPECTION'
       );
+      if (settings.alarm_repeat_mode) {
+        setAlarmRepeatMode(settings.alarm_repeat_mode as MobileAlarmRepeatMode);
+        setMobileAlarmRepeatMode(settings.alarm_repeat_mode as MobileAlarmRepeatMode);
+      }
     }
   }, [settings]);
 
@@ -275,8 +289,10 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
         default_room_cleaning_template_code: cleaningTemplateCode,
         default_checkout_template_code: checkoutTemplateCode,
         default_checkout_inspection_template_code: checkoutTemplateCode,
-        default_final_inspection_template_code: finalInspectionTemplateCode
+        default_final_inspection_template_code: finalInspectionTemplateCode,
+        alarm_repeat_mode: alarmRepeatMode
       });
+      setMobileAlarmRepeatMode(alarmRepeatMode);
       setFeedbackMsg({ type: 'success', text: 'Pengaturan kebijakan housekeeping berhasil disimpan.' });
     } catch (err: any) {
       setFeedbackMsg({ type: 'error', text: err.message || 'Gagal menyimpan pengaturan housekeeping.' });
@@ -1160,6 +1176,85 @@ export const HousekeepingSettingsTab: React.FC<HousekeepingSettingsTabProps> = (
                       <option key={tpl.id} value={tpl.code}>{tpl.name} ({tpl.code})</option>
                     ))}
                   </select>
+                </div>
+              </div>
+
+              {/* Pengaturan Bunyi Alarm Periksa Kamar (HP Room Attendant) */}
+              <div className="pt-4 border-t border-neutral-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h4 className="text-xs font-bold text-neutral-900">
+                      🔔 Pengaturan Durasi / Jumlah Bunyi Alarm Periksa Kamar (HP Room Attendant)
+                    </h4>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      Mengatur berapa kali / berapa lama alarm notifikasi berbunyi di HP Room Attendant (Employee Mobile) saat Front Office menekan tombol &ldquo;Periksa Kamar&rdquo;.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => playUrgentHousekeepingAlarm(alarmRepeatMode)}
+                      className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-900 text-xs font-bold cursor-pointer"
+                    >
+                      🔊 Tes Bunyi Alarm
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => stopUrgentHousekeepingAlarm()}
+                      className="px-3 py-1.5 rounded-xl bg-neutral-100 hover:bg-neutral-200 border border-neutral-300 text-neutral-700 text-xs font-bold cursor-pointer"
+                    >
+                      🔇 Stop
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-2.5">
+                  {MOBILE_ALARM_REPEAT_OPTIONS.map((opt) => {
+                    const active = alarmRepeatMode === opt.value;
+                    return (
+                      <button
+                        key={opt.value}
+                        type="button"
+                        onClick={async () => {
+                          setAlarmRepeatMode(opt.value);
+                          setMobileAlarmRepeatMode(opt.value);
+                          try {
+                            await onSaveSettings({
+                              require_final_inspection: requireFinalInspection,
+                              require_checkout_room_check: requireCheckoutRoomCheck,
+                              allow_calendar_room_status_override: allowCalendarOverride,
+                              housekeeping_category_bulk_check_enabled: categoryBulkCheckEnabled,
+                              default_cleaning_template_code: cleaningTemplateCode,
+                              default_room_cleaning_template_code: cleaningTemplateCode,
+                              default_checkout_template_code: checkoutTemplateCode,
+                              default_checkout_inspection_template_code: checkoutTemplateCode,
+                              default_final_inspection_template_code: finalInspectionTemplateCode,
+                              alarm_repeat_mode: opt.value,
+                            });
+                            setFeedbackMsg({
+                              type: 'success',
+                              text: `Durasi alarm HP Room Attendant berhasil diatur ke: ${opt.label}`,
+                            });
+                          } catch {
+                            // saved on next Simpan Kebijakan click if immediate save fails
+                          }
+                        }}
+                        className={`p-3 rounded-xl border text-left transition flex flex-col justify-between gap-1.5 cursor-pointer ${
+                          active
+                            ? 'bg-emerald-50 border-[#1b4332] ring-1 ring-[#1b4332] text-[#1b4332]'
+                            : 'bg-white border-neutral-200 text-neutral-700 hover:bg-neutral-50'
+                        }`}
+                      >
+                        <div>
+                          <div className="text-xs font-bold">{opt.label}</div>
+                          <div className="text-[11px] text-neutral-500 mt-0.5">{opt.desc}</div>
+                        </div>
+                        <div className="text-[11px] font-extrabold text-right">
+                          {active ? '✓ Aktif' : 'Pilih'}
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </div>

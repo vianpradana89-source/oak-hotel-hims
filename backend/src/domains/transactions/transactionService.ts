@@ -4297,6 +4297,86 @@ export async function voidTransaction(
       [options.reason.trim(), tx.id]
     );
 
+    // If voiding a booking-grouped room SALE transaction, also void any remaining POSTED SALE members
+    // of that same booking_id so the entire BID group moves cleanly to Sheet BATAL.
+    if (
+      String(tx.transaction_type || '').toUpperCase() === 'SALE' &&
+      tx.booking_id &&
+      !['POS_ORDER', 'POS'].includes(String(tx.source_type || '').toUpperCase())
+    ) {
+      const siblingSalesRes = await client.query(
+        `SELECT * FROM transactions
+         WHERE property_id = $1
+           AND booking_id = $2
+           AND id <> $3
+           AND transaction_type = 'SALE'
+           AND deleted_at IS NULL
+           AND COALESCE(transaction_status, 'POSTED') NOT IN ('VOIDED', 'REVERSED', 'CANCELLED')
+         FOR UPDATE`,
+        [propertyId, tx.booking_id, tx.id]
+      );
+      for (const sib of siblingSalesRes.rows) {
+        const sibTxNo = await generateTransactionNumber(client, propertyId, txDate);
+        await client.query(
+          `INSERT INTO transactions (
+            property_id, transaction_no, transaction_date, transaction_time,
+            transaction_type, source_type, source_id, source_reference,
+            category_code, category_name, department_code, description,
+            amount, discount_amount, service_amount, tax_amount, net_amount,
+            payment_status, payment_method, transaction_status,
+            guest_id, guest_name_snapshot, room_number_snapshot,
+            reservation_id, booking_id, reversal_of_transaction_id,
+            notes, metadata, created_by
+          ) VALUES (
+            $1, $2, $3, CURRENT_TIMESTAMP,
+            $4, $5, $6, $7,
+            $8, $9, $10, $11,
+            $12, 0, $13, $14, $15,
+            $16, $17, 'REVERSED',
+            $18, $19, $20,
+            $21, $22, $23,
+            $24, $25, $26
+          )`,
+          [
+            propertyId,
+            sibTxNo,
+            txDate,
+            sib.transaction_type,
+            sib.source_type,
+            sib.source_id ? `REV-${sib.source_id}` : null,
+            sib.source_reference,
+            sib.category_code,
+            sib.category_name,
+            sib.department_code,
+            `Pembatalan: ${sib.description}`,
+            -Math.abs(Number(sib.amount || 0)),
+            -Math.abs(Number(sib.service_amount || 0)),
+            -Math.abs(Number(sib.tax_amount || 0)),
+            -Math.abs(Number(sib.net_amount || 0)),
+            sib.payment_status,
+            sib.payment_method,
+            sib.guest_id,
+            sib.guest_name_snapshot,
+            sib.room_number_snapshot,
+            sib.reservation_id,
+            sib.booking_id,
+            sib.id,
+            options.reason.trim(),
+            JSON.stringify({ voided_transaction_no: sib.transaction_no, void_reason: options.reason.trim() }),
+            options.actorName || options.actorUserId || 'Staff'
+          ]
+        );
+        await client.query(
+          `UPDATE transactions SET
+             transaction_status = 'VOIDED',
+             notes = COALESCE(notes || ' | ', '') || 'Dibatalkan: ' || $1,
+             updated_at = CURRENT_TIMESTAMP
+           WHERE id = $2`,
+          [options.reason.trim(), sib.id]
+        );
+      }
+    }
+
     if (tx.source_type === 'POS_ORDER' || tx.source_type === 'POS') {
       const posOrderId = Number(tx.source_id);
       if (Number.isInteger(posOrderId) && posOrderId > 0) {
@@ -4452,6 +4532,115 @@ function buildHapusConditionsAndValues(
 }
 
 
+const _healedPartialVoidProps = new Set<number>();
+
+async function healPartiallyVoidedBookingsFromAudit(pool: Pool, propertyId: number): Promise<void> {
+  if (_healedPartialVoidProps.has(propertyId)) return;
+  _healedPartialVoidProps.add(propertyId);
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      // Find any booking_id where a non-POS SALE transaction was manually voided via voidTransaction (recorded in audit_logs)
+      // while other SALE transactions of the same booking_id remained POSTED.
+      const stuckRes = await client.query(
+        `SELECT s.*
+         FROM transactions s
+         WHERE s.property_id = $1
+           AND s.booking_id IS NOT NULL
+           AND s.transaction_type = 'SALE'
+           AND s.deleted_at IS NULL
+           AND COALESCE(s.transaction_status, 'POSTED') NOT IN ('VOIDED', 'REVERSED', 'CANCELLED')
+           AND EXISTS (
+             SELECT 1
+             FROM transactions v
+             JOIN audit_logs al
+               ON al.property_id = v.property_id
+              AND al.module = 'TRANSACTIONS'
+              AND al.action = 'TRANSACTION_VOIDED'
+              AND al.record_id = v.id::text
+             WHERE v.property_id = s.property_id
+               AND v.booking_id = s.booking_id
+               AND v.transaction_type = 'SALE'
+               AND COALESCE(v.source_type, '') NOT IN ('POS_ORDER', 'POS')
+               AND v.transaction_status = 'VOIDED'
+           )
+         FOR UPDATE`,
+        [propertyId]
+      );
+      if ((stuckRes.rowCount ?? 0) > 0) {
+        const txDate = getHotelDateToday();
+        for (const sib of stuckRes.rows) {
+          const sibTxNo = await generateTransactionNumber(client, propertyId, txDate);
+          await client.query(
+            `INSERT INTO transactions (
+              property_id, transaction_no, transaction_date, transaction_time,
+              transaction_type, source_type, source_id, source_reference,
+              category_code, category_name, department_code, description,
+              amount, discount_amount, service_amount, tax_amount, net_amount,
+              payment_status, payment_method, transaction_status,
+              guest_id, guest_name_snapshot, room_number_snapshot,
+              reservation_id, booking_id, reversal_of_transaction_id,
+              notes, metadata, created_by
+            ) VALUES (
+              $1, $2, $3, CURRENT_TIMESTAMP,
+              $4, $5, $6, $7,
+              $8, $9, $10, $11,
+              $12, 0, $13, $14, $15,
+              $16, $17, 'REVERSED',
+              $18, $19, $20,
+              $21, $22, $23,
+              $24, $25, 'System'
+            )`,
+            [
+              propertyId,
+              sibTxNo,
+              txDate,
+              sib.transaction_type,
+              sib.source_type,
+              sib.source_id ? `REV-${sib.source_id}` : null,
+              sib.source_reference,
+              sib.category_code,
+              sib.category_name,
+              sib.department_code,
+              `Pembatalan: ${sib.description}`,
+              -Math.abs(Number(sib.amount || 0)),
+              -Math.abs(Number(sib.service_amount || 0)),
+              -Math.abs(Number(sib.tax_amount || 0)),
+              -Math.abs(Number(sib.net_amount || 0)),
+              sib.payment_status,
+              sib.payment_method,
+              sib.guest_id,
+              sib.guest_name_snapshot,
+              sib.room_number_snapshot,
+              sib.reservation_id,
+              sib.booking_id,
+              sib.id,
+              'Sinkronisasi pembatalan grup transaksi booking',
+              JSON.stringify({ voided_transaction_no: sib.transaction_no, void_reason: 'Sinkronisasi pembatalan grup transaksi booking' }),
+            ]
+          );
+          await client.query(
+            `UPDATE transactions SET
+               transaction_status = 'VOIDED',
+               notes = COALESCE(notes || ' | ', '') || 'Dibatalkan: Sinkronisasi pembatalan grup booking',
+               updated_at = CURRENT_TIMESTAMP
+             WHERE id = $1`,
+            [sib.id]
+          );
+        }
+      }
+      await client.query('COMMIT');
+    } catch {
+      await client.query('ROLLBACK').catch(() => {});
+    } finally {
+      client.release();
+    }
+  } catch {
+    // non-fatal
+  }
+}
+
 /**
  * Queries transactions with dynamic payment settlement derivation from payment_transactions.
  */
@@ -4460,11 +4649,13 @@ export async function getTransactions(
   params: TransactionFilterParams
 ): Promise<TransactionQueryResult> {
   const propertyId = Number(params.property_id);
-  if (!Number.isInteger(propertyId) || propertyId <= 0) {
+  if (!Number.isInteger(propertyId) || !propertyId || propertyId <= 0) {
     const err: any = new Error('property_id is required');
     err.statusCode = 400;
     throw err;
   }
+
+  await healPartiallyVoidedBookingsFromAudit(pool, propertyId);
 
   const baseConditions: string[] = ['t.property_id = $1'];
   const baseValues: any[] = [propertyId];
