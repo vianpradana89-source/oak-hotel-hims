@@ -1073,9 +1073,8 @@ export default function ProductMasterPage({ propertyId, items: initialItems, onR
     setErrorMsg(null);
     setSuccessMsg(null);
     setLoading(true);
-    void loadProducts('active', propertyId);
     void loadStockLocationsAndCandidates(propertyId);
-  }, [propertyId]); // sengaja hanya propertyId; loadProducts di deps karena useMemo
+  }, [propertyId]); // loadProducts dipanggil satu kali oleh useEffect([statusFilter, propertyId]) di bawah
 
   // Fokus otomatis ke input Nama Produk saat modal tambah dibuka.
   useEffect(() => {

@@ -601,9 +601,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   };
 
   const [hardDeletingId, setHardDeletingId] = useState<string | number | null>(null);
+  const [isBulkHardDeleting, setIsBulkHardDeleting] = useState(false);
 
   const handleHardDeleteTransaction = async (tx: TransactionRecord, customLabel?: string) => {
-    if (hardDeletingId !== null) return;
+    if (hardDeletingId !== null || isBulkHardDeleting) return;
     const displayLabel = customLabel || tx.booking_bid || tx.transaction_no || `#${tx.id}`;
     const confirmed = window.confirm(
       `Hapus permanen transaksi ${displayLabel}?\n\nTransaksi akan dihapus total (hard delete) termasuk dari Laporan, serta stok dan poin loyalitas yang terkait akan dikembalikan.`
@@ -623,6 +624,63 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       window.alert(err?.message || 'Gagal menghapus transaksi secara permanen');
     } finally {
       setHardDeletingId(null);
+    }
+  };
+
+  const handleBulkClearBatalSheet = async () => {
+    if (isBulkHardDeleting || hardDeletingId !== null || operationalStatus !== 'BATAL') return;
+
+    // Collect unique primary transaction IDs (deduplicated per booking_id or standalone tx.id)
+    const targetTxIds: Array<string | number> = [];
+    const seenBookingIds = new Set<number>();
+    const seenTxIds = new Set<string>();
+
+    const sourceList: TransactionRecord[] =
+      activeTab === 'SALE'
+        ? penjualanItems.map((it) => (it.kind === 'standalone' ? it.tx : it.group.primary))
+        : workspaceRows;
+
+    for (const tx of sourceList) {
+      const bId = Number(tx.booking_id || 0);
+      if (bId > 0) {
+        if (seenBookingIds.has(bId)) continue;
+        seenBookingIds.add(bId);
+      }
+      const txKey = String(tx.id);
+      if (seenTxIds.has(txKey)) continue;
+      seenTxIds.add(txKey);
+      targetTxIds.push(tx.id);
+    }
+
+    if (targetTxIds.length === 0) return;
+
+    const confirmed = window.confirm(
+      `Kosongkan seluruh Sheet Batal yang tampil saat ini (${targetTxIds.length} transaksi/booking)?\n\nSeluruh transaksi batal ini akan dihapus permanen (hard delete) dari database & laporan, serta stok/poin yang belum kembali akan dipulihkan.`
+    );
+    if (!confirmed) return;
+
+    setIsBulkHardDeleting(true);
+    let failedCount = 0;
+    try {
+      for (const txId of targetTxIds) {
+        try {
+          await hardDeleteTransactionApi(txId, {
+            property_id: propertyId,
+            actor_name: currentStaffName || 'Staff',
+            actor_user_id: currentUserId || null,
+          });
+        } catch (err) {
+          console.error(`Bulk hard delete failed for tx ${txId}:`, err);
+          failedCount += 1;
+        }
+      }
+      await loadTransactions();
+      void loadDailyCards();
+      if (failedCount > 0) {
+        window.alert(`Selesai dengan ${failedCount} transaksi gagal dihapus. Silakan muat ulang atau cek kembali.`);
+      }
+    } finally {
+      setIsBulkHardDeleting(false);
     }
   };
 
@@ -2841,6 +2899,21 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                 </button>
               ))}
             </div>
+
+            {operationalStatus === 'BATAL' && displayedTableStats.rowCount > 0 && (
+              <button
+                type="button"
+                disabled={isBulkHardDeleting || hardDeletingId !== null}
+                onClick={() => void handleBulkClearBatalSheet()}
+                title="Hapus permanen (hard delete) seluruh transaksi pada Sheet Batal yang tampil saat ini"
+                className="px-3 py-2 text-xs font-bold rounded-xl border border-red-200 bg-red-50 text-red-700 hover:bg-red-100 transition-colors cursor-pointer flex items-center gap-1.5 whitespace-nowrap shrink-0 disabled:opacity-50"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                </svg>
+                <span>{isBulkHardDeleting ? 'Menghapus...' : `Kosongkan Sheet Batal (${displayedTableStats.rowCount})`}</span>
+              </button>
+            )}
 
             {/* Toggle Advanced Filters */}
             <button

@@ -955,13 +955,27 @@ export async function getHousekeepingDailyOperations(
     }
   }
 
-  // 3. Query housekeeping tasks for property (active, non-archived, legacy-isolated)
+  // 3. Query housekeeping tasks for property (active, non-archived, legacy-isolated, plus latest completed per room)
   const tasksRes = await client.query(
     `SELECT t.*
      FROM housekeeping_tasks t
      WHERE t.property_id = $1
        AND COALESCE(t.is_archived, FALSE) = FALSE
        AND (t.room_id IS NOT NULL OR (t.task_category <> 'ROOM_OPERATIONS' AND t.task_type NOT IN ('ROOM_CLEANING', 'TURN_DOWN', 'DEEP_CLEAN', 'MAKEUP', 'STAYOVER_CLEANING', 'VIP_ROOM_PREPARATION', 'FINAL_INSPECTION', 'CHECKOUT_ROOM_CHECK')))
+       AND (
+         t.status NOT IN ('DONE', 'VERIFIED', 'CANCELLED')
+         OR ((t.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date = $2::date
+         OR (t.completed_at IS NOT NULL AND ((t.completed_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date = $2::date)
+         OR t.id IN (
+           SELECT DISTINCT ON (room_id) id
+           FROM housekeeping_tasks
+           WHERE property_id = $1
+             AND COALESCE(is_archived, FALSE) = FALSE
+             AND room_id IS NOT NULL
+             AND status IN ('DONE', 'VERIFIED')
+           ORDER BY room_id, id DESC
+         )
+       )
      ORDER BY
        CASE
          WHEN t.task_type = 'CHECKOUT_ROOM_CHECK' AND t.status IN ('ASSIGNED', 'ACKNOWLEDGED', 'IN_PROGRESS') THEN 1
@@ -973,7 +987,7 @@ export async function getHousekeepingDailyOperations(
        END,
        t.due_at ASC NULLS LAST,
        t.created_at ASC`,
-    [propertyId]
+    [propertyId, dateStr]
   );
 
   const taskIds = tasksRes.rows.map((t: any) => t.id);
@@ -981,7 +995,6 @@ export async function getHousekeepingDailyOperations(
   let checklistItemsMap = new Map<number, TaskChecklistItem[]>();
 
   if (taskIds.length > 0) {
-    await syncActiveTasksWithChecklistTemplates(client, propertyId);
     const itemsRes = await client.query(
       `SELECT * FROM housekeeping_task_checklist_items WHERE task_id = ANY($1::int[]) ORDER BY sort_order ASC, id ASC`,
       [taskIds]

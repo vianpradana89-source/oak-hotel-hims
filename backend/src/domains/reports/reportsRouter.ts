@@ -560,8 +560,19 @@ export function createReportsRouter(pool: Pool): Router {
         )
       `;
 
-      // 1. Per-Room Occupancy & Revenue Ranking in [startDate, endDate] inclusive
-      const roomsRankingRes = await pool.query(
+      // 1–6c. Run all independent operational report queries in parallel
+      const [
+        roomsRankingRes,
+        compStaysRes,
+        posItemsRes,
+        purchaseLinesRes,
+        dailyOccupancyRes,
+        roomSalesRes,
+        cancelledBookingsRes,
+        pricingSettingsRes
+      ] = await Promise.all([
+        // 1. Per-Room Occupancy & Revenue Ranking in [startDate, endDate] inclusive
+        pool.query(
         `
         WITH active_rooms AS (
           SELECT
@@ -639,10 +650,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY room_revenue DESC, booking_count DESC, ar.room_number ASC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 2. Complimentary Reservations & Stays Summary in [startDate, endDate]
-      const compStaysRes = await pool.query(
+      pool.query(
         `
         SELECT
           r.id AS reservation_id,
@@ -693,10 +704,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY r.check_in DESC, r.id DESC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 3. Sales Item Breakdown (POS Order Items + Standalone POS/Product Transactions + HPP)
-      const posItemsRes = await pool.query(
+      pool.query(
         `
         SELECT * FROM (
           SELECT
@@ -927,10 +938,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY tx_date DESC, order_id DESC, order_item_id ASC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 4. Purchase Line Items for Pembelian Report (Transactions PURCHASE + POS Purchase Orders)
-      const purchaseLinesRes = await pool.query(
+      pool.query(
         `
         SELECT * FROM (
           SELECT
@@ -1011,10 +1022,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY transaction_date DESC, transaction_id DESC, sort_order ASC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 5. Daily Occupancy Bar Series
-      const dailyOccupancyRes = await pool.query(
+      pool.query(
         `
         WITH dates AS (
           SELECT d::date AS hotel_date
@@ -1070,10 +1081,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY dt.hotel_date ASC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 6. Enriched Room Sales (Opsi 1: Daily / Period-Prorated Room Revenue + Room Rate per Night)
-      const roomSalesRes = await pool.query(
+      pool.query(
         `
         WITH raw_room_sales AS (
           SELECT
@@ -1353,10 +1364,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY check_in DESC, reservation_id DESC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 6b. Cancelled Bookings / Reservations in [startDate, endDate]
-      const cancelledBookingsRes = await pool.query(
+      pool.query(
         `
         SELECT
           r.id AS reservation_id,
@@ -1390,10 +1401,10 @@ export function createReportsRouter(pool: Pool): Router {
         ORDER BY COALESCE(r.cancelled_at, r.check_in) DESC, r.id DESC
         `,
         [propertyId, startDate, endDate]
-      );
+      ),
 
       // 6c. Property Pricing Settings (for PPN / Tax calculation)
-      const pricingSettingsRes = await pool.query(
+      pool.query(
         `
         SELECT
           COALESCE(tax_percent, 10)::numeric(5,2) AS tax_percent,
@@ -1405,7 +1416,8 @@ export function createReportsRouter(pool: Pool): Router {
         LIMIT 1
         `,
         [propertyId]
-      );
+      )
+      ]);
       const pricingSettings = pricingSettingsRes.rows[0] || {
         tax_percent: 10,
         service_charge_percent: 0,
@@ -1458,67 +1470,296 @@ export function createReportsRouter(pool: Pool): Router {
         (s: number, r: any) => s + (Number(r.discount_amount) || 0),
         0
       );
-      const bookingGlobalDiscRes = await pool.query(
-        `
-        SELECT
-          COALESCE(SUM(b.global_discount_amount), 0)::numeric(14,2) AS global_disc_total,
-          COUNT(*) FILTER (WHERE COALESCE(b.global_discount_amount, 0) > 0)::int AS global_disc_count
-        FROM bookings b
-        WHERE b.property_id = $1
-          AND COALESCE(b.booking_status, '') != 'CANCELLED'
-          AND COALESCE(b.global_discount_amount, 0) > 0
-          AND EXISTS (
-            SELECT 1 FROM reservations r
-            WHERE r.booking_id = b.id
-              AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
-              AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
-              AND r.check_in::date <= $3::date
-              AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
-              AND COALESCE(r.discount_amount, 0) = 0
-          )
-        `,
-        [propertyId, startDate, endDate]
-      );
-      const txDiscountRes = await pool.query(
-        `
-        SELECT
-          COALESCE(SUM(CASE
-            WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+
+      const [
+        bookingGlobalDiscRes,
+        txDiscountRes,
+        financialsData,
+        txAggRes,
+        stockMoveRes,
+        cashFlowRes,
+        balanceSheetRes,
+      ] = await Promise.all([
+        pool.query(
+          `
+          SELECT
+            COALESCE(SUM(b.global_discount_amount), 0)::numeric(14,2) AS global_disc_total,
+            COUNT(*) FILTER (WHERE COALESCE(b.global_discount_amount, 0) > 0)::int AS global_disc_count
+          FROM bookings b
+          WHERE b.property_id = $1
+            AND COALESCE(b.booking_status, '') != 'CANCELLED'
+            AND COALESCE(b.global_discount_amount, 0) > 0
+            AND EXISTS (
+              SELECT 1 FROM reservations r
+              WHERE r.booking_id = b.id
+                AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+                AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND r.check_in::date <= $3::date
+                AND GREATEST(r.check_out::date, (r.check_in::date + INTERVAL '1 day')::date) > $2::date
+                AND COALESCE(r.discount_amount, 0) = 0
+            )
+          `,
+          [propertyId, startDate, endDate]
+        ),
+        pool.query(
+          `
+          SELECT
+            COALESCE(SUM(CASE
+              WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+                OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
+                OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%'
+              THEN COALESCE(t.discount_amount, 0)
+              ELSE 0
+            END), 0)::numeric(14,2) AS pos_discount_total,
+            COUNT(*) FILTER (WHERE (
+              UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
               OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
               OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%'
-            THEN COALESCE(t.discount_amount, 0)
-            ELSE 0
-          END), 0)::numeric(14,2) AS pos_discount_total,
-          COUNT(*) FILTER (WHERE (
-            UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
-            OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
-            OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%'
-          ) AND COALESCE(t.discount_amount, 0) > 0)::int AS pos_discount_count,
-          COALESCE(SUM(CASE
-            WHEN UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER')
+            ) AND COALESCE(t.discount_amount, 0) > 0)::int AS pos_discount_count,
+            COALESCE(SUM(CASE
+              WHEN UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER')
+                AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%POS%'
+                AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%FNB%'
+                AND t.reservation_id IS NULL
+              THEN COALESCE(t.discount_amount, 0)
+              ELSE 0
+            END), 0)::numeric(14,2) AS standalone_room_discount_total,
+            COUNT(*) FILTER (WHERE (
+              UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER')
               AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%POS%'
               AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%FNB%'
               AND t.reservation_id IS NULL
-            THEN COALESCE(t.discount_amount, 0)
-            ELSE 0
-          END), 0)::numeric(14,2) AS standalone_room_discount_total,
-          COUNT(*) FILTER (WHERE (
-            UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER')
-            AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%POS%'
-            AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%FNB%'
-            AND t.reservation_id IS NULL
-          ) AND COALESCE(t.discount_amount, 0) > 0)::int AS standalone_room_discount_count
-        FROM transactions t
-        WHERE t.property_id = $1
-          AND t.transaction_type = 'SALE'
-          AND t.deleted_at IS NULL
-          AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-          AND t.transaction_date >= $2::date
-          AND t.transaction_date <= $3::date
-          ${nonCancelledTxFilter}
-        `,
-        [propertyId, startDate, endDate]
-      );
+            ) AND COALESCE(t.discount_amount, 0) > 0)::int AS standalone_room_discount_count
+          FROM transactions t
+          WHERE t.property_id = $1
+            AND t.transaction_type = 'SALE'
+            AND t.deleted_at IS NULL
+            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND t.transaction_date >= $2::date
+            AND t.transaction_date <= $3::date
+            ${nonCancelledTxFilter}
+          `,
+          [propertyId, startDate, endDate]
+        ),
+        calculateFinancials(pool, {
+          property_id: propertyId,
+          start_date: startDate,
+          end_date: endDate
+        }),
+        pool.query(
+          `
+          SELECT
+            COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.tax_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_tax,
+            COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.service_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_service,
+            COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.rounding_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_rounding,
+            COALESCE(SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN COALESCE(t.discount_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS purchase_discount,
+            COALESCE(SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN COALESCE(t.tax_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS purchase_tax
+          FROM transactions t
+          WHERE t.property_id = $1
+            AND t.deleted_at IS NULL
+            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND t.transaction_date >= $2::date
+            AND t.transaction_date <= $3::date
+            ${nonCancelledTxFilter}
+          `,
+          [propertyId, startDate, endDate]
+        ),
+        pool.query(
+          `
+          SELECT
+            COALESCE(SUM(
+              CASE
+                WHEN (UPPER(COALESCE(so.operation_type, '')) LIKE '%OPNAME%' OR UPPER(COALESCE(so.operation_type, '')) LIKE '%ADJUST%')
+                  THEN ABS(sm.quantity_delta) * COALESCE(NULLIF(sm.unit_cost, 0), NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS opname_cost,
+            COALESCE(SUM(
+              CASE
+                WHEN sm.quantity_delta < 0
+                  AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%OPNAME%'
+                  AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%ADJUST%'
+                  AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%SALE%'
+                  AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%POS%'
+                  THEN ABS(sm.quantity_delta) * COALESCE(NULLIF(sm.unit_cost, 0), NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0)
+                ELSE 0
+              END
+            ), 0)::numeric(14,2) AS stock_out_cost
+          FROM stock_movements sm
+          JOIN stock_operations so ON so.id = sm.operation_id
+          LEFT JOIN pos_menu_items pmi ON pmi.id = sm.product_id AND pmi.property_id = sm.property_id
+          WHERE sm.property_id = $1
+            AND ((sm.created_at AT TIME ZONE 'Asia/Jakarta')::date) >= $2::date
+            AND ((sm.created_at AT TIME ZONE 'Asia/Jakarta')::date) <= $3::date
+          `,
+          [propertyId, startDate, endDate]
+        ),
+        pool.query(
+          `
+          WITH pt_cash AS (
+            SELECT
+              ((pt.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date AS p_date,
+              COALESCE(pt.amount, 0)::numeric AS amount,
+              UPPER(COALESCE(pt.transaction_type, 'PAYMENT')) AS tx_type
+            FROM payment_transactions pt
+            LEFT JOIN reservations r ON r.id = pt.reservation_id
+            LEFT JOIN bookings b ON b.id = COALESCE(pt.booking_id, r.booking_id)
+            WHERE (pt.property_id = $1 OR b.property_id = $1)
+              AND pt.status = 'SUCCESS'
+              AND (r.id IS NULL OR (UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW') AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')))
+              AND (b.id IS NULL OR UPPER(COALESCE(b.booking_status, '')) != 'CANCELLED')
+          ),
+          tx_cash AS (
+            SELECT
+              t.transaction_date AS t_date,
+              t.transaction_type,
+              t.category_code,
+              t.department_code,
+              COALESCE(t.net_amount, 0)::numeric AS net_amount,
+              UPPER(COALESCE(t.payment_status, 'PAID')) AS payment_status,
+              t.reservation_id,
+              t.booking_id
+            FROM transactions t
+            WHERE t.property_id = $1
+              AND t.deleted_at IS NULL
+              AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+              ${nonCancelledTxFilter}
+          )
+          SELECT
+            (
+              COALESCE((SELECT SUM(CASE WHEN tx_type = 'DEPOSIT_REFUND' THEN -amount ELSE amount END) FROM pt_cash WHERE p_date < $2::date), 0)
+              + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('SALE', 'INCOME') AND reservation_id IS NULL AND booking_id IS NULL AND payment_status = 'PAID'), 0)
+              - COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('EXPENSE', 'PURCHASE') AND payment_status = 'PAID'), 0)
+            )::numeric(14,2) AS opening_cash_balance,
+            (
+              COALESCE((SELECT SUM(amount) FROM pt_cash WHERE p_date >= $2::date AND p_date <= $3::date AND tx_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT', 'DEPOSIT')), 0)
+              + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'SALE' AND reservation_id IS NULL AND booking_id IS NULL), 0)
+            )::numeric(14,2) AS customer_receipts,
+            (
+              COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'PURCHASE'), 0)
+              + COALESCE((
+                SELECT SUM(ppo.total_estimated_amount)
+                FROM pos_purchase_orders ppo
+                WHERE ppo.property_id = $1
+                  AND ppo.status = 'COMPLETED'
+                  AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
+                  AND ppo.order_date >= $2::date
+                  AND ppo.order_date <= $3::date
+                  AND NOT EXISTS (
+                    SELECT 1 FROM transactions t2
+                    WHERE t2.property_id = ppo.property_id
+                      AND t2.transaction_type = 'PURCHASE'
+                      AND t2.deleted_at IS NULL
+                      AND t2.source_reference = ppo.po_number
+                  )
+              ), 0)
+            )::numeric(14,2) AS supplier_payments,
+            COALESCE((
+              SELECT SUM(net_amount) FROM tx_cash
+              WHERE t_date >= $2::date AND t_date <= $3::date
+                AND transaction_type = 'EXPENSE'
+                AND UPPER(COALESCE(department_code, '')) NOT LIKE '%MAINT%'
+                AND UPPER(COALESCE(category_code, '')) NOT LIKE '%MAINT%'
+            ), 0)::numeric(14,2) AS operating_expenses,
+            COALESCE((
+              SELECT SUM(net_amount) FROM tx_cash
+              WHERE t_date >= $2::date AND t_date <= $3::date
+                AND transaction_type = 'EXPENSE'
+                AND (UPPER(COALESCE(department_code, '')) LIKE '%MAINT%' OR UPPER(COALESCE(category_code, '')) LIKE '%MAINT%')
+            ), 0)::numeric(14,2) AS maintenance_expenses,
+            COALESCE((
+              SELECT SUM(net_amount) FROM tx_cash
+              WHERE t_date >= $2::date AND t_date <= $3::date
+                AND transaction_type = 'INCOME'
+            ), 0)::numeric(14,2) AS other_income_receipts,
+            COALESCE((
+              SELECT SUM(amount) FROM pt_cash
+              WHERE p_date >= $2::date AND p_date <= $3::date
+                AND tx_type = 'DEPOSIT_REFUND'
+            ), 0)::numeric(14,2) AS other_expenses
+          `,
+          [propertyId, startDate, endDate]
+        ),
+        pool.query(
+          `
+          WITH method_balances AS (
+            SELECT
+              UPPER(COALESCE(m.method, '')) AS method_upper,
+              (COALESCE(m.booking_total, 0) + COALESCE(m.pos_total, 0) + COALESCE(m.income_total, 0) - COALESCE(m.purchase_total, 0) - COALESCE(m.expense_total, 0))::numeric AS net_bal
+            FROM (
+              SELECT
+                COALESCE(
+                  NULLIF(BTRIM(t.payment_method), ''),
+                  (
+                    SELECT NULLIF(BTRIM(pt.payment_method), '')
+                    FROM payment_transactions pt
+                    WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
+                      AND pt.status = 'SUCCESS'
+                    ORDER BY pt.id DESC LIMIT 1
+                  ),
+                  (
+                    SELECT NULLIF(BTRIM(pt.payment_method), '')
+                    FROM payment_allocations pa
+                    JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
+                    WHERE t.booking_id IS NOT NULL AND pa.booking_id = t.booking_id
+                      AND pa.status = 'ACTIVE' AND pt.status = 'SUCCESS'
+                    ORDER BY pt.id DESC LIMIT 1
+                  ),
+                  'BELUM_DIISI'
+                ) AS method,
+                SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS booking_total,
+                SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS pos_total,
+                SUM(CASE WHEN t.transaction_type = 'INCOME' THEN t.net_amount ELSE 0 END) AS income_total,
+                SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN t.net_amount ELSE 0 END) AS purchase_total,
+                SUM(CASE WHEN t.transaction_type = 'EXPENSE' THEN t.net_amount ELSE 0 END) AS expense_total
+              FROM transactions t
+              WHERE t.property_id = $1
+                AND t.deleted_at IS NULL
+                AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                AND t.transaction_date <= $2::date
+                ${nonCancelledTxFilter}
+              GROUP BY 1
+            ) m
+          )
+          SELECT
+            COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper IN ('CASH', 'TUNAI')), 0)::numeric(14,2) AS cash_on_hand,
+            COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper IN ('BANK')), 0)::numeric(14,2) AS bank_account,
+            COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%TRANSFER%' OR method_upper LIKE '%BCA%' OR method_upper LIKE '%MANDIRI%' OR method_upper LIKE '%BRI%' OR method_upper LIKE '%BNI%'), 0)::numeric(14,2) AS transfer_bank,
+            COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%QRIS%' OR method_upper LIKE '%GOPAY%' OR method_upper LIKE '%OVO%' OR method_upper LIKE '%DANA%' OR method_upper LIKE '%EWALLET%'), 0)::numeric(14,2) AS qris_balance,
+            COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%CARD%' OR method_upper LIKE '%DEBIT%' OR method_upper LIKE '%KREDIT%' OR method_upper LIKE '%EDC%'), 0)::numeric(14,2) AS card_edc,
+            COALESCE((
+              SELECT SUM(COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))))
+              FROM reservations r
+              JOIN bookings b ON b.id = r.booking_id
+              WHERE b.property_id = $1
+                AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
+                AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND COALESCE(b.booking_status, '') != 'CANCELLED'
+                AND UPPER(COALESCE(r.payment_status, '')) NOT IN ('PAID', 'LUNAS', 'COMPLIMENTARY')
+                AND COALESCE(r.discount_percent, 0) < 100
+                AND NOT EXISTS (
+                  SELECT 1 FROM reservation_complimentary_requests rcr
+                  WHERE rcr.reservation_id = r.id AND rcr.status = 'APPROVED'
+                )
+                AND r.check_in::date <= $2::date
+            ), 0)::numeric(14,2) AS accounts_receivable,
+            COALESCE((
+              SELECT SUM(sb.quantity * COALESCE(NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0))
+              FROM stock_balances sb
+              JOIN pos_menu_items pmi ON pmi.id = sb.product_id AND pmi.property_id = sb.property_id
+              WHERE sb.property_id = $1
+                AND sb.quantity > 0
+            ), 0)::numeric(14,2) AS inventory_value,
+            COALESCE((
+              SELECT SUM(d.original_amount)
+              FROM deposits d
+              WHERE d.property_id = $1
+                AND d.status IN ('RECEIVED', 'PARTIALLY_USED')
+            ), 0)::numeric(14,2) AS guest_deposits
+          `,
+          [propertyId, endDate]
+        ),
+      ]);
 
       const globalDiscRow = bookingGlobalDiscRes.rows[0] || {};
       const txDiscRow = txDiscountRes.rows[0] || {};
@@ -1542,242 +1783,9 @@ export function createReportsRouter(pool: Pool): Router {
         total_discount_count: roomDiscountCount + posDiscountCount
       };
 
-      // 8. Accounting Statements: Profit/Loss, Cash Flow, and Balance Sheet
-      const financialsData = await calculateFinancials(pool, {
-        property_id: propertyId,
-        start_date: startDate,
-        end_date: endDate
-      });
-
-      const txAggRes = await pool.query(
-        `
-        SELECT
-          COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.tax_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_tax,
-          COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.service_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_service,
-          COALESCE(SUM(CASE WHEN t.transaction_type IN ('SALE', 'INCOME') THEN COALESCE(t.rounding_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS sales_rounding,
-          COALESCE(SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN COALESCE(t.discount_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS purchase_discount,
-          COALESCE(SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN COALESCE(t.tax_amount, 0) ELSE 0 END), 0)::numeric(14,2) AS purchase_tax
-        FROM transactions t
-        WHERE t.property_id = $1
-          AND t.deleted_at IS NULL
-          AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-          AND t.transaction_date >= $2::date
-          AND t.transaction_date <= $3::date
-          ${nonCancelledTxFilter}
-        `,
-        [propertyId, startDate, endDate]
-      );
       const txAgg = txAggRes.rows[0] || {};
-
-      // Stock Movements Valuation (Stok Keluar & Opname Stok in [startDate, endDate])
-      const stockMoveRes = await pool.query(
-        `
-        SELECT
-          COALESCE(SUM(
-            CASE
-              WHEN (UPPER(COALESCE(so.operation_type, '')) LIKE '%OPNAME%' OR UPPER(COALESCE(so.operation_type, '')) LIKE '%ADJUST%')
-                THEN ABS(sm.quantity_delta) * COALESCE(NULLIF(sm.unit_cost, 0), NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0)
-              ELSE 0
-            END
-          ), 0)::numeric(14,2) AS opname_cost,
-          COALESCE(SUM(
-            CASE
-              WHEN sm.quantity_delta < 0
-                AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%OPNAME%'
-                AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%ADJUST%'
-                AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%SALE%'
-                AND UPPER(COALESCE(so.operation_type, '')) NOT LIKE '%POS%'
-                THEN ABS(sm.quantity_delta) * COALESCE(NULLIF(sm.unit_cost, 0), NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0)
-              ELSE 0
-            END
-          ), 0)::numeric(14,2) AS stock_out_cost
-        FROM stock_movements sm
-        JOIN stock_operations so ON so.id = sm.operation_id
-        LEFT JOIN pos_menu_items pmi ON pmi.id = sm.product_id AND pmi.property_id = sm.property_id
-        WHERE sm.property_id = $1
-          AND ((sm.created_at AT TIME ZONE 'Asia/Jakarta')::date) >= $2::date
-          AND ((sm.created_at AT TIME ZONE 'Asia/Jakarta')::date) <= $3::date
-        `,
-        [propertyId, startDate, endDate]
-      );
       const stockMove = stockMoveRes.rows[0] || {};
-
-      // Cash Flow Query (Opening Balance before startDate + Period Movements)
-      const cashFlowRes = await pool.query(
-        `
-        WITH pt_cash AS (
-          SELECT
-            ((pt.created_at AT TIME ZONE 'UTC') AT TIME ZONE 'Asia/Jakarta')::date AS p_date,
-            COALESCE(pt.amount, 0)::numeric AS amount,
-            UPPER(COALESCE(pt.transaction_type, 'PAYMENT')) AS tx_type
-          FROM payment_transactions pt
-          LEFT JOIN reservations r ON r.id = pt.reservation_id
-          LEFT JOIN bookings b ON b.id = COALESCE(pt.booking_id, r.booking_id)
-          WHERE (pt.property_id = $1 OR b.property_id = $1)
-            AND pt.status = 'SUCCESS'
-            AND (r.id IS NULL OR (UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW') AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')))
-            AND (b.id IS NULL OR UPPER(COALESCE(b.booking_status, '')) != 'CANCELLED')
-        ),
-        tx_cash AS (
-          SELECT
-            t.transaction_date AS t_date,
-            t.transaction_type,
-            t.category_code,
-            t.department_code,
-            COALESCE(t.net_amount, 0)::numeric AS net_amount,
-            UPPER(COALESCE(t.payment_status, 'PAID')) AS payment_status,
-            t.reservation_id,
-            t.booking_id
-          FROM transactions t
-          WHERE t.property_id = $1
-            AND t.deleted_at IS NULL
-            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-            ${nonCancelledTxFilter}
-        )
-        SELECT
-          -- Opening cash before $2::date
-          (
-            COALESCE((SELECT SUM(CASE WHEN tx_type = 'DEPOSIT_REFUND' THEN -amount ELSE amount END) FROM pt_cash WHERE p_date < $2::date), 0)
-            + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('SALE', 'INCOME') AND reservation_id IS NULL AND booking_id IS NULL AND payment_status = 'PAID'), 0)
-            - COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date < $2::date AND transaction_type IN ('EXPENSE', 'PURCHASE') AND payment_status = 'PAID'), 0)
-          )::numeric(14,2) AS opening_cash_balance,
-          -- Customer receipts in [$2, $3]
-          (
-            COALESCE((SELECT SUM(amount) FROM pt_cash WHERE p_date >= $2::date AND p_date <= $3::date AND tx_type IN ('PAYMENT', 'CORRECTION_REPLACEMENT', 'DEPOSIT')), 0)
-            + COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'SALE' AND reservation_id IS NULL AND booking_id IS NULL), 0)
-          )::numeric(14,2) AS customer_receipts,
-          -- Supplier payments in [$2, $3]
-          (
-            COALESCE((SELECT SUM(net_amount) FROM tx_cash WHERE t_date >= $2::date AND t_date <= $3::date AND transaction_type = 'PURCHASE'), 0)
-            + COALESCE((
-              SELECT SUM(ppo.total_estimated_amount)
-              FROM pos_purchase_orders ppo
-              WHERE ppo.property_id = $1
-                AND ppo.status = 'COMPLETED'
-                AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
-                AND ppo.order_date >= $2::date
-                AND ppo.order_date <= $3::date
-                AND NOT EXISTS (
-                  SELECT 1 FROM transactions t2
-                  WHERE t2.property_id = ppo.property_id
-                    AND t2.transaction_type = 'PURCHASE'
-                    AND t2.deleted_at IS NULL
-                    AND t2.source_reference = ppo.po_number
-                )
-            ), 0)
-          )::numeric(14,2) AS supplier_payments,
-          -- Operating expenses (excluding maintenance) in [$2, $3]
-          COALESCE((
-            SELECT SUM(net_amount) FROM tx_cash
-            WHERE t_date >= $2::date AND t_date <= $3::date
-              AND transaction_type = 'EXPENSE'
-              AND UPPER(COALESCE(department_code, '')) NOT LIKE '%MAINT%'
-              AND UPPER(COALESCE(category_code, '')) NOT LIKE '%MAINT%'
-          ), 0)::numeric(14,2) AS operating_expenses,
-          -- Maintenance expenses in [$2, $3]
-          COALESCE((
-            SELECT SUM(net_amount) FROM tx_cash
-            WHERE t_date >= $2::date AND t_date <= $3::date
-              AND transaction_type = 'EXPENSE'
-              AND (UPPER(COALESCE(department_code, '')) LIKE '%MAINT%' OR UPPER(COALESCE(category_code, '')) LIKE '%MAINT%')
-          ), 0)::numeric(14,2) AS maintenance_expenses,
-          -- Other income in [$2, $3]
-          COALESCE((
-            SELECT SUM(net_amount) FROM tx_cash
-            WHERE t_date >= $2::date AND t_date <= $3::date
-              AND transaction_type = 'INCOME'
-          ), 0)::numeric(14,2) AS other_income_receipts,
-          -- Other expenses / deposit refunds in [$2, $3]
-          COALESCE((
-            SELECT SUM(amount) FROM pt_cash
-            WHERE p_date >= $2::date AND p_date <= $3::date
-              AND tx_type = 'DEPOSIT_REFUND'
-          ), 0)::numeric(14,2) AS other_expenses
-        `,
-        [propertyId, startDate, endDate]
-      );
       const cfRow = cashFlowRes.rows[0] || {};
-
-      // Balance Sheet Valuation as of endDate
-      const balanceSheetRes = await pool.query(
-        `
-        WITH method_balances AS (
-          SELECT
-            UPPER(COALESCE(m.method, '')) AS method_upper,
-            (COALESCE(m.booking_total, 0) + COALESCE(m.pos_total, 0) + COALESCE(m.income_total, 0) - COALESCE(m.purchase_total, 0) - COALESCE(m.expense_total, 0))::numeric AS net_bal
-          FROM (
-            SELECT
-              COALESCE(
-                NULLIF(BTRIM(t.payment_method), ''),
-                (
-                  SELECT NULLIF(BTRIM(pt.payment_method), '')
-                  FROM payment_transactions pt
-                  WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
-                    AND pt.status = 'SUCCESS'
-                  ORDER BY pt.id DESC LIMIT 1
-                ),
-                (
-                  SELECT NULLIF(BTRIM(pt.payment_method), '')
-                  FROM payment_allocations pa
-                  JOIN payment_transactions pt ON pt.id = pa.payment_transaction_id
-                  WHERE t.booking_id IS NOT NULL AND pa.booking_id = t.booking_id
-                    AND pa.status = 'ACTIVE' AND pt.status = 'SUCCESS'
-                  ORDER BY pt.id DESC LIMIT 1
-                ),
-                'BELUM_DIISI'
-              ) AS method,
-              SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS booking_total,
-              SUM(CASE WHEN t.transaction_type = 'SALE' AND UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER') THEN t.net_amount ELSE 0 END) AS pos_total,
-              SUM(CASE WHEN t.transaction_type = 'INCOME' THEN t.net_amount ELSE 0 END) AS income_total,
-              SUM(CASE WHEN t.transaction_type = 'PURCHASE' THEN t.net_amount ELSE 0 END) AS purchase_total,
-              SUM(CASE WHEN t.transaction_type = 'EXPENSE' THEN t.net_amount ELSE 0 END) AS expense_total
-            FROM transactions t
-            WHERE t.property_id = $1
-              AND t.deleted_at IS NULL
-              AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-              AND t.transaction_date <= $2::date
-              ${nonCancelledTxFilter}
-            GROUP BY 1
-          ) m
-        )
-        SELECT
-          COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper IN ('CASH', 'TUNAI')), 0)::numeric(14,2) AS cash_on_hand,
-          COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper IN ('BANK')), 0)::numeric(14,2) AS bank_account,
-          COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%TRANSFER%' OR method_upper LIKE '%BCA%' OR method_upper LIKE '%MANDIRI%' OR method_upper LIKE '%BRI%' OR method_upper LIKE '%BNI%'), 0)::numeric(14,2) AS transfer_bank,
-          COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%QRIS%' OR method_upper LIKE '%GOPAY%' OR method_upper LIKE '%OVO%' OR method_upper LIKE '%DANA%' OR method_upper LIKE '%EWALLET%'), 0)::numeric(14,2) AS qris_balance,
-          COALESCE((SELECT SUM(net_bal) FROM method_balances WHERE method_upper LIKE '%CARD%' OR method_upper LIKE '%DEBIT%' OR method_upper LIKE '%KREDIT%' OR method_upper LIKE '%EDC%'), 0)::numeric(14,2) AS card_edc,
-          COALESCE((
-            SELECT SUM(COALESCE(r.remaining_balance, GREATEST(0, COALESCE(r.total_price, 0) - COALESCE(r.amount_paid, 0))))
-            FROM reservations r
-            JOIN bookings b ON b.id = r.booking_id
-            WHERE b.property_id = $1
-              AND r.status IN ('BOOKED', 'CHECKED_IN', 'CHECKED_OUT')
-              AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
-              AND COALESCE(b.booking_status, '') != 'CANCELLED'
-              AND UPPER(COALESCE(r.payment_status, '')) NOT IN ('PAID', 'LUNAS', 'COMPLIMENTARY')
-              AND COALESCE(r.discount_percent, 0) < 100
-              AND NOT EXISTS (
-                SELECT 1 FROM reservation_complimentary_requests rcr
-                WHERE rcr.reservation_id = r.id AND rcr.status = 'APPROVED'
-              )
-              AND r.check_in::date <= $2::date
-          ), 0)::numeric(14,2) AS accounts_receivable,
-          COALESCE((
-            SELECT SUM(sb.quantity * COALESCE(NULLIF(pmi.average_cost, 0), NULLIF(pmi.last_cost, 0), 0))
-            FROM stock_balances sb
-            JOIN pos_menu_items pmi ON pmi.id = sb.product_id AND pmi.property_id = sb.property_id
-            WHERE sb.property_id = $1
-              AND sb.quantity > 0
-          ), 0)::numeric(14,2) AS inventory_value,
-          COALESCE((
-            SELECT SUM(d.original_amount)
-            FROM deposits d
-            WHERE d.property_id = $1
-              AND d.status IN ('RECEIVED', 'PARTIALLY_USED')
-          ), 0)::numeric(14,2) AS guest_deposits
-        `,
-        [propertyId, endDate]
-      );
       const bsRow = balanceSheetRes.rows[0] || {};
 
       // Compute Profit & Loss numbers from active (non-cancelled, non-complimentary) room sales and POS sales

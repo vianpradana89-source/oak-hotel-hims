@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 
 let schemaInitialized = false;
+const initializedProperties = new Set<number>();
 
 const DEFAULT_SYSTEM_ACCOUNTS: Array<{
   account_number: string;
@@ -150,8 +151,24 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE INDEX IF NOT EXISTS idx_tx_prop_type_date_active
+        ON transactions(property_id, transaction_type, transaction_date)
+        WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_tx_prop_res_active
+        ON transactions(property_id, reservation_id)
+        WHERE deleted_at IS NULL AND reservation_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_tx_prop_booking_active
+        ON transactions(property_id, booking_id)
+        WHERE deleted_at IS NULL AND booking_id IS NOT NULL;
+      CREATE INDEX IF NOT EXISTS idx_hk_tasks_prop_active_room
+        ON housekeeping_tasks(property_id, is_archived, status, room_id);
     `);
     schemaInitialized = true;
+  }
+
+  if (initializedProperties.has(propertyId)) {
+    return;
   }
 
   for (const acc of DEFAULT_SYSTEM_ACCOUNTS) {
@@ -185,6 +202,7 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
       );
     }
   }
+  initializedProperties.add(propertyId);
 }
 
 export function computeDepreciatedValue(
