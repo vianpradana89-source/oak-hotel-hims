@@ -7,6 +7,7 @@ export const DRAWER_TYPE_TO_KPI_DRILLDOWN: Record<string, DailyKpiDrilldownType>
   checkout: 'checkout',
   dirty: 'dirty',
   ready: 'vacant_clean',
+  available: 'available_rooms',
   inspection: 'checkout_check',
   maintenance: 'maintenance',
 };
@@ -161,7 +162,7 @@ export function buildDailyKpiCards(
       'checkout',
       'Check-out Hari Ini',
       `${kpis?.check_out_today?.rooms ?? 0} kamar`,
-      null,
+      `Checkout Check: ${kpis?.checkout_check?.pending ?? 0} pending`,
       'hotel-stat-card--checkout',
       'checkout',
       'check_out_rooms'
@@ -185,12 +186,12 @@ export function buildDailyKpiCards(
       null // current-only
     ),
     makeCard(
-      'checkoutCheck',
-      'Checkout Check',
-      String(kpis?.checkout_check?.pending ?? 0),
-      'pending',
-      'hotel-stat-card--inspection',
-      'inspection',
+      'availableRooms',
+      'Available Room',
+      `${kpis?.rooms?.available ?? Math.max(0, sellable - occupied)} kamar`,
+      'Siap & Kotor (Non-OO)',
+      'hotel-stat-card--ready',
+      'available',
       null // current-only
     ),
     makeCard(

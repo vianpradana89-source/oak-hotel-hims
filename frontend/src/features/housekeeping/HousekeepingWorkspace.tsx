@@ -820,6 +820,102 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
           source.filter((t) => t.room_id).map((t) => Number(t.room_id))
         );
 
+        const defaultCleaningTemplate =
+          templates.find(
+            (tp) =>
+              tp.code === (hkSettings?.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING') &&
+              tp.is_active !== false
+          ) ||
+          templates.find((tp) => tp.task_type === 'ROOM_CLEANING' && tp.is_active !== false) ||
+          templates[0] ||
+          null;
+
+        const buildFallbackChecklistForRoom = (
+          roomObj: any,
+          markCompleted: boolean
+        ): {
+          checklist_summary: { total: number; completed: number; required_total: number; required_completed: number };
+          checklist_items: TaskChecklistItem[];
+        } => {
+          const rtId = Number(roomObj?.room_type_id || 0);
+          const rawItems = Array.isArray(defaultCleaningTemplate?.items) ? defaultCleaningTemplate!.items! : [];
+          const applicable = rawItems.filter((it: any) => {
+            if (it.is_archived) return false;
+            const scopeIds = Array.isArray(it.applicable_room_type_ids)
+              ? it.applicable_room_type_ids.map(Number).filter((n: number) => Number.isInteger(n) && n > 0)
+              : [];
+            if (scopeIds.length === 0 || !rtId) return true;
+            return scopeIds.includes(rtId);
+          });
+          const total = applicable.length;
+          const requiredTotal = applicable.filter((it: any) => Boolean(it.is_required)).length;
+          const mappedItems: TaskChecklistItem[] = applicable.map((it: any, idx: number) => ({
+            id: -(idx + 1),
+            task_id: -Number(roomObj?.id || 1),
+            item_code: it.item_code || `ITEM_${idx + 1}`,
+            label: it.label || '',
+            section: it.section || it.group_name || it.category || 'Umum',
+            category: it.category || it.group_name || 'Umum',
+            group_id: it.group_id ?? null,
+            group_name_snapshot: it.group_name || it.category || 'Umum',
+            group_sort_order: Number(it.group_sort_order || 0),
+            is_required: Boolean(it.is_required),
+            requires_note: Boolean(it.requires_note),
+            requires_photo: Boolean(it.requires_photo),
+            is_completed: markCompleted,
+            completed_by_user_id: null,
+            completed_by_name_snapshot: markCompleted
+              ? (roomObj?.last_cleaned_by_name || roomObj?.last_inspected_by_name || currentUserName)
+              : null,
+            completed_at: markCompleted ? (roomObj?.last_cleaned_at || new Date().toISOString()) : null,
+            note: null,
+            sort_order: Number(it.sort_order ?? idx),
+            created_at: new Date().toISOString()
+          }));
+          return {
+            checklist_summary: {
+              total,
+              completed: markCompleted ? total : 0,
+              required_total: requiredTotal,
+              required_completed: markCompleted ? requiredTotal : 0
+            },
+            checklist_items: mappedItems
+          };
+        };
+
+        // Map latest task with checklist_summary per room_id from full tasks list
+        const latestTaskByRoomId = new Map<number, HousekeepingTaskRecord>();
+        for (const t of tasks) {
+          if (!t.room_id || t.task_category !== 'ROOM_OPERATIONS') continue;
+          const rid = Number(t.room_id);
+          const existing = latestTaskByRoomId.get(rid);
+          if (!existing) {
+            latestTaskByRoomId.set(rid, t);
+          } else {
+            const existingHasChecklist = (existing.checklist_summary?.total ?? 0) > 0;
+            const currentHasChecklist = (t.checklist_summary?.total ?? 0) > 0;
+            if (currentHasChecklist && !existingHasChecklist) {
+              latestTaskByRoomId.set(rid, t);
+            } else if (Number(t.id) > Number(existing.id)) {
+              latestTaskByRoomId.set(rid, t);
+            }
+          }
+        }
+
+        // Backfill checklist_summary on active source rows if missing/zero
+        source = source.map((t) => {
+          if (t.checklist_summary && t.checklist_summary.total > 0) return t;
+          const roomObj = t.room_id ? roomPool.find((rm: any) => Number(rm.id) === Number(t.room_id)) : null;
+          if (!roomObj) return t;
+          const isDone = t.status === 'DONE' || t.status === 'VERIFIED';
+          const fallback = buildFallbackChecklistForRoom(roomObj, isDone);
+          return {
+            ...t,
+            checklist_summary: fallback.checklist_summary,
+            checklist_items: (t.checklist_items && t.checklist_items.length > 0) ? t.checklist_items : fallback.checklist_items
+          };
+        });
+
         for (const r of roomPool) {
           const rid = Number(r.id);
           const rStatus = String(r.status || '').toUpperCase();
@@ -830,10 +926,27 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
 
           if (!roomsWithActiveRow.has(rid)) {
             if (isDirtyRoom || isCleaningRoom || (metricFilter === 'READY' && isReadyRoom) || (metricFilter === 'MAINTENANCE' && isMaintRoom)) {
+              const latestTask = latestTaskByRoomId.get(rid);
+              const fallbackChecklist = buildFallbackChecklistForRoom(r, isReadyRoom);
+              const effectiveChecklistSummary =
+                latestTask?.checklist_summary && latestTask.checklist_summary.total > 0
+                  ? isReadyRoom
+                    ? {
+                        ...latestTask.checklist_summary,
+                        completed: latestTask.checklist_summary.total,
+                        required_completed: latestTask.checklist_summary.required_total
+                      }
+                    : latestTask.checklist_summary
+                  : fallbackChecklist.checklist_summary;
+              const effectiveChecklistItems =
+                latestTask?.checklist_items && latestTask.checklist_items.length > 0
+                  ? latestTask.checklist_items
+                  : fallbackChecklist.checklist_items;
+
               source.push({
-                id: -rid,
+                id: isReadyRoom && latestTask?.id ? latestTask.id : -rid,
                 property_id: propertyId,
-                task_number: `ROOM-${r.room_number}`,
+                task_number: latestTask?.task_number || `ROOM-${r.room_number}`,
                 room_id: rid,
                 room_number: String(r.room_number),
                 room_status: r.status || 'VACANT_DIRTY',
@@ -852,16 +965,18 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
                 status: isReadyRoom ? ('DONE' as HkTaskStatus) : ('ASSIGNED' as HkTaskStatus),
                 assigned_department: 'Housekeeping',
                 assigned_user_name_snapshot: isReadyRoom
-                  ? (r.last_cleaned_by_name || r.last_inspected_by_name || null)
+                  ? (r.last_cleaned_by_name || r.last_inspected_by_name || latestTask?.assigned_user_name_snapshot || null)
                   : currentUserName,
-                cleaned_by_name: r.last_cleaned_by_name || null,
-                inspected_by_name: r.last_inspected_by_name || null,
+                cleaned_by_name: r.last_cleaned_by_name || latestTask?.cleaned_by_name || null,
+                inspected_by_name: r.last_inspected_by_name || latestTask?.inspected_by_name || null,
                 last_cleaned_at: r.last_cleaned_at || null,
                 last_inspected_at: r.last_inspected_at || null,
-                complimentary_restock_meta: r.complimentary_restock_meta || null,
+                complimentary_restock_meta: r.complimentary_restock_meta || latestTask?.complimentary_restock_meta || null,
+                checklist_summary: effectiveChecklistSummary,
+                checklist_items: effectiveChecklistItems,
                 source_type: 'ROOM',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
+                created_at: latestTask?.created_at || new Date().toISOString(),
+                updated_at: latestTask?.updated_at || new Date().toISOString()
               } as HousekeepingTaskRecord);
             }
           }
@@ -927,7 +1042,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     }
 
     return source;
-  }, [tasks, dailyRooms, rooms, historyTasks, activeTab, metricFilter, statusFilter, searchTerm, propertyId, currentUserName, activeRoomBlocks]);
+  }, [tasks, dailyRooms, rooms, historyTasks, activeTab, metricFilter, statusFilter, searchTerm, propertyId, currentUserName, activeRoomBlocks, templates, hkSettings]);
 
   // Open Detail & Direct Edit Produk Kamar Modal
   const openRoomProductModal = async (roomObj: {
@@ -1319,7 +1434,9 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
   };
 
   const openTaskDrawer = async (task: HousekeepingTaskRecord) => {
-    if (task.id < 0 && task.room_id) {
+    const rStatus = String(task.room_status || '').toUpperCase();
+    const isDirty = rStatus === 'VACANT_DIRTY' || rStatus === 'OCCUPIED_DIRTY' || rStatus === 'DIRTY' || rStatus === 'CLEANING';
+    if (task.id < 0 && task.room_id && isDirty) {
       await handleEnsureDirtyRoomTask(Number(task.room_id), false);
       return;
     }

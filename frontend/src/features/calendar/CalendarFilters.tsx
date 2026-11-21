@@ -1,3 +1,4 @@
+import React from 'react';
 import type { CalendarOperationalFilter } from './calendarTypes';
 
 interface IdentityOption {
@@ -22,6 +23,7 @@ interface Props {
   onToggleUnresolvedGuarantees?: (value: boolean) => void;
   unresolvedGuaranteeCount?: number;
   unresolvedGuaranteeLoading?: boolean;
+  rightSlot?: React.ReactNode;
 }
 
 export default function CalendarFilters(props: Props) {
@@ -84,6 +86,11 @@ export default function CalendarFilters(props: Props) {
           </button>
         );
       })()}
+      {props.rightSlot && (
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          {props.rightSlot}
+        </div>
+      )}
     </div>
   );
 }

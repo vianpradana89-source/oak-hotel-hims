@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { formatHotelBusinessDate } from './hotelDateDisplay';
 import type { ShellPropertyItem, UserProfileContext } from './shellTypes';
 import { OakLogo } from '../../design-system/OakLogo';
@@ -16,6 +16,10 @@ export interface GlobalOperationsBarProps {
     displayName?: string;
     logoUrl?: string | null;
   } | null;
+  searchValue?: string;
+  onSearchChange?: (value: string) => void;
+  searchMatchCount?: number | null;
+  onSearchActivate?: () => void;
 }
 
 export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
@@ -33,11 +37,40 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
   onOpenPos,
   onLogout,
   propertyBranding,
+  searchValue,
+  onSearchChange,
+  searchMatchCount,
+  onSearchActivate,
 }) => {
   const [currentDateTime, setCurrentDateTime] = useState(() => formatHotelBusinessDate());
-  const [searchQuery, setSearchQuery] = useState('');
-  const [showSearchNotice, setShowSearchNotice] = useState(false);
+  const [internalSearch, setInternalSearch] = useState('');
   const [showUserMenu, setShowUserMenu] = useState(false);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+
+  const effectiveSearch = searchValue !== undefined ? searchValue : internalSearch;
+  const handleSearchInput = (val: string) => {
+    if (onSearchChange) {
+      onSearchChange(val);
+    } else {
+      setInternalSearch(val);
+    }
+    if (val.trim() && onSearchActivate) {
+      onSearchActivate();
+    }
+  };
+
+  // Global Ctrl+K / Cmd+K shortcut to focus search bar
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   // Update clock every minute
   useEffect(() => {
@@ -87,8 +120,8 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
         </div>
       </div>
 
-      {/* Center section: Shell-level Search (Explicitly documented as unavailable / prepared) */}
-      <div className="flex-1 max-w-md mx-2 hidden md:block relative">
+      {/* Center section: Active Search Bar (BID, Nama Tamu, HP, atau Nomor Kamar) */}
+      <div className="flex-1 max-w-md mx-2 relative">
         <div className="relative flex items-center">
           <div className="absolute left-3 text-slate-400 pointer-events-none flex items-center">
             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -96,33 +129,43 @@ export const GlobalOperationsBar: React.FC<GlobalOperationsBarProps> = ({
             </svg>
           </div>
           <input
+            ref={searchInputRef}
             type="text"
-            value={searchQuery}
-            onFocus={() => setShowSearchNotice(true)}
-            onBlur={() => setTimeout(() => setShowSearchNotice(false), 250)}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Cari tamu, BID, kamar... (Segera Hadir)"
-            className="w-full h-8 pl-8 pr-12 text-xs bg-slate-900/90 text-slate-200 placeholder:text-slate-400 rounded-lg border border-slate-700/80 focus:outline-none focus:border-amber-500/70 focus:ring-1 focus:ring-amber-500/40 transition-colors"
+            value={effectiveSearch}
+            onChange={(e) => handleSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape' && effectiveSearch) {
+                handleSearchInput('');
+              } else if (e.key === 'Enter' && onSearchActivate) {
+                onSearchActivate();
+              }
+            }}
+            placeholder="Cari BID, nama tamu, HP, atau kamar..."
+            aria-label="Cari BID, nama tamu, HP, atau kamar"
+            className="w-full h-8 pl-8 pr-20 text-xs bg-slate-900/90 text-slate-100 placeholder:text-slate-400 rounded-lg border border-slate-700/80 focus:outline-none focus:border-emerald-500/80 focus:ring-1 focus:ring-emerald-500/40 transition-colors"
           />
-          <kbd className="absolute right-2 text-[10px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">
-            Ctrl K
-          </kbd>
-        </div>
-
-        {/* Informative notice on search boundary */}
-        {showSearchNotice && (
-          <div className="absolute top-10 left-0 right-0 bg-[#1e293b] text-slate-200 text-xs p-2.5 rounded-lg border border-slate-700 shadow-xl z-50">
-            <div className="flex items-center gap-2 text-amber-400 font-semibold mb-1">
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              Pencarian Global Terpadu (Segera Hadir)
+          {effectiveSearch ? (
+            <div className="absolute right-2 flex items-center gap-1">
+              {typeof searchMatchCount === 'number' && (
+                <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950/80 border border-emerald-700/60 px-1.5 py-0.5 rounded">
+                  {searchMatchCount} cocok
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => handleSearchInput('')}
+                title="Bersihkan pencarian"
+                className="text-slate-400 hover:text-white px-1 py-0.5 rounded cursor-pointer text-xs leading-none"
+              >
+                ×
+              </button>
             </div>
-            <p className="text-[11px] text-slate-300">
-              Pengindeksan global untuk pencarian lintas tamu, booking ID, nomor kamar, dan nomor HP sedang disiapkan pada backend.
-            </p>
-          </div>
-        )}
+          ) : (
+            <kbd className="absolute right-2 text-[10px] font-semibold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700 pointer-events-none">
+              Ctrl K
+            </kbd>
+          )}
+        </div>
       </div>
 
       {/* Right section: Property Switcher, POS quick link, Notifications, User profile */}

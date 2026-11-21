@@ -4102,6 +4102,14 @@ function AppContent() {
         onLogout={logout}
         onOpenPos={isNavAllowed(effectiveAccess?.effective, 'POS') ? openPosModal : undefined}
         propertyBranding={activeBranding}
+        searchValue={calendarSearch}
+        onSearchChange={setCalendarSearch}
+        searchMatchCount={calendarSearchQuery ? calendarSummary.totalReservations : null}
+        onSearchActivate={() => {
+          if (selectedMenu !== 'Kalender') {
+            handleSelectMenu('Kalender');
+          }
+        }}
       />
 
       <div className="hotel-layout">
@@ -4162,7 +4170,7 @@ function AppContent() {
                       setKpiDrilldownLoading(true);
                       setSummaryDrawerType(card.drawerType);
                     }}
-                    badge={card.key === 'checkoutCheck' ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
+                    badge={(card.key === 'checkout' || card.key === 'checkoutCheck') ? (dailyKpis?.checkout_check?.pending ?? 0) : undefined}
                     trendData={card.trendData}
                     trendDelta={card.trendDelta}
                     isOccupancy={card.key === 'occupancy'}
@@ -4207,37 +4215,20 @@ function AppContent() {
             )}
 
             <div className="bg-white p-4 rounded-xl shadow-xs border border-slate-200/90">
-              <div className="flex flex-col gap-3 mb-4 lg:flex-row lg:justify-between lg:items-center">
-                <div className="room-search-wrap calendar-search-wrap">
-                  <span className="room-search-icon">⌕</span>
-                  <input
-                    type="text"
-                    value={calendarSearch}
-                    onChange={(e) => setCalendarSearch(e.target.value)}
-                    placeholder="Cari BID, nama, HP, atau room..."
-                    className="room-search-input"
-                  />
-                </div>
-                <div className="flex flex-wrap gap-2 items-center">
-                  <div className="calendar-date-nav" role="group" aria-label="Navigasi tanggal Tape Chart">
-                    <button type="button" onClick={() => shiftDays(-7)}>‹ 7 Hari</button>
-                    <button type="button" onClick={() => shiftDays(-1)}>‹ 1 Hari</button>
-                    <button type="button" className="calendar-date-nav__today" onClick={goToday}>Hari Ini</button>
-                    <button type="button" onClick={() => shiftDays(1)}>1 Hari ›</button>
-                    <button type="button" onClick={() => shiftDays(7)}>7 Hari ›</button>
-                  </div>
-
-                  <button onClick={() => { setCalendarViewDate(anchorDate); setCalendarSelectedDate(localDateISO(anchorDate)); setCalendarOpen(true); }} className="calendar-month-picker">
-                    <span className="text-base">📅</span>
-                    <span>{new Date(anchorDate).toLocaleString('id-ID', { month: 'long' })}</span>
+              {calendarSearchQuery && (
+                <div className="mb-3 text-xs text-emerald-800 bg-emerald-50/70 border border-emerald-200 px-3 py-1.5 rounded-lg flex items-center justify-between">
+                  <span>
+                    Menyorot <b>{calendarSummary.totalReservations}</b> reservasi yang cocok dengan pencarian <b>"{calendarSearch}"</b>.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCalendarSearch('')}
+                    className="text-emerald-700 hover:text-emerald-950 font-semibold cursor-pointer"
+                  >
+                    Bersihkan
                   </button>
                 </div>
-                {calendarSearchQuery && (
-                  <div className="text-xs text-gray-500">
-                    Menyorot {calendarSummary.totalReservations} reservasi yang cocok dengan pencarian.
-                  </div>
-                )}
-              </div>
+              )}
 
               <CalendarFilters
                 roomSearch={calendarRoomSearch}
@@ -4259,6 +4250,28 @@ function AppContent() {
                 onToggleUnresolvedGuarantees={canViewGuaranteeQueue ? handleToggleUnresolvedGuarantees : undefined}
                 unresolvedGuaranteeCount={canViewGuaranteeQueue ? unresolvedGuaranteeItems.length : undefined}
                 unresolvedGuaranteeLoading={unresolvedGuaranteeLoading}
+                rightSlot={
+                  <>
+                    <div className="calendar-date-nav" role="group" aria-label="Navigasi tanggal Tape Chart">
+                      <button type="button" onClick={() => shiftDays(-7)}>‹ 7 Hari</button>
+                      <button type="button" onClick={() => shiftDays(-1)}>‹ 1 Hari</button>
+                      <button type="button" className="calendar-date-nav__today" onClick={goToday}>Hari Ini</button>
+                      <button type="button" onClick={() => shiftDays(1)}>1 Hari ›</button>
+                      <button type="button" onClick={() => shiftDays(7)}>7 Hari ›</button>
+                    </div>
+                    <button
+                      onClick={() => {
+                        setCalendarViewDate(anchorDate);
+                        setCalendarSelectedDate(localDateISO(anchorDate));
+                        setCalendarOpen(true);
+                      }}
+                      className="calendar-month-picker"
+                    >
+                      <span className="text-base">📅</span>
+                      <span>{new Date(anchorDate).toLocaleString('id-ID', { month: 'long' })}</span>
+                    </button>
+                  </>
+                }
               />
 
               {canViewGuaranteeQueue && showUnresolvedGuarantees && (
@@ -5075,9 +5088,10 @@ function AppContent() {
           summaryDrawerType === 'occupancy' ? 'Okupansi Hari Ini' :
           summaryDrawerType === 'booked' ? 'Booked Hari Ini' :
           summaryDrawerType === 'checkin' ? 'Check-in Hari Ini' :
-          summaryDrawerType === 'checkout' ? 'Check-out Hari Ini' :
+          summaryDrawerType === 'checkout' ? 'Check-out Hari Ini & Checkout Check' :
           summaryDrawerType === 'dirty' ? 'Kamar Kotor' :
           summaryDrawerType === 'ready' ? 'Vacant Clean' :
+          summaryDrawerType === 'available' ? 'Available Room' :
           summaryDrawerType === 'inspection' ? 'Pemeriksaan Checkout' :
           summaryDrawerType === 'maintenance' ? 'Maintenance' : ''
         }
@@ -5095,6 +5109,7 @@ function AppContent() {
               summaryDrawerType === 'checkout' ? (dailyKpis?.check_out_today.rooms ?? 0) :
               summaryDrawerType === 'dirty' ? (dailyKpis?.rooms.dirty ?? 0) :
               summaryDrawerType === 'ready' ? (dailyKpis?.rooms.vacant_clean ?? 0) :
+              summaryDrawerType === 'available' ? (dailyKpis?.rooms.available ?? Math.max(0, (dailyKpis?.occupancy.sellable_rooms ?? 0) - (dailyKpis?.occupancy.occupied_rooms ?? 0))) :
               summaryDrawerType === 'inspection' ? (dailyKpis?.checkout_check.pending ?? 0) :
               summaryDrawerType === 'maintenance' ? (dailyKpis?.rooms.maintenance_ooo_oos ?? 0) : 0
         }
@@ -5107,7 +5122,7 @@ function AppContent() {
           summaryDrawerType === 'inspection' ? 'amber' :
           summaryDrawerType === 'maintenance' ? 'amber' :
           summaryDrawerType === 'dirty' ? 'amber' :
-          summaryDrawerType === 'ready' ? 'emerald' : 'slate'
+          summaryDrawerType === 'ready' || summaryDrawerType === 'available' ? 'emerald' : 'slate'
         }
       >
         <DailyKpiDrilldownList

@@ -197,6 +197,7 @@ export interface DailyKpiData {
   rooms: {
     dirty: number;
     vacant_clean: number;
+    available?: number;
     maintenance_ooo_oos: number;
   };
   checkout_check: { pending: number };
@@ -292,6 +293,7 @@ export const DAILY_KPI_DRILLDOWN_TYPES = [
   'checkout',
   'dirty',
   'vacant_clean',
+  'available_rooms',
   'checkout_check',
   'maintenance',
 ] as const;
@@ -371,6 +373,15 @@ interface DailyKpiDrilldownBase {
   count: number;
 }
 
+export interface DailyKpiAvailableRoomTypeSummary {
+  room_type_id: number | null;
+  room_type_name: string;
+  available_count: number;
+  clean_count: number;
+  dirty_count: number;
+  rooms: DailyKpiRoomItem[];
+}
+
 export type DailyKpiDrilldownData =
   | (DailyKpiDrilldownBase & { type: 'occupancy'; items: DailyKpiStayItem[] })
   | (DailyKpiDrilldownBase & {
@@ -380,9 +391,19 @@ export type DailyKpiDrilldownData =
       rooms: number;
     })
   | (DailyKpiDrilldownBase & { type: 'checkin'; items: DailyKpiStayItem[] })
-  | (DailyKpiDrilldownBase & { type: 'checkout'; items: DailyKpiStayItem[] })
+  | (DailyKpiDrilldownBase & {
+      type: 'checkout';
+      items: DailyKpiStayItem[];
+      checkout_check_items?: DailyKpiCheckoutCheckItem[];
+      checkout_check_pending?: number;
+    })
   | (DailyKpiDrilldownBase & { type: 'dirty'; items: DailyKpiRoomItem[] })
   | (DailyKpiDrilldownBase & { type: 'vacant_clean'; items: DailyKpiRoomItem[] })
+  | (DailyKpiDrilldownBase & {
+      type: 'available_rooms';
+      items: DailyKpiRoomItem[];
+      by_room_type: DailyKpiAvailableRoomTypeSummary[];
+    })
   | (DailyKpiDrilldownBase & { type: 'checkout_check'; items: DailyKpiCheckoutCheckItem[] })
   | (DailyKpiDrilldownBase & { type: 'maintenance'; items: DailyKpiMaintenanceItem[] });
 

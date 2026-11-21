@@ -1589,18 +1589,20 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
                       </svg>
                     </button>
-                    <button
-                      type="button"
-                      disabled={hardDeletingId === t.id}
-                      onClick={() => handleHardDeleteTransaction(t, posDisplayNo)}
-                      title={`Hapus Permanen Transaksi (${posDisplayNo})`}
-                      aria-label={`Hapus Permanen Transaksi ${posDisplayNo}`}
-                      className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                      </svg>
-                    </button>
+                    {operationalStatus === 'BATAL' && (
+                      <button
+                        type="button"
+                        disabled={hardDeletingId === t.id}
+                        onClick={() => handleHardDeleteTransaction(t, posDisplayNo)}
+                        title={`Hapus Permanen Transaksi (${posDisplayNo})`}
+                        aria-label={`Hapus Permanen Transaksi ${posDisplayNo}`}
+                        className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 );
               })()}
@@ -1830,18 +1832,20 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
                     </svg>
                   </button>
-                  <button
-                    type="button"
-                    disabled={hardDeletingId === t.id}
-                    onClick={() => handleHardDeleteTransaction(t, group.bid)}
-                    title={`Hapus Permanen Booking (${group.bid})`}
-                    aria-label={`Hapus Permanen Booking ${group.bid}`}
-                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                  >
-                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                    </svg>
-                  </button>
+                  {operationalStatus === 'BATAL' && (
+                    <button
+                      type="button"
+                      disabled={hardDeletingId === t.id}
+                      onClick={() => handleHardDeleteTransaction(t, group.bid)}
+                      title={`Hapus Permanen Booking (${group.bid})`}
+                      aria-label={`Hapus Permanen Booking ${group.bid}`}
+                      className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                      </svg>
+                    </button>
+                  )}
                 </div>
               );
             })()}
@@ -3699,17 +3703,19 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                     Void
                                   </button>
                                 )}
-                                <button
-                                  type="button"
-                                  disabled={hardDeletingId === t.id}
-                                  onClick={() => handleHardDeleteTransaction(t)}
-                                  title={`Hapus Permanen (${t.transaction_no})`}
-                                  className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                                >
-                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                  </svg>
-                                </button>
+                                {operationalStatus === 'BATAL' && (
+                                  <button
+                                    type="button"
+                                    disabled={hardDeletingId === t.id}
+                                    onClick={() => handleHardDeleteTransaction(t)}
+                                    title={`Hapus Permanen (${t.transaction_no})`}
+                                    className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                                  >
+                                    <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                    </svg>
+                                  </button>
+                                )}
                               </div>
                             </td>
                           </tr>
@@ -3936,17 +3942,19 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 Void
                               </button>
                             )}
-                            <button
-                              type="button"
-                              disabled={hardDeletingId === t.id}
-                              onClick={() => handleHardDeleteTransaction(t)}
-                              title={`Hapus Permanen (${t.transaction_no})`}
-                              className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
+                            {operationalStatus === 'BATAL' && (
+                              <button
+                                type="button"
+                                disabled={hardDeletingId === t.id}
+                                onClick={() => handleHardDeleteTransaction(t)}
+                                title={`Hapus Permanen (${t.transaction_no})`}
+                                className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -4018,17 +4026,19 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             >
                               Detail
                             </button>
-                            <button
-                              type="button"
-                              disabled={hardDeletingId === t.id}
-                              onClick={() => handleHardDeleteTransaction(t, group.bid)}
-                              title={`Hapus Permanen Booking (${group.bid})`}
-                              className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                            >
-                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                              </svg>
-                            </button>
+                            {operationalStatus === 'BATAL' && (
+                              <button
+                                type="button"
+                                disabled={hardDeletingId === t.id}
+                                onClick={() => handleHardDeleteTransaction(t, group.bid)}
+                                title={`Hapus Permanen Booking (${group.bid})`}
+                                className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                              >
+                                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                </svg>
+                              </button>
+                            )}
                           </div>
                         </td>
                       </tr>
@@ -4129,17 +4139,19 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                               Void
                             </button>
                           )}
-                          <button
-                            type="button"
-                            disabled={hardDeletingId === t.id}
-                            onClick={() => handleHardDeleteTransaction(t, getPosTransactionDisplayNo(t))}
-                            title={`Hapus Permanen (${getPosTransactionDisplayNo(t)})`}
-                            className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
+                          {operationalStatus === 'BATAL' && (
+                            <button
+                              type="button"
+                              disabled={hardDeletingId === t.id}
+                              onClick={() => handleHardDeleteTransaction(t, getPosTransactionDisplayNo(t))}
+                              title={`Hapus Permanen (${getPosTransactionDisplayNo(t)})`}
+                              className="w-7 h-7 inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 text-red-600 hover:bg-red-100 transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                              </svg>
+                            </button>
+                          )}
                         </div>
                       </td>
                     </tr>
@@ -4545,18 +4557,22 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                     </button>
                   </>
                 )}
-                <div className="my-1 border-t border-slate-200" role="separator" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    closePurchaseActionMenu();
-                    void handleHardDeleteTransaction(tx);
-                  }}
-                  className="w-full px-3.5 py-2 text-left font-semibold text-red-700 hover:bg-red-50 flex items-center justify-between cursor-pointer"
-                >
-                  <span>Hapus Permanen (Hard Delete)</span>
-                </button>
+                {operationalStatus === 'BATAL' && (
+                  <>
+                    <div className="my-1 border-t border-slate-200" role="separator" />
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        closePurchaseActionMenu();
+                        void handleHardDeleteTransaction(tx);
+                      }}
+                      className="w-full px-3.5 py-2 text-left font-semibold text-red-700 hover:bg-red-50 flex items-center justify-between cursor-pointer"
+                    >
+                      <span>Hapus Permanen (Hard Delete)</span>
+                    </button>
+                  </>
+                )}
               </>
             );
           })()}

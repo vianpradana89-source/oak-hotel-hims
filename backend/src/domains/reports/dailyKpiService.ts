@@ -21,6 +21,7 @@ export const DAILY_KPI_DRILLDOWN_TYPES = [
   'checkout',
   'dirty',
   'vacant_clean',
+  'available_rooms',
   'checkout_check',
   'maintenance',
 ] as const;
@@ -54,6 +55,7 @@ export interface DailyKpiResult {
   rooms: {
     dirty: number;
     vacant_clean: number;
+    available: number;
     maintenance_ooo_oos: number;
   };
   checkout_check: { pending: number };
@@ -131,6 +133,15 @@ interface DailyKpiDrilldownBase {
   count: number;
 }
 
+export interface DailyKpiAvailableRoomTypeSummary {
+  room_type_id: number | null;
+  room_type_name: string;
+  available_count: number;
+  clean_count: number;
+  dirty_count: number;
+  rooms: DailyKpiRoomItem[];
+}
+
 export type DailyKpiDrilldownResult =
   | (DailyKpiDrilldownBase & { type: 'occupancy'; items: DailyKpiStayItem[] })
   | (DailyKpiDrilldownBase & {
@@ -140,9 +151,19 @@ export type DailyKpiDrilldownResult =
       rooms: number;
     })
   | (DailyKpiDrilldownBase & { type: 'checkin'; items: DailyKpiStayItem[] })
-  | (DailyKpiDrilldownBase & { type: 'checkout'; items: DailyKpiStayItem[] })
+  | (DailyKpiDrilldownBase & {
+      type: 'checkout';
+      items: DailyKpiStayItem[];
+      checkout_check_items?: DailyKpiCheckoutCheckItem[];
+      checkout_check_pending?: number;
+    })
   | (DailyKpiDrilldownBase & { type: 'dirty'; items: DailyKpiRoomItem[] })
   | (DailyKpiDrilldownBase & { type: 'vacant_clean'; items: DailyKpiRoomItem[] })
+  | (DailyKpiDrilldownBase & {
+      type: 'available_rooms';
+      items: DailyKpiRoomItem[];
+      by_room_type: DailyKpiAvailableRoomTypeSummary[];
+    })
   | (DailyKpiDrilldownBase & { type: 'checkout_check'; items: DailyKpiCheckoutCheckItem[] })
   | (DailyKpiDrilldownBase & { type: 'maintenance'; items: DailyKpiMaintenanceItem[] });
 
@@ -430,6 +451,23 @@ export async function getDailyKpis(
       SELECT COUNT(*)::int AS pending
       FROM housekeeping_tasks t
       WHERE ${CHECKOUT_PENDING_PREDICATE('$4')}
+    ),
+    occupied_room_ids AS (
+      SELECT DISTINCT r.room_id AS id
+      FROM reservations r
+      JOIN bookings b ON b.id = r.booking_id
+      WHERE ${OCCUPANCY_PREDICATE}
+        AND r.room_id IS NOT NULL
+      UNION
+      SELECT ar.id
+      FROM active_rooms ar
+      WHERE UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+    ),
+    available_rooms AS (
+      SELECT COUNT(*)::int AS available
+      FROM active_rooms ar
+      WHERE ar.id NOT IN (SELECT id FROM blocked_rooms WHERE id IS NOT NULL)
+        AND ar.id NOT IN (SELECT id FROM occupied_room_ids WHERE id IS NOT NULL)
     )
     SELECT
       (SELECT COUNT(*)::int FROM active_rooms) AS gross_active,
@@ -441,6 +479,7 @@ export async function getDailyKpis(
       (SELECT rooms FROM check_out_today) AS check_out_rooms,
       (SELECT COUNT(*)::int FROM active_rooms WHERE ${DIRTY_STATUS_PREDICATE}) AS dirty,
       (SELECT COUNT(*)::int FROM active_rooms WHERE ${VACANT_CLEAN_STATUS_PREDICATE}) AS vacant_clean,
+      (SELECT available FROM available_rooms) AS available_rooms,
       (SELECT pending FROM checkout_pending) AS checkout_pending
     `,
     kpiParams(propertyId, businessDate, timezone)
@@ -451,6 +490,7 @@ export async function getDailyKpis(
   const oooOosRooms = toCount(row.ooo_oos_rooms);
   const grossActive = toCount(row.gross_active);
   const sellableRooms = Math.max(0, grossActive - oooOosRooms);
+  const availableRooms = toCount(row.available_rooms);
 
   return {
     property_id: propertyId,
@@ -471,6 +511,7 @@ export async function getDailyKpis(
     rooms: {
       dirty: toCount(row.dirty),
       vacant_clean: toCount(row.vacant_clean),
+      available: availableRooms,
       maintenance_ooo_oos: oooOosRooms,
     },
     checkout_check: { pending: toCount(row.checkout_pending) },
@@ -588,22 +629,137 @@ export async function getDailyKpiDrilldown(
   }
 
   if (typeValue === 'checkout') {
-    const result = await client.query(
-      `
-      SELECT ${STAY_SELECT}, r.checked_in_at, r.checked_out_at
-      ${STAY_JOINS}
-      WHERE ${CHECK_OUT_TODAY_PREDICATE(checkedOutHotelDate)}
-      ORDER BY r.checked_out_at, r.id
-      `,
-      tzParams
-    );
+    const [result, chkResult] = await Promise.all([
+      client.query(
+        `
+        SELECT ${STAY_SELECT}, r.checked_in_at, r.checked_out_at
+        ${STAY_JOINS}
+        WHERE ${CHECK_OUT_TODAY_PREDICATE(checkedOutHotelDate)}
+        ORDER BY r.checked_out_at, r.id
+        `,
+        tzParams
+      ),
+      client.query(
+        `
+        SELECT
+          t.id AS task_id,
+          t.task_number,
+          t.status,
+          t.room_id,
+          rm.room_number,
+          rt.name AS room_type_name,
+          t.reservation_id,
+          COALESCE(res.guest_name, b.guest_name_snapshot) AS guest_name,
+          COALESCE(b.bid, res.booking_number) AS bid,
+          t.created_at
+        FROM housekeeping_tasks t
+        LEFT JOIN rooms rm ON rm.id = t.room_id
+        LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+        LEFT JOIN reservations res ON res.id = t.reservation_id
+        LEFT JOIN bookings b ON b.id = res.booking_id
+        WHERE ${CHECKOUT_PENDING_PREDICATE('$2')}
+        ORDER BY t.created_at, t.id
+        `,
+        [propertyId, CHECKOUT_ROOM_CHECK_PENDING_STATUSES]
+      ),
+    ]);
     const items = result.rows.map((row) =>
       mapStayItem(row, {
         checked_in_at: asIso(row.checked_in_at),
         checked_out_at: asIso(row.checked_out_at),
       })
     );
-    return { ...base, type: 'checkout', count: items.length, items };
+    const checkoutCheckItems: DailyKpiCheckoutCheckItem[] = chkResult.rows.map((row) => ({
+      task_id: Number(row.task_id),
+      task_number: asText(row.task_number),
+      status: asText(row.status),
+      room_id: toNullableInt(row.room_id),
+      room_number: asText(row.room_number),
+      room_type_name: asText(row.room_type_name),
+      reservation_id: toNullableInt(row.reservation_id),
+      guest_name: asText(row.guest_name),
+      bid: asText(row.bid),
+      created_at: asIso(row.created_at),
+    }));
+    return {
+      ...base,
+      type: 'checkout',
+      count: items.length,
+      items,
+      checkout_check_items: checkoutCheckItems,
+      checkout_check_pending: checkoutCheckItems.length,
+    };
+  }
+
+  if (typeValue === 'available_rooms') {
+    const result = await client.query(
+      `
+      WITH ${ACTIVE_ROOMS_CTE},
+      ${BLOCKED_ROOMS_CTE},
+      occupied_room_ids AS (
+        SELECT DISTINCT r.room_id AS id
+        FROM reservations r
+        JOIN bookings b ON b.id = r.booking_id
+        WHERE ${OCCUPANCY_PREDICATE}
+          AND r.room_id IS NOT NULL
+        UNION
+        SELECT ar.id
+        FROM active_rooms ar
+        WHERE UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+      )
+      SELECT
+        ar.id AS room_id,
+        rm.room_number,
+        rm.room_type_id,
+        COALESCE(rt.name, 'Lainnya') AS room_type_name,
+        COALESCE(rt.display_order, 9999) AS display_order,
+        ar.status
+      FROM active_rooms ar
+      JOIN rooms rm ON rm.id = ar.id
+      LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+      WHERE ar.id NOT IN (SELECT id FROM blocked_rooms WHERE id IS NOT NULL)
+        AND ar.id NOT IN (SELECT id FROM occupied_room_ids WHERE id IS NOT NULL)
+      ORDER BY COALESCE(rt.display_order, 9999) ASC, COALESCE(rt.name, 'Lainnya') ASC, rm.room_number ASC, ar.id ASC
+      `,
+      dateParams
+    );
+
+    const items: DailyKpiRoomItem[] = result.rows.map(mapRoomItem);
+    const typeMap = new Map<string, DailyKpiAvailableRoomTypeSummary>();
+
+    for (const row of result.rows) {
+      const rtId = toNullableInt(row.room_type_id);
+      const rtName = asText(row.room_type_name) || 'Lainnya';
+      const key = `${rtId ?? 'null'}:${rtName}`;
+      if (!typeMap.has(key)) {
+        typeMap.set(key, {
+          room_type_id: rtId,
+          room_type_name: rtName,
+          available_count: 0,
+          clean_count: 0,
+          dirty_count: 0,
+          rooms: [],
+        });
+      }
+      const group = typeMap.get(key)!;
+      const roomItem = mapRoomItem(row);
+      const st = String(row.status || '').toUpperCase();
+      group.available_count += 1;
+      if (st === 'VACANT_CLEAN' || st === 'INSPECTED') {
+        group.clean_count += 1;
+      } else {
+        group.dirty_count += 1;
+      }
+      group.rooms.push(roomItem);
+    }
+
+    return {
+      ...base,
+      type: 'available_rooms',
+      count: items.length,
+      items,
+      by_room_type: Array.from(typeMap.values()),
+    };
   }
 
   if (typeValue === 'dirty' || typeValue === 'vacant_clean') {
