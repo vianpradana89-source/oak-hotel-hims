@@ -583,6 +583,26 @@ export async function softDeleteTransactionApi(
   });
 }
 
+export async function hardDeleteTransactionApi(
+  id: number | string,
+  payload: {
+    property_id: number;
+    actor_name?: string;
+    actor_user_id?: string | null;
+  }
+): Promise<{
+  deleted_transaction_id: number;
+  deleted_booking_id: number | null;
+  deleted_reservation_ids: number[];
+  deleted_pos_order_ids: number[];
+}> {
+  return await fetchJson(`${API_BASE}/${id}/hard-delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 export async function updatePurchaseLifecycleApi(
   id: number | string,
   data: {

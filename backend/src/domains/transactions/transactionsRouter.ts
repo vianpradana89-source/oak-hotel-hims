@@ -21,6 +21,7 @@ import {
   toggleCustomCategory,
   voidTransaction,
   softDeleteTransaction,
+  hardDeleteTransaction,
   reconcileHistoricalTransactions,
   addTransactionAttachment,
   deleteTransactionAttachment,
@@ -997,6 +998,42 @@ export function createTransactionsRouter(pool: Pool): Router {
       });
     }
   });
+
+  /**
+   * POST / DELETE /api/transactions/:id/hard-delete
+   * Permanently deletes a transaction (and its underlying booking/reservation/POS/folio records)
+   * so it disappears completely from Pusat Transaksi, Kalender, and Laporan.
+   */
+  const handleHardDelete = async (req: Request, res: Response) => {
+    try {
+      const propertyId = Number(req.body?.property_id || req.query?.property_id || (req as any).propertyId);
+      if (!propertyId || Number.isNaN(propertyId) || propertyId <= 0) {
+        return res.status(400).json({ success: false, error: 'property_id wajib diisi dan harus valid' });
+      }
+      const id = req.params.id;
+      const actorName = req.body?.actor_name || req.query?.actor_name || (req as any).user?.full_name || (req as any).user?.name || 'Staff';
+      const actorUserId = req.body?.actor_user_id || req.query?.actor_user_id || (req as any).user?.id || null;
+
+      const result = await hardDeleteTransaction(pool, propertyId, id, {
+        actorName: String(actorName),
+        actorUserId,
+      });
+
+      return res.json({
+        success: true,
+        message: 'Transaksi berhasil dihapus permanen',
+        data: result,
+      });
+    } catch (err: any) {
+      return res.status(err.statusCode || 500).json({
+        success: false,
+        code: err.code || undefined,
+        error: err.message || 'Gagal menghapus transaksi secara permanen',
+      });
+    }
+  };
+  router.post('/:id/hard-delete', handleHardDelete);
+  router.delete('/:id/hard-delete', handleHardDelete);
 
   /**
    * POST /api/transactions/reconcile

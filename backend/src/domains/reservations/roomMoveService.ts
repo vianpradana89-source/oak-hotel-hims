@@ -447,11 +447,13 @@ export async function releaseReservationInventoryForCheckout(client: PoolClient,
       );
       const trueActive = Math.max(0, Number(activeCountRes.rows[0]?.active_cnt || 0));
       if (primaryRow) {
-        const clampedActive = Math.min(primaryRow.totalRooms, trueActive);
-        const delta = clampedActive - primaryRow.reservedQty;
-        if (delta !== 0) {
-          await mutateCanonicalAvailabilityRow(client, primaryRow, delta);
-        }
+        const clampedActive = Math.min(Math.max(0, primaryRow.totalRooms), trueActive);
+        await client.query(
+          `UPDATE availability_dates
+              SET reserved_qty = $2
+            WHERE id = $1`,
+          [primaryRow.id, clampedActive]
+        );
       }
     }
   }

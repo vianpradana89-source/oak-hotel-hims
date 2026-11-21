@@ -802,8 +802,8 @@ function ReceiveDepositModal({ isOpen, onClose, reservationId, propertyId, guara
         scope: guaranteeScope,
         purpose,
       });
-      setJustReceived({ purpose, amount: raw });
       onSuccess();
+      handleClose();
     } catch (e: any) { setError(e.message || 'Gagal menerima deposit'); }
     finally { setBusy(false); }
   };

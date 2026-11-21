@@ -6394,6 +6394,426 @@ export async function softDeleteTransaction(
   }
 }
 
+/**
+ * Permanently deletes (hard-deletes) a transaction and all underlying booking/reservation/POS/folio records,
+ * while first restoring any Minibar stock, POS stock, Loyalty points, and room availability.
+ * Ensures the deleted record completely disappears from Pusat Transaksi, Kalender, and Laporan.
+ */
+export async function hardDeleteTransaction(
+  pool: Pool,
+  propertyId: number,
+  id: number | string,
+  options?: { actorName?: string; actorUserId?: string | number | null }
+): Promise<{ deleted_transaction_id: number; deleted_booking_id: number | null; deleted_reservation_ids: number[]; deleted_pos_order_ids: number[] }> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const txRes = await client.query(
+      `SELECT * FROM transactions WHERE id = $1 AND property_id = $2 FOR UPDATE`,
+      [id, propertyId]
+    );
+    if ((txRes.rowCount ?? 0) === 0) {
+      const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
+      err.statusCode = 404;
+      throw err;
+    }
+
+    const tx = txRes.rows[0];
+    const actorName = options?.actorName || 'Staff';
+    const actorUserId = options?.actorUserId ? String(options.actorUserId) : null;
+
+    const safeExec = async (sql: string, params: any[] = []) => {
+      await client.query('SAVEPOINT sp_hard_del');
+      try {
+        await client.query(sql, params);
+        await client.query('RELEASE SAVEPOINT sp_hard_del');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_hard_del');
+      }
+    };
+
+    const deletedReservationIds: number[] = [];
+    const deletedPosOrderIds: number[] = [];
+    let targetBookingId: number | null = tx.booking_id ? Number(tx.booking_id) : null;
+
+    if (!targetBookingId && tx.reservation_id) {
+      const rLookup = await client.query(
+        `SELECT booking_id FROM reservations WHERE id = $1`,
+        [Number(tx.reservation_id)]
+      );
+      if ((rLookup.rowCount ?? 0) > 0 && rLookup.rows[0].booking_id) {
+        targetBookingId = Number(rLookup.rows[0].booking_id);
+      }
+    }
+
+    if (targetBookingId || tx.reservation_id) {
+      // Collect all reservations belonging to this booking (or single reservation)
+      const resRowsResult = targetBookingId
+        ? await client.query(
+            `SELECT r.id, r.status, r.stay_type, r.room_id, r.booked_room_type_id_snapshot,
+                    rm.room_type_id AS current_room_type_id,
+                    to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in_key,
+                    to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out_key
+               FROM reservations r
+               LEFT JOIN rooms rm ON rm.id = r.room_id
+              WHERE r.booking_id = $1
+              FOR UPDATE OF r`,
+            [targetBookingId]
+          )
+        : await client.query(
+            `SELECT r.id, r.status, r.stay_type, r.room_id, r.booked_room_type_id_snapshot,
+                    rm.room_type_id AS current_room_type_id,
+                    to_char(r.check_in::date, 'YYYY-MM-DD') AS check_in_key,
+                    to_char(r.check_out::date, 'YYYY-MM-DD') AS check_out_key
+               FROM reservations r
+               LEFT JOIN rooms rm ON rm.id = r.room_id
+              WHERE r.id = $1
+              FOR UPDATE OF r`,
+            [Number(tx.reservation_id)]
+          );
+
+      const affectedRoomIds = new Set<number>();
+      const affectedRoomTypeRanges: Array<{ roomTypeId: number; checkIn: string; checkOut: string }> = [];
+
+      for (const r of resRowsResult.rows) {
+        const resId = Number(r.id);
+        deletedReservationIds.push(resId);
+        if (r.room_id) affectedRoomIds.add(Number(r.room_id));
+        const rtId = Number(r.current_room_type_id || r.booked_room_type_id_snapshot || 0);
+        if (rtId > 0 && r.check_in_key && r.check_out_key && r.check_in_key < r.check_out_key) {
+          affectedRoomTypeRanges.push({
+            roomTypeId: rtId,
+            checkIn: String(r.check_in_key),
+            checkOut: String(r.check_out_key),
+          });
+        }
+        if (
+          r.booked_room_type_id_snapshot &&
+          Number(r.booked_room_type_id_snapshot) !== rtId &&
+          r.check_in_key &&
+          r.check_out_key &&
+          r.check_in_key < r.check_out_key
+        ) {
+          affectedRoomTypeRanges.push({
+            roomTypeId: Number(r.booked_room_type_id_snapshot),
+            checkIn: String(r.check_in_key),
+            checkOut: String(r.check_out_key),
+          });
+        }
+      }
+
+      if (tx.reservation_id && !deletedReservationIds.includes(Number(tx.reservation_id))) {
+        deletedReservationIds.push(Number(tx.reservation_id));
+      }
+
+      // 1. Restore Minibar stock, POS stock, and Loyalty points for every reservation
+      for (const resId of deletedReservationIds) {
+        await restoreAllReservationEffectsOnCancelOrVoid({
+          client,
+          propertyId,
+          reservationId: resId,
+          actorUserId,
+          actorName,
+        });
+      }
+
+      // 2. Find and hard-delete any POS orders linked to these reservations
+      if (deletedReservationIds.length > 0) {
+        const posRes = await client.query(
+          `SELECT id, status FROM pos_orders WHERE property_id = $1 AND reservation_id = ANY($2::int[])`,
+          [propertyId, deletedReservationIds]
+        );
+        for (const po of posRes.rows) {
+          const poId = Number(po.id);
+          deletedPosOrderIds.push(poId);
+          if (!['VOIDED', 'CANCELLED'].includes(String(po.status || '').toUpperCase())) {
+            await restoreStockForPosOrderVoid({
+              client,
+              propertyId,
+              orderId: poId,
+              actorUserId,
+              actorName,
+            });
+          }
+        }
+      }
+
+      if (deletedPosOrderIds.length > 0) {
+        await safeExec(`DELETE FROM pos_complimentary_usages WHERE pos_order_id = ANY($1::int[])`, [deletedPosOrderIds]);
+        await safeExec(`DELETE FROM pos_order_edit_requests WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
+        await safeExec(`DELETE FROM pos_settlements WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
+        await safeExec(`DELETE FROM pos_order_items WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
+        await safeExec(
+          `DELETE FROM transactions WHERE property_id = $1 AND source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($2::text[])`,
+          [propertyId, deletedPosOrderIds.map(String)]
+        );
+        await safeExec(`DELETE FROM pos_orders WHERE id = ANY($1::int[]) AND property_id = $2`, [deletedPosOrderIds, propertyId]);
+      }
+
+      // 3. Delete all child records of reservations & booking in FK order
+      if (deletedReservationIds.length > 0) {
+        await safeExec(
+          `DELETE FROM deposit_events
+            WHERE (reservation_id = ANY($1::int[]) OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)))
+              AND reversal_of_event_id IS NOT NULL`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM deposit_events
+            WHERE reservation_id = ANY($1::int[])
+               OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM identity_custody WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM payment_evidences
+            WHERE reservation_id = ANY($1::int[])
+               OR payment_transaction_id IN (
+                 SELECT id FROM payment_transactions
+                  WHERE reservation_id = ANY($1::int[])
+                     OR ($2::bigint IS NOT NULL AND booking_id = $2)
+               )`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM payment_allocations WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(`DELETE FROM reservation_complimentary_requests WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM reservation_special_requests WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM reservation_room_moves WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM reservation_nightly_rates WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM reservation_guests WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM availability_locks WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM housekeeping_findings WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM housekeeping_tasks WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(
+          `UPDATE payment_transactions SET reference_payment_id = NULL
+            WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `DELETE FROM payment_transactions WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+          [deletedReservationIds, targetBookingId]
+        );
+        await safeExec(
+          `UPDATE folio_entries SET reversal_of_entry_id = NULL WHERE reservation_id = ANY($1::int[])`,
+          [deletedReservationIds]
+        );
+        await safeExec(
+          `DELETE FROM folio_entries WHERE reservation_id = ANY($1::int[])`,
+          [deletedReservationIds]
+        );
+      }
+
+      if (targetBookingId) {
+        await safeExec(`DELETE FROM booking_change_requests WHERE booking_id = $1`, [targetBookingId]);
+        await safeExec(`DELETE FROM booking_create_idempotency WHERE booking_id = $1`, [targetBookingId]);
+      }
+
+      // 4. Delete all transactions linked to this booking, reservations, or target tx
+      await safeExec(
+        `UPDATE transactions
+            SET reversal_of_transaction_id = NULL
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND booking_id = $3)
+              OR (Cardinality($4::int[]) > 0 AND reservation_id = ANY($4::int[]))
+            )`,
+        [propertyId, Number(tx.id), targetBookingId, deletedReservationIds]
+      );
+      await client.query(
+        `DELETE FROM transactions
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND booking_id = $3)
+              OR (Cardinality($4::int[]) > 0 AND reservation_id = ANY($4::int[]))
+            )`,
+        [propertyId, Number(tx.id), targetBookingId, deletedReservationIds]
+      );
+
+      // 5. Delete reservations and booking
+      if (deletedReservationIds.length > 0) {
+        await client.query(`DELETE FROM reservations WHERE id = ANY($1::int[])`, [deletedReservationIds]);
+      }
+      if (targetBookingId) {
+        await safeExec(`DELETE FROM bookings WHERE id = $1 AND property_id = $2`, [targetBookingId, propertyId]);
+      }
+
+      // 6. Reconcile availability_dates for affected room types & date ranges
+      for (const rng of affectedRoomTypeRanges) {
+        await client.query(
+          `UPDATE availability_dates ad
+              SET reserved_qty = LEAST(
+                ad.total_rooms,
+                GREATEST(
+                  0,
+                  (
+                    SELECT COUNT(*)::int
+                      FROM reservations r
+                      LEFT JOIN rooms rm ON rm.id = r.room_id
+                     WHERE r.status IN ('BOOKED', 'CHECKED_IN')
+                       AND COALESCE(r.stay_type, 'OVERNIGHT') <> 'DAY_USE'
+                       AND COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) = ad.room_type_id
+                       AND r.check_in::date <= ad.date::date
+                       AND r.check_out::date > ad.date::date
+                  )
+                )
+              )
+            WHERE ad.room_type_id = $1
+              AND ad.date >= $2::date
+              AND ad.date < $3::date`,
+          [rng.roomTypeId, rng.checkIn, rng.checkOut]
+        );
+      }
+
+      // 7. Reset any vacated OCCUPIED_* room to VACANT_DIRTY if no active CHECKED_IN reservation remains
+      for (const roomId of affectedRoomIds) {
+        await client.query(
+          `UPDATE rooms rm
+              SET status = 'VACANT_DIRTY'
+            WHERE rm.id = $1
+              AND rm.property_id = $2
+              AND rm.status IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+              AND NOT EXISTS (
+                SELECT 1 FROM reservations r
+                 WHERE r.room_id = rm.id
+                   AND r.status = 'CHECKED_IN'
+              )`,
+          [roomId, propertyId]
+        );
+      }
+    } else if (tx.source_type === 'POS_ORDER' || tx.source_type === 'POS') {
+      const posOrderId = Number(tx.source_id);
+      if (Number.isInteger(posOrderId) && posOrderId > 0) {
+        deletedPosOrderIds.push(posOrderId);
+        await restoreStockForPosOrderVoid({
+          client,
+          propertyId,
+          orderId: posOrderId,
+          actorUserId,
+          actorName,
+        });
+        await safeExec(`DELETE FROM pos_complimentary_usages WHERE pos_order_id = $1`, [posOrderId]);
+        await safeExec(`DELETE FROM pos_order_edit_requests WHERE order_id = $1`, [posOrderId]);
+        await safeExec(`DELETE FROM pos_settlements WHERE order_id = $1`, [posOrderId]);
+        await safeExec(`DELETE FROM pos_order_items WHERE order_id = $1`, [posOrderId]);
+        await safeExec(`DELETE FROM folio_entries WHERE property_id = $1 AND source_type = 'POS_ORDER' AND source_id = $2`, [
+          propertyId,
+          String(posOrderId),
+        ]);
+        await safeExec(`DELETE FROM pos_orders WHERE id = $1 AND property_id = $2`, [posOrderId, propertyId]);
+      }
+
+      await safeExec(
+        `UPDATE transactions
+            SET reversal_of_transaction_id = NULL
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND id = $3)
+              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = $4)
+            )`,
+        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, String(tx.source_id || '')]
+      );
+      await client.query(
+        `DELETE FROM transactions
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND id = $3)
+              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = $4)
+            )`,
+        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, String(tx.source_id || '')]
+      );
+    } else {
+      // Standalone PURCHASE, EXPENSE, INCOME, or manual SALE
+      await safeExec(`DELETE FROM payment_transactions WHERE transaction_id = $1`, [Number(tx.id)]);
+      await safeExec(
+        `UPDATE transactions
+            SET reversal_of_transaction_id = NULL
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND id = $3)
+              OR ($4::text IS NOT NULL AND correction_group_id = $4)
+            )`,
+        [
+          propertyId,
+          Number(tx.id),
+          tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null,
+          tx.correction_group_id || null,
+        ]
+      );
+      await client.query(
+        `DELETE FROM transactions
+          WHERE property_id = $1
+            AND (
+              id = $2
+              OR reversal_of_transaction_id = $2
+              OR ($3::bigint IS NOT NULL AND id = $3)
+              OR ($4::text IS NOT NULL AND correction_group_id = $4)
+            )`,
+        [
+          propertyId,
+          Number(tx.id),
+          tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null,
+          tx.correction_group_id || null,
+        ]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO audit_logs (
+         module, action, entity, record_id, new_value, property_id
+       ) VALUES (
+         'TRANSACTIONS', 'TRANSACTION_HARD_DELETED', 'transactions', $1, $2, $3
+       )`,
+      [
+        String(tx.id),
+        JSON.stringify({
+          transaction_no: tx.transaction_no,
+          transaction_type: tx.transaction_type,
+          booking_id: targetBookingId,
+          deleted_reservation_ids: deletedReservationIds,
+          deleted_pos_order_ids: deletedPosOrderIds,
+          deleted_by: actorName,
+          deleted_by_user_id: actorUserId,
+        }),
+        propertyId,
+      ]
+    );
+
+    await client.query('COMMIT');
+    return {
+      deleted_transaction_id: Number(tx.id),
+      deleted_booking_id: targetBookingId,
+      deleted_reservation_ids: deletedReservationIds,
+      deleted_pos_order_ids: deletedPosOrderIds,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 
 // ===========================================================================
 // PURCHASE-2A2: Atomic Purchase Lifecycle Service

@@ -1,6 +1,33 @@
 import type { PoolClient } from 'pg';
 import { restoreStockForPosOrderVoid } from '../pos/stockInventoryService';
-import { deriveDepositBalance } from '../deposits/depositService';
+
+function computeDepositStatusFromEvents(events: Array<{ event_type: string; amount: string | number }>): string {
+  let received = 0;
+  let reversed = 0;
+  let applied = 0;
+  let unapplied = 0;
+  let refunded = 0;
+  for (const ev of events) {
+    const amt = Number(ev.amount) || 0;
+    switch (ev.event_type) {
+      case 'RECEIVED': received += amt; break;
+      case 'REVERSAL': reversed += amt; break;
+      case 'APPLY': applied += amt; break;
+      case 'UNAPPLY': unapplied += amt; break;
+      case 'REFUND': refunded += amt; break;
+    }
+  }
+  const effectiveReceived = received - reversed;
+  const netApplied = applied - unapplied;
+  const remaining = effectiveReceived - netApplied - refunded;
+  if (reversed >= received && received > 0) return 'REVERSED';
+  if (remaining > 0 && (netApplied > 0 || refunded > 0)) return 'PARTIALLY_USED';
+  if (remaining > 0) return 'RECEIVED';
+  if (remaining === 0 && refunded > 0 && netApplied === 0) return 'REFUNDED';
+  if (remaining === 0 && netApplied > 0 && refunded === 0) return 'APPLIED';
+  if (remaining === 0 && (netApplied > 0 || refunded > 0)) return 'REFUNDED';
+  return 'RECEIVED';
+}
 
 /**
  * Restores minibar stock (+qty to stock_balances & stock_movements) and
@@ -164,6 +191,18 @@ export async function restoreMinibarStockAndDeposit(params: {
     await client.query(
       `DELETE FROM deposit_events
         WHERE property_id = $1
+          AND reversal_of_event_id IN (
+            SELECT id FROM deposit_events
+             WHERE property_id = $1
+               AND folio_entry_id = $2
+               AND event_type = 'APPLY'
+          )`,
+      [propertyId, dfId]
+    );
+
+    await client.query(
+      `DELETE FROM deposit_events
+        WHERE property_id = $1
           AND folio_entry_id = $2
           AND event_type = 'APPLY'`,
       [propertyId, dfId]
@@ -182,10 +221,10 @@ export async function restoreMinibarStockAndDeposit(params: {
       `SELECT * FROM deposit_events WHERE deposit_id = $1 ORDER BY id ASC`,
       [depId]
     );
-    const nextBal = deriveDepositBalance(nextEvRes.rows);
+    const nextStatus = computeDepositStatusFromEvents(nextEvRes.rows);
     await client.query(
       `UPDATE deposits SET status = $1, updated_at = NOW() WHERE id = $2`,
-      [nextBal.status, depId]
+      [nextStatus, depId]
     );
   }
 
