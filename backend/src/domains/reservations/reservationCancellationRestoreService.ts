@@ -17,15 +17,18 @@ function computeDepositStatusFromEvents(events: Array<{ event_type: string; amou
       case 'REFUND': refunded += amt; break;
     }
   }
-  const effectiveReceived = received - reversed;
-  const netApplied = applied - unapplied;
-  const remaining = effectiveReceived - netApplied - refunded;
-  if (reversed >= received && received > 0) return 'REVERSED';
-  if (remaining > 0 && (netApplied > 0 || refunded > 0)) return 'PARTIALLY_USED';
-  if (remaining > 0) return 'RECEIVED';
-  if (remaining === 0 && refunded > 0 && netApplied === 0) return 'REFUNDED';
-  if (remaining === 0 && netApplied > 0 && refunded === 0) return 'APPLIED';
-  if (remaining === 0 && (netApplied > 0 || refunded > 0)) return 'REFUNDED';
+  const effectiveReceived = Math.max(0, received - reversed);
+  const netApplied = Math.max(0, applied - unapplied);
+  const remaining = Math.max(0, effectiveReceived - netApplied - refunded);
+  if (reversed > 0 && effectiveReceived === 0 && netApplied === 0 && refunded === 0) {
+    return 'CANCELLED';
+  }
+  if (remaining === 0 && (netApplied > 0 || refunded > 0)) {
+    return 'CLOSED';
+  }
+  if (remaining > 0 && remaining < effectiveReceived) {
+    return 'PARTIALLY_USED';
+  }
   return 'RECEIVED';
 }
 
@@ -195,7 +198,6 @@ export async function restoreMinibarStockAndDeposit(params: {
             SELECT id FROM deposit_events
              WHERE property_id = $1
                AND folio_entry_id = $2
-               AND event_type = 'APPLY'
           )`,
       [propertyId, dfId]
     );
@@ -203,13 +205,16 @@ export async function restoreMinibarStockAndDeposit(params: {
     await client.query(
       `DELETE FROM deposit_events
         WHERE property_id = $1
-          AND folio_entry_id = $2
-          AND event_type = 'APPLY'`,
+          AND folio_entry_id = $2`,
       [propertyId, dfId]
     );
   }
 
   if (depFolioIdsToDelete.length > 0) {
+    await client.query(
+      `UPDATE folio_entries SET reversal_of_entry_id = NULL WHERE reversal_of_entry_id = ANY($1::int[])`,
+      [depFolioIdsToDelete]
+    );
     await client.query(
       `DELETE FROM folio_entries WHERE id = ANY($1::int[])`,
       [depFolioIdsToDelete]

@@ -630,9 +630,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
   const handleBulkClearBatalSheet = async () => {
     if (isBulkHardDeleting || hardDeletingId !== null || operationalStatus !== 'BATAL') return;
 
-    // Collect unique primary transaction IDs (deduplicated per booking_id or standalone tx.id)
+    // Collect unique primary transaction IDs (deduplicated per booking_id, reservation_id, or standalone tx.id)
     const targetTxIds: Array<string | number> = [];
     const seenBookingIds = new Set<number>();
+    const seenReservationIds = new Set<number>();
     const seenTxIds = new Set<string>();
 
     const sourceList: TransactionRecord[] =
@@ -645,6 +646,11 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       if (bId > 0) {
         if (seenBookingIds.has(bId)) continue;
         seenBookingIds.add(bId);
+      }
+      const rId = Number(tx.reservation_id || 0);
+      if (rId > 0 && bId <= 0) {
+        if (seenReservationIds.has(rId)) continue;
+        seenReservationIds.add(rId);
       }
       const txKey = String(tx.id);
       if (seenTxIds.has(txKey)) continue;
@@ -661,6 +667,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
     setIsBulkHardDeleting(true);
     let failedCount = 0;
+    let lastErrorMsg = '';
     try {
       for (const txId of targetTxIds) {
         try {
@@ -669,15 +676,23 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
             actor_name: currentStaffName || 'Staff',
             actor_user_id: currentUserId || null,
           });
-        } catch (err) {
+        } catch (err: any) {
+          const msg = String(err?.message || '');
+          if (msg.toLowerCase().includes('tidak ditemukan') || err?.statusCode === 404) {
+            // Already deleted as part of parent booking/reservation hard-delete
+            continue;
+          }
           console.error(`Bulk hard delete failed for tx ${txId}:`, err);
           failedCount += 1;
+          lastErrorMsg = msg;
         }
       }
       await loadTransactions();
       void loadDailyCards();
       if (failedCount > 0) {
-        window.alert(`Selesai dengan ${failedCount} transaksi gagal dihapus. Silakan muat ulang atau cek kembali.`);
+        window.alert(
+          `Selesai dengan ${failedCount} transaksi gagal dihapus${lastErrorMsg ? ` (${lastErrorMsg})` : ''}. Silakan muat ulang atau cek kembali.`
+        );
       }
     } finally {
       setIsBulkHardDeleting(false);

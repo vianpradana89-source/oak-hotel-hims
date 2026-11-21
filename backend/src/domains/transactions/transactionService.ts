@@ -6414,9 +6414,13 @@ export async function hardDeleteTransaction(
       [id, propertyId]
     );
     if ((txRes.rowCount ?? 0) === 0) {
-      const err: any = new Error(`Transaksi #${id} tidak ditemukan`);
-      err.statusCode = 404;
-      throw err;
+      await client.query('COMMIT');
+      return {
+        deleted_transaction_id: Number(id) || 0,
+        deleted_booking_id: null,
+        deleted_reservation_ids: [],
+        deleted_pos_order_ids: [],
+      };
     }
 
     const tx = txRes.rows[0];
@@ -6430,6 +6434,16 @@ export async function hardDeleteTransaction(
         await client.query('RELEASE SAVEPOINT sp_hard_del');
       } catch {
         await client.query('ROLLBACK TO SAVEPOINT sp_hard_del');
+      }
+    };
+
+    const safeCall = async (fn: () => Promise<any>) => {
+      await client.query('SAVEPOINT sp_hard_call');
+      try {
+        await fn();
+        await client.query('RELEASE SAVEPOINT sp_hard_call');
+      } catch {
+        await client.query('ROLLBACK TO SAVEPOINT sp_hard_call');
       }
     };
 
@@ -6509,60 +6523,77 @@ export async function hardDeleteTransaction(
 
       // 1. Restore Minibar stock, POS stock, and Loyalty points for every reservation
       for (const resId of deletedReservationIds) {
-        await restoreAllReservationEffectsOnCancelOrVoid({
-          client,
-          propertyId,
-          reservationId: resId,
-          actorUserId,
-          actorName,
-        });
+        await safeCall(() =>
+          restoreAllReservationEffectsOnCancelOrVoid({
+            client,
+            propertyId,
+            reservationId: resId,
+            actorUserId,
+            actorName,
+          })
+        );
       }
 
       // 2. Find and hard-delete any POS orders linked to these reservations
       if (deletedReservationIds.length > 0) {
         const posRes = await client.query(
-          `SELECT id, status FROM pos_orders WHERE property_id = $1 AND reservation_id = ANY($2::int[])`,
-          [propertyId, deletedReservationIds]
+          `SELECT id, status FROM pos_orders WHERE reservation_id = ANY($1::int[])`,
+          [deletedReservationIds]
         );
         for (const po of posRes.rows) {
           const poId = Number(po.id);
           deletedPosOrderIds.push(poId);
           if (!['VOIDED', 'CANCELLED'].includes(String(po.status || '').toUpperCase())) {
-            await restoreStockForPosOrderVoid({
-              client,
-              propertyId,
-              orderId: poId,
-              actorUserId,
-              actorName,
-            });
+            await safeCall(() =>
+              restoreStockForPosOrderVoid({
+                client,
+                propertyId,
+                orderId: poId,
+                actorUserId,
+                actorName,
+              })
+            );
           }
         }
       }
 
       if (deletedPosOrderIds.length > 0) {
+        const posIdStrings = [
+          ...deletedPosOrderIds.map(String),
+          ...deletedPosOrderIds.map((idNum) => `REV-${idNum}`),
+        ];
         await safeExec(`DELETE FROM pos_complimentary_usages WHERE pos_order_id = ANY($1::int[])`, [deletedPosOrderIds]);
         await safeExec(`DELETE FROM pos_order_edit_requests WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
         await safeExec(`DELETE FROM pos_settlements WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
         await safeExec(`DELETE FROM pos_order_items WHERE order_id = ANY($1::int[])`, [deletedPosOrderIds]);
         await safeExec(
-          `DELETE FROM transactions WHERE property_id = $1 AND source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($2::text[])`,
-          [propertyId, deletedPosOrderIds.map(String)]
+          `UPDATE transactions SET reversal_of_transaction_id = NULL
+            WHERE property_id = $1 AND source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($2::text[])`,
+          [propertyId, posIdStrings]
         );
-        await safeExec(`DELETE FROM pos_orders WHERE id = ANY($1::int[]) AND property_id = $2`, [deletedPosOrderIds, propertyId]);
+        await safeExec(
+          `DELETE FROM transactions WHERE property_id = $1 AND source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($2::text[])`,
+          [propertyId, posIdStrings]
+        );
+        await safeExec(`DELETE FROM pos_orders WHERE id = ANY($1::int[])`, [deletedPosOrderIds]);
       }
 
       // 3. Delete all child records of reservations & booking in FK order
-      if (deletedReservationIds.length > 0) {
+      if (deletedReservationIds.length > 0 || targetBookingId !== null) {
         await safeExec(
-          `DELETE FROM deposit_events
-            WHERE (reservation_id = ANY($1::int[]) OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)))
-              AND reversal_of_event_id IS NOT NULL`,
+          `UPDATE deposit_events SET reversal_of_event_id = NULL
+            WHERE reservation_id = ANY($1::int[])
+               OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))
+               OR payment_transaction_id IN (SELECT id FROM payment_transactions WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))
+               OR folio_entry_id IN (SELECT id FROM folio_entries WHERE reservation_id = ANY($1::int[]))`,
           [deletedReservationIds, targetBookingId]
         );
         await safeExec(
           `DELETE FROM deposit_events
             WHERE reservation_id = ANY($1::int[])
-               OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))`,
+               OR deposit_id IN (SELECT id FROM deposits WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))
+               OR payment_transaction_id IN (SELECT id FROM payment_transactions WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2))
+               OR folio_entry_id IN (SELECT id FROM folio_entries WHERE reservation_id = ANY($1::int[]))`,
           [deletedReservationIds, targetBookingId]
         );
         await safeExec(
@@ -6587,6 +6618,7 @@ export async function hardDeleteTransaction(
           `DELETE FROM payment_allocations WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
           [deletedReservationIds, targetBookingId]
         );
+        await safeExec(`DELETE FROM guest_receivables WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
         await safeExec(`DELETE FROM reservation_complimentary_requests WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
         await safeExec(`DELETE FROM reservation_special_requests WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
         await safeExec(`DELETE FROM reservation_room_moves WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
@@ -6597,7 +6629,12 @@ export async function hardDeleteTransaction(
         await safeExec(`DELETE FROM housekeeping_tasks WHERE reservation_id = ANY($1::int[])`, [deletedReservationIds]);
         await safeExec(
           `UPDATE payment_transactions SET reference_payment_id = NULL
-            WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)`,
+            WHERE reservation_id = ANY($1::int[])
+               OR ($2::bigint IS NOT NULL AND booking_id = $2)
+               OR reference_payment_id IN (
+                 SELECT id FROM payment_transactions
+                  WHERE reservation_id = ANY($1::int[]) OR ($2::bigint IS NOT NULL AND booking_id = $2)
+               )`,
           [deletedReservationIds, targetBookingId]
         );
         await safeExec(
@@ -6605,11 +6642,17 @@ export async function hardDeleteTransaction(
           [deletedReservationIds, targetBookingId]
         );
         await safeExec(
-          `UPDATE folio_entries SET reversal_of_entry_id = NULL WHERE reservation_id = ANY($1::int[])`,
+          `UPDATE folio_entries SET reversal_of_entry_id = NULL
+            WHERE reservation_id = ANY($1::int[])
+               OR reversal_of_entry_id IN (SELECT id FROM folio_entries WHERE reservation_id = ANY($1::int[]))`,
           [deletedReservationIds]
         );
         await safeExec(
           `DELETE FROM folio_entries WHERE reservation_id = ANY($1::int[])`,
+          [deletedReservationIds]
+        );
+        await safeExec(
+          `UPDATE pos_orders SET reservation_id = NULL WHERE reservation_id = ANY($1::int[])`,
           [deletedReservationIds]
         );
       }
@@ -6617,6 +6660,7 @@ export async function hardDeleteTransaction(
       if (targetBookingId) {
         await safeExec(`DELETE FROM booking_change_requests WHERE booking_id = $1`, [targetBookingId]);
         await safeExec(`DELETE FROM booking_create_idempotency WHERE booking_id = $1`, [targetBookingId]);
+        await safeExec(`DELETE FROM booking_create_requests WHERE booking_id = $1`, [targetBookingId]);
       }
 
       // 4. Delete all transactions linked to this booking, reservations, or target tx
@@ -6629,6 +6673,15 @@ export async function hardDeleteTransaction(
               OR reversal_of_transaction_id = $2
               OR ($3::bigint IS NOT NULL AND booking_id = $3)
               OR (Cardinality($4::int[]) > 0 AND reservation_id = ANY($4::int[]))
+              OR reversal_of_transaction_id IN (
+                SELECT id FROM transactions
+                 WHERE property_id = $1
+                   AND (
+                     id = $2
+                     OR ($3::bigint IS NOT NULL AND booking_id = $3)
+                     OR (Cardinality($4::int[]) > 0 AND reservation_id = ANY($4::int[]))
+                   )
+              )
             )`,
         [propertyId, Number(tx.id), targetBookingId, deletedReservationIds]
       );
@@ -6646,7 +6699,7 @@ export async function hardDeleteTransaction(
 
       // 5. Delete reservations and booking
       if (deletedReservationIds.length > 0) {
-        await client.query(`DELETE FROM reservations WHERE id = ANY($1::int[])`, [deletedReservationIds]);
+        await safeExec(`DELETE FROM reservations WHERE id = ANY($1::int[])`, [deletedReservationIds]);
       }
       if (targetBookingId) {
         await safeExec(`DELETE FROM bookings WHERE id = $1 AND property_id = $2`, [targetBookingId, propertyId]);
@@ -6696,16 +6749,19 @@ export async function hardDeleteTransaction(
         );
       }
     } else if (tx.source_type === 'POS_ORDER' || tx.source_type === 'POS') {
-      const posOrderId = Number(tx.source_id);
+      const cleanPosSourceId = String(tx.source_id || '').replace(/^REV-/i, '').trim();
+      const posOrderId = Number(cleanPosSourceId);
       if (Number.isInteger(posOrderId) && posOrderId > 0) {
         deletedPosOrderIds.push(posOrderId);
-        await restoreStockForPosOrderVoid({
-          client,
-          propertyId,
-          orderId: posOrderId,
-          actorUserId,
-          actorName,
-        });
+        await safeCall(() =>
+          restoreStockForPosOrderVoid({
+            client,
+            propertyId,
+            orderId: posOrderId,
+            actorUserId,
+            actorName,
+          })
+        );
         await safeExec(`DELETE FROM pos_complimentary_usages WHERE pos_order_id = $1`, [posOrderId]);
         await safeExec(`DELETE FROM pos_order_edit_requests WHERE order_id = $1`, [posOrderId]);
         await safeExec(`DELETE FROM pos_settlements WHERE order_id = $1`, [posOrderId]);
@@ -6717,6 +6773,7 @@ export async function hardDeleteTransaction(
         await safeExec(`DELETE FROM pos_orders WHERE id = $1 AND property_id = $2`, [posOrderId, propertyId]);
       }
 
+      const posSourceIds = cleanPosSourceId ? [cleanPosSourceId, `REV-${cleanPosSourceId}`] : [String(tx.source_id || '')];
       await safeExec(
         `UPDATE transactions
             SET reversal_of_transaction_id = NULL
@@ -6725,9 +6782,9 @@ export async function hardDeleteTransaction(
               id = $2
               OR reversal_of_transaction_id = $2
               OR ($3::bigint IS NOT NULL AND id = $3)
-              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = $4)
+              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($4::text[]))
             )`,
-        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, String(tx.source_id || '')]
+        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, posSourceIds]
       );
       await client.query(
         `DELETE FROM transactions
@@ -6736,9 +6793,9 @@ export async function hardDeleteTransaction(
               id = $2
               OR reversal_of_transaction_id = $2
               OR ($3::bigint IS NOT NULL AND id = $3)
-              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = $4)
+              OR (source_type IN ('POS', 'POS_ORDER') AND source_id = ANY($4::text[]))
             )`,
-        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, String(tx.source_id || '')]
+        [propertyId, Number(tx.id), tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null, posSourceIds]
       );
     } else {
       // Standalone PURCHASE, EXPENSE, INCOME, or manual SALE
