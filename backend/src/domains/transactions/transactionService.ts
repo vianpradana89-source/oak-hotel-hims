@@ -54,6 +54,11 @@ import {
 } from './bookingBidGrouping';
 import { presentedListKey, queryPresentedPage } from './transactionListQuery';
 import { explicitPosOrderIdFromFolioEntry, shouldSkipFolioKeyedPosSale } from './saleSourceIdentity';
+import {
+  restoreAllReservationEffectsOnCancelOrVoid,
+  restoreMinibarStockAndDeposit,
+} from '../reservations/reservationCancellationRestoreService';
+import { restoreStockForPosOrderVoid } from '../pos/stockInventoryService';
 import { generatePurchaseDescription } from './purchaseSummary';
 export { generatePurchaseDescription } from './purchaseSummary';
 import {
@@ -4221,12 +4226,34 @@ export async function voidTransaction(
       throw err;
     }
 
-    const tx = txRes.rows[0];
+    let tx = txRes.rows[0];
 
     if (tx.transaction_status === 'VOIDED' || tx.transaction_status === 'REVERSED') {
-      const err: any = new Error(`Transaksi #${tx.transaction_no} sudah dalam status ${tx.transaction_status} dan tidak dapat dibatalkan lagi.`);
-      err.statusCode = 400;
-      throw err;
+      if (tx.booking_id && String(tx.transaction_type || '').toUpperCase() === 'SALE') {
+        const activeSibRes = await client.query(
+          `SELECT * FROM transactions
+            WHERE property_id = $1
+              AND booking_id = $2
+              AND transaction_type = 'SALE'
+              AND deleted_at IS NULL
+              AND COALESCE(transaction_status, 'POSTED') NOT IN ('VOIDED', 'REVERSED', 'CANCELLED')
+            ORDER BY id ASC
+            LIMIT 1
+            FOR UPDATE`,
+          [propertyId, tx.booking_id]
+        );
+        if ((activeSibRes.rowCount ?? 0) > 0) {
+          tx = activeSibRes.rows[0];
+        } else {
+          const err: any = new Error(`Transaksi #${tx.transaction_no} sudah dalam status ${tx.transaction_status} dan tidak dapat dibatalkan lagi.`);
+          err.statusCode = 400;
+          throw err;
+        }
+      } else {
+        const err: any = new Error(`Transaksi #${tx.transaction_no} sudah dalam status ${tx.transaction_status} dan tidak dapat dibatalkan lagi.`);
+        err.statusCode = 400;
+        throw err;
+      }
     }
 
     const txDate = getHotelDateToday();
@@ -4380,6 +4407,33 @@ export async function voidTransaction(
     if (tx.source_type === 'POS_ORDER' || tx.source_type === 'POS') {
       const posOrderId = Number(tx.source_id);
       if (Number.isInteger(posOrderId) && posOrderId > 0) {
+        await restoreStockForPosOrderVoid({
+          client,
+          propertyId,
+          orderId: posOrderId,
+          actorUserId: options.actorUserId || null,
+          actorName: options.actorName || 'Staff',
+        });
+        await client.query(
+          `UPDATE pos_orders
+              SET status = 'CANCELLED',
+                  updated_at = NOW()
+            WHERE id = $1 AND property_id = $2`,
+          [posOrderId, propertyId]
+        );
+        await client.query(
+          `UPDATE folio_entries
+              SET is_voided = TRUE,
+                  status = 'VOIDED',
+                  voided_at = NOW(),
+                  voided_by = $3,
+                  void_reason = 'POS Order dibatalkan dari Pusat Transaksi'
+            WHERE property_id = $1
+              AND source_type = 'POS_ORDER'
+              AND source_id = $2
+              AND COALESCE(is_voided, FALSE) = FALSE`,
+          [propertyId, String(posOrderId), options.actorName || 'Staff']
+        );
         await client.query(
           `UPDATE pos_complimentary_usages
               SET status = 'CANCELLED'
@@ -4388,6 +4442,34 @@ export async function voidTransaction(
               AND status = 'ACTIVE'`,
           [posOrderId, propertyId]
         );
+      }
+    } else if (
+      String(tx.transaction_type || '').toUpperCase() === 'SALE' &&
+      (tx.booking_id || tx.reservation_id)
+    ) {
+      const targetResIds = new Set<number>();
+      if (Number.isInteger(Number(tx.reservation_id)) && Number(tx.reservation_id) > 0) {
+        targetResIds.add(Number(tx.reservation_id));
+      }
+      if (tx.booking_id) {
+        const resChildren = await client.query(
+          `SELECT id FROM reservations WHERE booking_id = $1`,
+          [tx.booking_id]
+        );
+        for (const r of resChildren.rows) {
+          if (Number.isInteger(Number(r.id)) && Number(r.id) > 0) {
+            targetResIds.add(Number(r.id));
+          }
+        }
+      }
+      for (const resId of targetResIds) {
+        await restoreAllReservationEffectsOnCancelOrVoid({
+          client,
+          propertyId,
+          reservationId: resId,
+          actorUserId: options.actorUserId || null,
+          actorName: options.actorName || 'Staff',
+        });
       }
     }
 

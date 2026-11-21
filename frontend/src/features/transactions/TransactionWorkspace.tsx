@@ -1742,8 +1742,8 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <td className="py-2.5 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
             {(() => {
               const canVoidGroup =
-                t.transaction_status === 'POSTED' &&
                 group.operational_sheet !== 'BATAL' &&
+                group.operational_sheet !== 'HAPUS' &&
                 !t.deleted_at;
               return (
                 <div className="inline-flex items-center justify-center gap-1">

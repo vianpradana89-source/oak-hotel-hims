@@ -628,6 +628,7 @@ export default function ReservationDetailDrawer({
   };
 
   // Load folio entries & balance
+  const [depositRefreshCounter, setDepositRefreshCounter] = useState(0);
   const loadFolio = async (customId?: number): Promise<any | null> => {
     const targetId = customId || detailData?.id || reservation?.id;
     if (!targetId || !activePropId) return null;
@@ -640,6 +641,7 @@ export default function ReservationDetailDrawer({
       );
       if (result.ok && result.data?.data) {
         setFolioData(result.data.data);
+        setDepositRefreshCounter((c) => c + 1);
         return result.data.data;
       }
       return null;
@@ -2974,6 +2976,7 @@ export default function ReservationDetailDrawer({
                 reservationStatus={data.status}
                 remainingBalance={remainingBalance}
                 isMultiRoomBooking={(data.sibling_reservations?.length ?? 0) > 1}
+                refreshTrigger={`${depositRefreshCounter}:${appliedDeposit}:${activeTab === 'deposit-jaminan' ? 1 : 0}`}
                 onRefresh={() => { loadFullReservation(data.id); loadFolio(data.id); auditLog.retry(); onRefresh(); }}
                 onGuaranteeStateChange={setGuaranteeState}
               />

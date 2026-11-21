@@ -22,6 +22,8 @@ import {
   type ReservationPaymentSource
 } from '../reservations/reservationFinancialCalculator';
 import { lockReservationFinancialState } from '../reservations/reservationLockService';
+import { restoreMinibarStockAndDeposit } from '../reservations/reservationCancellationRestoreService';
+import { restoreStockForPosOrderVoid } from '../pos/stockInventoryService';
 
 const VALID_CHARGE_TYPES = new Set<StayChargeType>([
   'EXTRA_BED',
@@ -1462,6 +1464,43 @@ export async function deleteFolioEntry(
            AND source_type IN ('ROOM_CHARGE', 'DAY_USE_ROOM')
            AND deleted_at IS NULL`,
         [redeemAmount, propertyId, targetReservationId]
+      );
+    }
+  }
+
+  // 6b. If this is a MINIBAR entry, restore minibar stock (+qty) and any linked minibar deposit apply
+  if (
+    entryTypeUpper === 'MINIBAR' ||
+    sourceTypeUpper === 'MINIBAR' ||
+    String(revalidatedEntry.revenue_category || '').toUpperCase() === 'MINIBAR_SALES'
+  ) {
+    const taskMatch = String(revalidatedEntry.source_id || '').match(/MB-TASK-(\d+)/i);
+    const taskId = taskMatch ? Number(taskMatch[1]) : null;
+    await restoreMinibarStockAndDeposit({
+      client,
+      propertyId,
+      reservationId: targetReservationId,
+      taskId: taskId && Number.isInteger(taskId) && taskId > 0 ? taskId : null,
+      actorName: 'Front Office',
+    });
+  }
+
+  // 6c. If this is a POS_ORDER entry, restore POS stock (+qty) and cancel the POS order
+  if (entryTypeUpper === 'FNB_POS' || entryTypeUpper === 'POS_ORDER' || sourceTypeUpper === 'POS_ORDER' || sourceTypeUpper === 'POS') {
+    const posOrderId = Number(revalidatedEntry.source_id);
+    if (Number.isInteger(posOrderId) && posOrderId > 0) {
+      await restoreStockForPosOrderVoid({
+        client,
+        propertyId,
+        orderId: posOrderId,
+        actorName: 'Front Office',
+      });
+      await client.query(
+        `UPDATE pos_orders
+            SET status = 'CANCELLED',
+                updated_at = NOW()
+          WHERE id = $1 AND property_id = $2`,
+        [posOrderId, propertyId]
       );
     }
   }

@@ -383,6 +383,7 @@ export async function releaseReservationInventoryForCheckout(client: PoolClient,
   const checkIn = hotelDateKey(reservation.check_in);
   const checkOut = hotelDateKey(reservation.check_out);
   const baseTypeId = Number(reservation.booked_room_type_id_snapshot || reservation.current_room_type_id);
+  const currentTypeId = Number(reservation.current_room_type_id || baseTypeId);
   const moves = await client.query(
     `SELECT to_room_type_id, effective_from_date FROM reservation_room_moves
      WHERE reservation_id=$1 ORDER BY effective_from_date, id`, [reservation.id]
@@ -394,7 +395,8 @@ export async function releaseReservationInventoryForCheckout(client: PoolClient,
     .sort((a, b) => a[0].localeCompare(b[0]));
   let activeTypeId = baseTypeId;
   const datesByType = new Map<number, string[]>();
-  for (const date of enumerateHotelDates(checkIn, checkOut)) {
+  const allDates = enumerateHotelDates(checkIn, checkOut);
+  for (const date of allDates) {
     // Apply the latest move that is effective on or before this date
     for (const [moveDate, typeId] of sortedMoves) {
       if (moveDate <= date) activeTypeId = typeId;
@@ -404,15 +406,53 @@ export async function releaseReservationInventoryForCheckout(client: PoolClient,
     dates.push(date);
     datesByType.set(activeTypeId, dates);
   }
-  const keys = [...datesByType.entries()].flatMap(([roomTypeId, dates]) => dates.map(date => ({ roomTypeId, date })));
+  const keySet = new Map<string, { roomTypeId: number; date: string }>();
+  for (const [roomTypeId, dates] of datesByType) {
+    for (const date of dates) {
+      keySet.set(canonicalAvailabilityKey(roomTypeId, date), { roomTypeId, date });
+      if (currentTypeId && currentTypeId !== roomTypeId) {
+        keySet.set(canonicalAvailabilityKey(currentTypeId, date), { roomTypeId: currentTypeId, date });
+      }
+    }
+  }
+  const keys = [...keySet.values()];
   const rows = await lockCanonicalAvailabilityRows(client, keys);
   for (const [roomTypeId, dates] of datesByType) {
     for (const date of dates) {
-      const row = rows.get(canonicalAvailabilityKey(roomTypeId, date))!;
-      if (row.reservedQty < 1) throw roomMoveError(`Inventori tidak konsisten saat checkout pada ${date}.`, 'INVENTORY_INTEGRITY_ERROR', 409);
+      const primaryRow = rows.get(canonicalAvailabilityKey(roomTypeId, date))!;
+      if (primaryRow && primaryRow.reservedQty >= 1) {
+        await mutateCanonicalAvailabilityRow(client, primaryRow, -1);
+        continue;
+      }
+      const fallbackRow =
+        currentTypeId && currentTypeId !== roomTypeId
+          ? rows.get(canonicalAvailabilityKey(currentTypeId, date))
+          : undefined;
+      if (fallbackRow && fallbackRow.reservedQty >= 1) {
+        await mutateCanonicalAvailabilityRow(client, fallbackRow, -1);
+        continue;
+      }
+      // Historical date where reserved_qty drifted to 0: reconcile from active BOOKED/CHECKED_IN stays
+      const activeCountRes = await client.query(
+        `SELECT COUNT(*)::int AS active_cnt
+         FROM reservations r
+         LEFT JOIN rooms rm ON rm.id = r.room_id
+         WHERE r.id <> $1
+           AND r.status IN ('BOOKED', 'CHECKED_IN')
+           AND COALESCE(r.stay_type, 'OVERNIGHT') <> 'DAY_USE'
+           AND COALESCE(rm.room_type_id, r.booked_room_type_id_snapshot) = $2
+           AND r.check_in::date <= $3::date
+           AND r.check_out::date > $3::date`,
+        [Number(reservation.id), roomTypeId, date]
+      );
+      const trueActive = Math.max(0, Number(activeCountRes.rows[0]?.active_cnt || 0));
+      if (primaryRow) {
+        const clampedActive = Math.min(primaryRow.totalRooms, trueActive);
+        const delta = clampedActive - primaryRow.reservedQty;
+        if (delta !== 0) {
+          await mutateCanonicalAvailabilityRow(client, primaryRow, delta);
+        }
+      }
     }
-  }
-  for (const [roomTypeId, dates] of datesByType) {
-    for (const date of dates) await mutateCanonicalAvailabilityRow(client, rows.get(canonicalAvailabilityKey(roomTypeId, date))!, -1);
   }
 }

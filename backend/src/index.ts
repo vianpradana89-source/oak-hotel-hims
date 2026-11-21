@@ -116,6 +116,7 @@ import { createPropertyRegistrationFormTermsRouter } from './domains/registratio
 import { createRegionMasterRouter } from './domains/regionMaster/regionMasterRouter';
 import { persistIdentityDocument } from './domains/identity/identityDocumentStorageService';
 import { addRoomToBooking } from './domains/reservations/addRoomService';
+import { restoreAllReservationEffectsOnCancelOrVoid } from './domains/reservations/reservationCancellationRestoreService';
 import {
   createPendingIdentityDocumentUpload,
   resolveAuthoritativeIdentityPropertyId
@@ -4466,6 +4467,13 @@ app.post('/api/bookings/:bid/cancel', async (req, res) => {
       }
 
       const cancelActor = req?.user?.username || req?.user?.full_name || (req?.user as any)?.name || req.body?.actor || undefined;
+      await restoreAllReservationEffectsOnCancelOrVoid({
+        client,
+        propertyId: Number(booking.property_id),
+        reservationId: Number(reservation.id),
+        actorUserId: (req?.user as any)?.id || null,
+        actorName: cancelActor || 'Staff',
+      });
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -5465,6 +5473,13 @@ app.post('/api/reservations/:id/cancel', async (req, res) => {
       lockedChildren[targetIndex] = cancelledReservation;
 
       const cancelResActor = resolveAuditActorName(req);
+      await restoreAllReservationEffectsOnCancelOrVoid({
+        client,
+        propertyId,
+        reservationId,
+        actorUserId: (req?.user as any)?.id || null,
+        actorName: cancelResActor || 'Staff',
+      });
       await client.query(
         `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)`,

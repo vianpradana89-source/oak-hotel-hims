@@ -107,6 +107,7 @@ interface Props {
   compact?: boolean;
   onRefresh?: () => void;
   isMultiRoomBooking?: boolean;
+  refreshTrigger?: number | string;
   /** Reports guarantee state (load status + unresolved flags) upward so the parent
    * drawer can surface close-warnings without re-fetching.
    * Emits `{status:'loading',...}` immediately on mount/switch, then the canonical
@@ -121,6 +122,7 @@ interface Props {
 export default function DepositGuaranteeSection({
   reservationId, propertyId, reservationStatus, remainingBalance, compact, onRefresh,
   isMultiRoomBooking = false,
+  refreshTrigger,
   onGuaranteeStateChange,
 }: Props) {
   const { user } = useAuth();
@@ -139,14 +141,16 @@ export default function DepositGuaranteeSection({
 
   const currentSourceKey = `${propertyId}:${reservationId}`;
 
-  const loadData = useCallback(async () => {
+  const loadData = useCallback(async (silent = false) => {
     const requestSourceKey = `${propertyId}:${reservationId}`;
     // Atomically claim this as the latest request. Stale responses from prior
     // requests can identify themselves by comparing their id against this ref.
     const requestId = ++loadRequestSeqRef.current;
-    setLoading(true);
+    if (!silent) {
+      setLoading(true);
+      setLoadedSourceKey(null); // invalidate before new fetch starts
+    }
     setLoadError(false);
-    setLoadedSourceKey(null); // invalidate before new fetch starts
     try {
       const [dep, cust] = await Promise.all([
         depositApi.list(reservationId, propertyId).catch(() => null),
@@ -156,7 +160,7 @@ export default function DepositGuaranteeSection({
       // this response has ZERO authority over current state (data OR error).
       if (!isCurrentGuaranteeRequest(requestId, loadRequestSeqRef.current)) return;
       if (dep === null || cust === null) {
-        setLoadError(true);
+        if (!silent) setLoadError(true);
         return;
       }
       setDeposits(dep);
@@ -169,7 +173,13 @@ export default function DepositGuaranteeSection({
     }
   }, [reservationId, propertyId]);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { loadData(false); }, [loadData]);
+
+  useEffect(() => {
+    if (refreshTrigger !== undefined && loadedSourceKey === currentSourceKey) {
+      void loadData(true);
+    }
+  }, [refreshTrigger, loadedSourceKey, currentSourceKey, loadData]);
 
   // ─── Scope-aware helpers (Blocker 1 & 2 fixes) ───
   // Deterministic actionable deposit: first non-group, active (non-CANCELLED/CLOSED) record.
