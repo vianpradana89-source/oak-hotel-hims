@@ -850,6 +850,14 @@ WITH net_charges AS (
     COALESCE(SUM(CASE
       WHEN fe.direction = 'DEBIT'
         AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+        AND (
+          COALESCE(fe.is_voided, FALSE) = FALSE
+          OR EXISTS (
+            SELECT 1 FROM folio_entries rev
+            WHERE rev.reversal_of_entry_id = fe.id
+              AND rev.direction = 'CREDIT'
+          )
+        )
       THEN fe.amount ELSE 0 END), 0) AS gross_charges,
     COALESCE(SUM(CASE
       WHEN fe.direction = 'CREDIT'
@@ -871,6 +879,14 @@ WITH net_charges AS (
     COUNT(CASE
       WHEN fe.direction = 'DEBIT'
         AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+        AND (
+          COALESCE(fe.is_voided, FALSE) = FALSE
+          OR EXISTS (
+            SELECT 1 FROM folio_entries rev
+            WHERE rev.reversal_of_entry_id = fe.id
+              AND rev.direction = 'CREDIT'
+          )
+        )
       THEN 1 END) AS charge_count
   FROM folio_entries fe
   WHERE fe.property_id = $1
@@ -946,6 +962,14 @@ hotel_collectible AS (
       WHEN fe.direction = 'DEBIT'
         AND fe.entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
         AND COALESCE(fe.source_type, fe.entry_type, '') <> 'ROOM_CHARGE'
+        AND (
+          COALESCE(fe.is_voided, FALSE) = FALSE
+          OR EXISTS (
+            SELECT 1 FROM folio_entries rev
+            WHERE rev.reversal_of_entry_id = fe.id
+              AND rev.direction = 'CREDIT'
+          )
+        )
       THEN fe.amount ELSE 0 END), 0) AS gross_collectible,
     COALESCE(SUM(CASE
       WHEN fe.direction = 'CREDIT'

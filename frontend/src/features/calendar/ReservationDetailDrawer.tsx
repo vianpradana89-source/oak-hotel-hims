@@ -1149,6 +1149,7 @@ export default function ReservationDetailDrawer({
   const {
     totalPrice,
     amountPaid,
+    appliedDeposit,
     remainingBalance,
     isOtaCollect,
     paymentCollectionBalance,
@@ -2587,8 +2588,13 @@ export default function ReservationDetailDrawer({
               <div className="p-3 bg-stone-50 rounded-lg">
                 <span className="text-stone-500 text-xs block mb-1">Sudah Dibayar</span>
                 <strong className="text-emerald-800 font-bold font-mono text-sm">
-                  Rp {amountPaid.toLocaleString('id-ID')}
+                  Rp {(amountPaid + appliedDeposit).toLocaleString('id-ID')}
                 </strong>
+                {appliedDeposit > 0 && (
+                  <span className="text-[10px] text-emerald-700 block mt-0.5 font-mono">
+                    Deposit: Rp {appliedDeposit.toLocaleString('id-ID')}
+                  </span>
+                )}
               </div>
               <div className="p-3 bg-stone-50 rounded-lg">
                 <span className="text-stone-500 text-xs block mb-1">Sisa Tagihan</span>
@@ -3072,7 +3078,16 @@ export default function ReservationDetailDrawer({
           </div>
 
           {/* Right: Operational Actions per Lifecycle State */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            {/* Room Number Badge next to Edit Reservasi */}
+            <span
+              className="px-2.5 py-1.5 bg-emerald-50 text-emerald-900 border border-emerald-200 font-bold text-xs rounded-xl whitespace-nowrap flex items-center gap-1"
+              title={data.room_type_name ? `${data.room_number || '-'} — ${data.room_type_name}` : undefined}
+            >
+              <span>🛏️</span>
+              <span>{data.room_number ? `Kamar ${data.room_number}` : 'Belum Ada Kamar'}</span>
+            </span>
+
             {/* BOOKED State Actions */}
             {isBooked && (
               <>

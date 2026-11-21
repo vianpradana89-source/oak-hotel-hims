@@ -192,7 +192,9 @@ export function buildLaporanSheets(opts: {
   ];
   if (analytics) {
     for (const r of analytics.room_sales || []) {
-      const totalBiaya = money(r.total_price);
+      const netTotal = money(r.total_price);
+      const disc = money(r.discount_amount);
+      const totalBiaya = r.is_complimentary ? netTotal : netTotal + disc;
       const nights = Math.max(1, Number(r.period_nights ?? r.nights) || 1);
       const isDayUse =
         String(r.stay_type || '').toUpperCase().includes('DAY') ||
@@ -210,8 +212,8 @@ export function buildLaporanSheets(opts: {
         isDayUse ? 'Day Use' : `${nights} malam`,
         totalBiaya,
         roomRate,
-        money(r.discount_amount),
-        money(r.amount_paid),
+        disc,
+        r.is_complimentary ? 0 : money(r.amount_paid) > 0 ? money(r.amount_paid) : netTotal,
         r.reservation_status,
         r.payment_method,
       ]);

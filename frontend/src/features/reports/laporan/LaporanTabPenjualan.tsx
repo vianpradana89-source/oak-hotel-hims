@@ -262,17 +262,17 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const unifiedRoomRows: UnifiedSaleRow[] = roomSales.map((r) => {
     const netTotal = Number(r.total_price) || 0;
     const disc = Number(r.discount_amount) || 0;
-    const grossTotal = netTotal;
+    const isComp = Boolean(r.is_complimentary);
+    const grossTotal = isComp ? netTotal : netTotal + disc;
     const paidRaw = Number(r.amount_paid) || 0;
     const remRaw = Number(r.remaining_balance) || 0;
-    const isComp = Boolean(r.is_complimentary);
     const isOtaCollect = String(r.payment_method || '').toUpperCase().includes('OTA COLLECT');
     const amountPaid = isComp
       ? 0
       : paidRaw > 0
-      ? Math.min(grossTotal, paidRaw)
+      ? Math.min(netTotal, paidRaw)
       : remRaw <= 0 || isOtaCollect
-      ? grossTotal
+      ? netTotal
       : 0;
     const nights = Number(r.period_nights ?? r.nights) || 1;
     const totalStayNights = Number(r.total_stay_nights ?? r.nights) || nights;
@@ -316,7 +316,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
       paymentEvidenceId: r.payment_evidence_id ?? null,
       hpp: 0,
       unitPrice: roomRate,
-      profit: isComp ? 0 : grossTotal,
+      profit: isComp ? 0 : netTotal,
       isComplimentary: isComp,
       estimatedCompValue: Number(r.estimated_comp_value) || 0,
     };

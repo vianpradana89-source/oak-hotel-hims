@@ -75,7 +75,17 @@ export async function calculateReservationFinancials(
   const folioDebitsRes = await client.query(
     `SELECT
        COALESCE(SUM(CASE
-         WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY') THEN amount
+         WHEN direction = 'DEBIT'
+          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+          AND (
+            COALESCE(is_voided, FALSE) = FALSE
+            OR EXISTS (
+              SELECT 1 FROM folio_entries rev
+              WHERE rev.reversal_of_entry_id = folio_entries.id
+                AND rev.direction = 'CREDIT'
+            )
+          )
+         THEN amount
          ELSE 0
        END), 0) AS gross_charges,
        COALESCE(SUM(CASE
@@ -94,7 +104,19 @@ export async function calculateReservationFinancials(
          THEN amount
          ELSE 0
        END), 0) AS commercial_discounts,
-       COUNT(CASE WHEN direction = 'DEBIT' AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY') THEN 1 END)::int as charge_count
+       COUNT(CASE
+         WHEN direction = 'DEBIT'
+          AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
+          AND (
+            COALESCE(is_voided, FALSE) = FALSE
+            OR EXISTS (
+              SELECT 1 FROM folio_entries rev
+              WHERE rev.reversal_of_entry_id = folio_entries.id
+                AND rev.direction = 'CREDIT'
+            )
+          )
+         THEN 1
+       END)::int as charge_count
      FROM folio_entries
      WHERE reservation_id = $1`,
     [reservationId]
@@ -283,6 +305,14 @@ export async function calculateHotelCollectibleBalance(
          WHEN direction = 'DEBIT'
           AND entry_type NOT IN ('PAYMENT_VOID', 'PAYMENT_REVERSAL', 'REFUND_DEBIT', 'DEPOSIT_UNAPPLY')
           AND COALESCE(source_type, entry_type, '') <> 'ROOM_CHARGE'
+          AND (
+            COALESCE(is_voided, FALSE) = FALSE
+            OR EXISTS (
+              SELECT 1 FROM folio_entries rev
+              WHERE rev.reversal_of_entry_id = folio_entries.id
+                AND rev.direction = 'CREDIT'
+            )
+          )
          THEN amount
          ELSE 0
        END), 0) AS gross_collectible,

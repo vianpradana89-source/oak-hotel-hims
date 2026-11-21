@@ -1,7 +1,48 @@
 // Utility for Employee Mobile App Icon Badging (Instagram-style numeric badge),
-// Web Audio API Urgent Alarm Chime, Vibration, and Native Android/Browser Notifications.
+// Web Audio API Urgent Alarm Chime, Vibration, Configurable Duration/Repeats, and Native Notifications.
+
+export type MobileAlarmRepeatMode = '1x' | '3x' | '5x' | '10x' | 'loop';
+
+export const MOBILE_ALARM_REPEAT_OPTIONS: {
+  value: MobileAlarmRepeatMode;
+  label: string;
+  desc: string;
+  cycles: number;
+}[] = [
+  { value: '1x', label: '1x Bunyi (3 Detik)', desc: 'Sekali dering singkat (~3 detik)', cycles: 1 },
+  { value: '3x', label: '3x Bunyi (8 Detik)', desc: 'Standar operasional (~8 detik)', cycles: 3 },
+  { value: '5x', label: '5x Bunyi (14 Detik)', desc: 'Dering menengah (~14 detik)', cycles: 5 },
+  { value: '10x', label: '10x Bunyi (28 Detik)', desc: 'Dering panjang (~28 detik)', cycles: 10 },
+  { value: 'loop', label: 'Berulang Sampai Dimatikan', desc: 'Terus berbunyi (maks 60 detik) hingga direspons', cycles: 22 },
+];
+
+const ALARM_STORAGE_KEY = 'oak_mobile_alarm_repeat_mode';
 
 let sharedAudioCtx: AudioContext | null = null;
+let activeAlarmTimers: Array<ReturnType<typeof setTimeout>> = [];
+let activeOscillators: OscillatorNode[] = [];
+
+export function getMobileAlarmRepeatMode(): MobileAlarmRepeatMode {
+  if (typeof window === 'undefined') return '3x';
+  try {
+    const raw = window.localStorage.getItem(ALARM_STORAGE_KEY);
+    if (raw === '1x' || raw === '3x' || raw === '5x' || raw === '10x' || raw === 'loop') {
+      return raw;
+    }
+  } catch {
+    // ignore
+  }
+  return '3x';
+}
+
+export function setMobileAlarmRepeatMode(mode: MobileAlarmRepeatMode): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(ALARM_STORAGE_KEY, mode);
+  } catch {
+    // ignore
+  }
+}
 
 function getAudioContext(): AudioContext | null {
   if (typeof window === 'undefined') return null;
@@ -54,7 +95,32 @@ export function updateMobileAppBadge(count: number): void {
   }
 }
 
-export function playUrgentHousekeepingAlarm(): void {
+export function stopUrgentHousekeepingAlarm(): void {
+  for (const timer of activeAlarmTimers) {
+    clearTimeout(timer);
+  }
+  activeAlarmTimers = [];
+
+  for (const osc of activeOscillators) {
+    try {
+      osc.stop();
+      osc.disconnect();
+    } catch {
+      // ignore already stopped
+    }
+  }
+  activeOscillators = [];
+
+  try {
+    if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
+      navigator.vibrate(0);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+function playSingleAlarmCycle(): void {
   try {
     if (typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function') {
       navigator.vibrate([400, 150, 400, 150, 600, 200, 500]);
@@ -89,10 +155,30 @@ export function playUrgentHousekeepingAlarm(): void {
         gain.connect(ctx.destination);
         osc.start(start);
         osc.stop(start + duration);
+        activeOscillators.push(osc);
       });
     }
   } catch {
     // ignore if audio not yet unlocked
+  }
+}
+
+export function playUrgentHousekeepingAlarm(overrideMode?: MobileAlarmRepeatMode): void {
+  stopUrgentHousekeepingAlarm();
+
+  const mode = overrideMode || getMobileAlarmRepeatMode();
+  const option = MOBILE_ALARM_REPEAT_OPTIONS.find((o) => o.value === mode) || MOBILE_ALARM_REPEAT_OPTIONS[1];
+  const totalCycles = Math.max(1, option.cycles);
+
+  // Immediately play cycle 1
+  playSingleAlarmCycle();
+
+  // Schedule subsequent cycles every 2.7 seconds
+  for (let i = 1; i < totalCycles; i++) {
+    const t = setTimeout(() => {
+      playSingleAlarmCycle();
+    }, i * 2700);
+    activeAlarmTimers.push(t);
   }
 }
 

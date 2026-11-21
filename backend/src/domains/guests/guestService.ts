@@ -2208,19 +2208,11 @@ export async function redeemPointsForReservation(
       ]
     );
 
-    // Sync bookings.total_amount and transactions if present
-    await client.query(
-      `UPDATE bookings
-       SET total_amount = GREATEST(0, COALESCE(total_amount, 0) - $1::numeric),
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = $2::int`,
-      [effectiveDiscountIdr, Number(resv.booking_id)]
-    );
-
+    // Sync transactions if present (bookings table has no total_amount column; reservations & folio_entries are authoritative)
     await client.query(
       `UPDATE transactions
-       SET discount_amount = COALESCE(discount_amount, 0) + $1::numeric,
-           net_amount = GREATEST(0, COALESCE(net_amount, 0) - $1::numeric),
+       SET discount_amount = COALESCE(discount_amount, 0) + ROUND($1::numeric)::bigint,
+           net_amount = GREATEST(0, COALESCE(net_amount, 0) - ROUND($1::numeric)::bigint),
            updated_at = CURRENT_TIMESTAMP
        WHERE property_id = $2::int
          AND (reservation_id = $3::int OR (reservation_id IS NULL AND booking_id = $4::int))
