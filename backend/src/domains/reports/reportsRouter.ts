@@ -7,7 +7,7 @@ import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate'
 import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
-import { getTransactions, settleTransactionPayment, addTransactionAttachment } from '../transactions/transactionService';
+import { getTransactions, settleTransactionPayment, addTransactionAttachment, executePurchaseLifecycle, executeExpenseLifecycle } from '../transactions/transactionService';
 import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 import { TRANSACTION_ATTACHMENT_UPLOAD_DIR } from '../transactions/transactionAttachmentAccess';
@@ -2642,7 +2642,15 @@ export function createReportsRouter(pool: Pool): Router {
           });
         } else {
           await pool.query(
-            `UPDATE transactions SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`,
+            `UPDATE transactions
+             SET payment_status = 'PAID',
+                 verification_status = 'VERIFIED',
+                 verified_at = COALESCE(verified_at, NOW()),
+                 verified_by_name = COALESCE(verified_by_name, 'Akuntansi'),
+                 purchase_workflow_status = CASE WHEN transaction_type IN ('PURCHASE', 'EXPENSE') THEN 'SELESAI' ELSE purchase_workflow_status END,
+                 expense_workflow_status = CASE WHEN transaction_type = 'EXPENSE' THEN 'SELESAI' ELSE expense_workflow_status END,
+                 updated_at = NOW()
+             WHERE id = $1`,
             [txId]
           );
         }
@@ -2676,6 +2684,59 @@ export function createReportsRouter(pool: Pool): Router {
       return res.status(400).json({ status: 'ERROR', message: 'Format ID hutang tidak dikenali' });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal melunasi hutang' });
+    }
+  });
+
+  router.patch('/accounting/payables/:id/approval', async (req: Request, res: Response) => {
+    try {
+      const rawId = String(req.params.id || '');
+      const propertyId = parsePositiveInt(req.body.property_id) || 1;
+      const approvalStatus = String(req.body.approval_status || '').toUpperCase() as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
+      const reason = req.body.reason ? String(req.body.reason) : null;
+      const actorName = req.body.actor_name ? String(req.body.actor_name) : 'Akuntansi';
+
+      if (!['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(approvalStatus)) {
+        return res.status(400).json({ status: 'ERROR', message: 'Status persetujuan tidak valid' });
+      }
+
+      if (rawId.startsWith('HIMS-PUR-')) {
+        const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
+        if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi tidak valid' });
+        const cur = await pool.query(
+          `SELECT id, property_id, transaction_type FROM transactions WHERE id = $1 AND deleted_at IS NULL`,
+          [txId]
+        );
+        if (!cur.rowCount) {
+          return res.status(404).json({ status: 'ERROR', message: 'Transaksi tidak ditemukan' });
+        }
+        const row = cur.rows[0];
+        const propId = Number(row.property_id || propertyId);
+        const txType = String(row.transaction_type || '').toUpperCase();
+
+        if (txType === 'EXPENSE') {
+          const updated = await executeExpenseLifecycle(pool, txId, {
+            property_id: propId,
+            action: 'SET_APPROVAL',
+            approval_status: approvalStatus,
+            reason,
+            actor_name: actorName,
+          });
+          return res.json({ status: 'SUCCESS', data: updated });
+        } else {
+          const updated = await executePurchaseLifecycle(pool, txId, {
+            property_id: propId,
+            action: 'SET_APPROVAL',
+            approval_status: approvalStatus,
+            reason,
+            actor_name: actorName,
+          });
+          return res.json({ status: 'SUCCESS', data: updated });
+        }
+      }
+
+      return res.status(400).json({ status: 'ERROR', message: 'Persetujuan hanya berlaku untuk pengajuan pembelian atau pengeluaran HIMS' });
+    } catch (err: any) {
+      return res.status(err.statusCode || 500).json({ status: 'ERROR', message: err.message || 'Gagal memperbarui status persetujuan' });
     }
   });
 

@@ -4081,13 +4081,28 @@ export async function settleTransactionPayment(
       newPaymentStatus = newPaid >= netAmount ? 'PAID' : (newPaid > 0 ? 'PARTIALLY_PAID' : 'UNPAID');
     }
 
-    await client.query(
-      `UPDATE transactions
-       SET payment_status = $1,
-           updated_at = NOW()
-       WHERE id = $2 AND property_id = $3`,
-      [newPaymentStatus, id, propertyId]
-    );
+    if (txTypeUpper === 'EXPENSE' && newPaymentStatus === 'PAID') {
+      await client.query(
+        `UPDATE transactions
+         SET payment_status = $1,
+             verification_status = 'VERIFIED',
+             verified_by_name_snapshot = COALESCE(verified_by_name_snapshot, $4),
+             verified_at = COALESCE(verified_at, NOW()),
+             purchase_workflow_status = 'SELESAI',
+             expense_workflow_status = 'SELESAI',
+             updated_at = NOW()
+         WHERE id = $2 AND property_id = $3`,
+        [newPaymentStatus, id, propertyId, dto.actor_name || 'Akuntansi']
+      );
+    } else {
+      await client.query(
+        `UPDATE transactions
+         SET payment_status = $1,
+             updated_at = NOW()
+         WHERE id = $2 AND property_id = $3`,
+        [newPaymentStatus, id, propertyId]
+      );
+    }
 
     // Audit log
     await client.query(
@@ -7452,20 +7467,20 @@ export async function executeExpenseLifecycle(
 
       await client.query(
         `UPDATE transactions
-            SET approval_status = $1,
+            SET approval_status = $1::varchar,
                 approved_by_user_id = $2,
                 approved_by_name_snapshot = $3,
                 approved_at = $4,
-                rejection_reason = $5,
-                transaction_status = $6,
-                verification_status = $7,
+                rejection_reason = $5::text,
+                transaction_status = $6::varchar,
+                verification_status = $7::varchar,
                 verified_by_user_id = $8,
                 verified_by_name_snapshot = $9,
                 verified_at = $10,
-                purchase_workflow_status = $11,
-                expense_workflow_status = $11,
+                purchase_workflow_status = $11::varchar,
+                expense_workflow_status = $11::varchar,
                 notes = CASE
-                  WHEN $1 = 'REJECTED' AND $5::text IS NOT NULL
+                  WHEN $1::text = 'REJECTED' AND $5::text IS NOT NULL
                     THEN COALESCE(notes || ' | ', '') || 'Ditolak: ' || $5::text
                   ELSE notes
                 END,

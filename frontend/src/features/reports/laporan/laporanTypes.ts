@@ -344,6 +344,7 @@ export interface FixedAssetItem {
 export interface AccountingPayableItem {
   id: string;
   source: 'HIMS_PURCHASE' | 'MANUAL';
+  tx_type?: string;
   raw_id: number;
   supplier_name: string;
   transaction_no: string;
@@ -353,6 +354,7 @@ export interface AccountingPayableItem {
   paid_amount: number;
   remaining_amount: number;
   status: 'UNPAID' | 'PARTIAL' | 'PAID';
+  approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
   notes: string | null;
   bank_name?: string | null;
   bank_account?: string | null;

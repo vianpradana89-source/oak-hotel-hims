@@ -477,6 +477,51 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     }
   };
 
+  const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
+
+  const handlePayableApprovalChange = async (
+    item: AccountingPayableItem,
+    nextStatus: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED'
+  ) => {
+    const currentStatus = item.approval_status || 'APPROVED';
+    if (nextStatus === currentStatus) return;
+
+    let reason: string | null = null;
+    if (nextStatus === 'REJECTED') {
+      const input = window.prompt(
+        `Masukkan alasan penolakan untuk ${item.transaction_no} (${item.supplier_name}):`,
+        'Pengajuan ditolak'
+      );
+      if (input === null) return;
+      reason = input.trim() || 'Pengajuan ditolak';
+    }
+
+    setApprovalBusyId(item.id);
+    try {
+      const res = await authenticatedFetch(
+        `/api/reports/accounting/payables/${encodeURIComponent(item.id)}/approval`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            property_id: propertyId,
+            approval_status: nextStatus,
+            reason,
+          }),
+        }
+      );
+      const json = await res.json();
+      if (!res.ok || json.status === 'ERROR') {
+        throw new Error(json.message || 'Gagal memperbarui status persetujuan');
+      }
+      onRetry();
+    } catch (err: any) {
+      alert(err.message || 'Gagal memperbarui status persetujuan');
+    } finally {
+      setApprovalBusyId(null);
+    }
+  };
+
   const handleExportJurnalExcel = () => {
     const headerRow = [
       '#',
@@ -874,14 +919,15 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
               <table className="w-full text-xs">
                 <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier</th>
+                    <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier / Penerima</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Rekening Supplier</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
-                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Lokasi Gudang</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Lokasi / Dept</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Jatuh Tempo</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Persetujuan</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Bukti Bayar</th>
                     <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Status</th>
                     <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Aksi</th>
@@ -890,18 +936,25 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPayables.length === 0 ? (
                     <tr>
-                      <td colSpan={11} className="py-10 text-center text-slate-400">
+                      <td colSpan={12} className="py-10 text-center text-slate-400">
                         Tidak ada data hutang pada filter ini.
                       </td>
                     </tr>
                   ) : (
-                    filteredPayables.map((item) => (
+                    filteredPayables.map((item) => {
+                      const effApproval = item.approval_status || 'APPROVED';
+                      const isPendingApproval = effApproval === 'PENDING_APPROVAL';
+                      return (
                       <tr key={item.id} className="hover:bg-emerald-50/30 transition">
                         {/* 1. Supplier */}
                         <td className="py-3 px-4 font-bold text-slate-900">
                           {item.supplier_name}
                           <div className="text-[10px] font-normal text-slate-400">
-                            {item.source === 'HIMS_PURCHASE' ? 'Pembelian HIMS' : 'Hutang Manual'}
+                            {item.source === 'HIMS_PURCHASE'
+                              ? item.tx_type === 'EXPENSE'
+                                ? 'Pengajuan Pengeluaran HIMS'
+                                : 'Pembelian HIMS'
+                              : 'Hutang Manual'}
                           </div>
                         </td>
                         {/* 2. Rekening Supplier (kiri Transaksi) */}
@@ -922,10 +975,15 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                             type="button"
                             onClick={() => setSelectedSummaryPayable(item)}
                             className="text-emerald-800 hover:text-emerald-950 hover:underline font-bold text-left cursor-pointer transition-colors"
-                            title="Klik untuk melihat ringkasan item pembelian"
+                            title="Klik untuk melihat ringkasan item"
                           >
                             {item.transaction_no}
                           </button>
+                          {item.notes && (
+                            <div className="text-[10px] font-normal text-slate-500 truncate max-w-[200px]" title={item.notes}>
+                              {item.notes}
+                            </div>
+                          )}
                         </td>
                         {/* 4. Lokasi Gudang (kanan Transaksi, hanya kode) */}
                         <td className="py-3 px-3 text-center whitespace-nowrap">
@@ -953,7 +1011,64 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                         <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
                           {formatMediumDateId(item.due_date)}
                         </td>
-                        {/* 9. Bukti Bayar (kanan Jatuh Tempo, kiri Status) */}
+                        {/* 9. Persetujuan */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          {item.source === 'HIMS_PURCHASE' ? (
+                            <div className="relative inline-flex items-center">
+                              <select
+                                value={effApproval}
+                                disabled={approvalBusyId === item.id || item.status === 'PAID'}
+                                onChange={(e) =>
+                                  handlePayableApprovalChange(
+                                    item,
+                                    e.target.value as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED'
+                                  )
+                                }
+                                title="Status Persetujuan Pengajuan"
+                                className={`appearance-none pl-2.5 pr-6 py-0.5 rounded-full text-[10px] font-bold border transition-all focus:outline-none ${
+                                  effApproval === 'APPROVED'
+                                    ? 'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'
+                                    : effApproval === 'REJECTED'
+                                    ? 'bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100'
+                                    : 'bg-amber-50 text-amber-800 border-amber-200 hover:bg-amber-100'
+                                } ${
+                                  approvalBusyId === item.id || item.status === 'PAID'
+                                    ? 'opacity-70 cursor-not-allowed'
+                                    : 'cursor-pointer'
+                                }`}
+                              >
+                                <option value="PENDING_APPROVAL" className="bg-white text-slate-800 font-semibold">
+                                  Menunggu
+                                </option>
+                                <option value="APPROVED" className="bg-white text-emerald-700 font-semibold">
+                                  Disetujui
+                                </option>
+                                <option value="REJECTED" className="bg-white text-rose-700 font-semibold">
+                                  Ditolak
+                                </option>
+                              </select>
+                              <svg
+                                className={`pointer-events-none absolute right-1.5 w-3 h-3 ${
+                                  effApproval === 'APPROVED'
+                                    ? 'text-emerald-600'
+                                    : effApproval === 'REJECTED'
+                                    ? 'text-rose-600'
+                                    : 'text-amber-700'
+                                }`}
+                                fill="none"
+                                stroke="currentColor"
+                                viewBox="0 0 24 24"
+                              >
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.5" d="M19 9l-7 7-7-7" />
+                              </svg>
+                            </div>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                              Disetujui
+                            </span>
+                          )}
+                        </td>
+                        {/* 10. Bukti Bayar (kanan Persetujuan, kiri Status) */}
                         <td className="py-3 px-3 text-center whitespace-nowrap">
                           {item.payment_proof_attachment ? (
                             <button
@@ -1013,7 +1128,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                             <span className="text-slate-400 text-xs">—</span>
                           )}
                         </td>
-                        {/* 10. Status */}
+                        {/* 11. Status */}
                         <td className="py-3 px-4 text-center">
                           <span
                             className={`px-2.5 py-0.5 rounded-full text-[11px] font-bold ${
@@ -1031,15 +1146,27 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                               : 'Belum Bayar'}
                           </span>
                         </td>
-                        {/* 11. Aksi */}
+                        {/* 12. Aksi */}
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
                                 type="button"
-                                onClick={() => setSettleModalState({ mode: 'PAYABLE', item })}
-                                title="Lunasi Hutang"
-                                className="w-8 h-8 rounded-lg bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 inline-flex items-center justify-center transition cursor-pointer"
+                                disabled={isPendingApproval}
+                                onClick={() => {
+                                  if (isPendingApproval) return;
+                                  setSettleModalState({ mode: 'PAYABLE', item });
+                                }}
+                                title={
+                                  isPendingApproval
+                                    ? 'Setujui pengajuan pada kolom Persetujuan terlebih dahulu sebelum melunasi'
+                                    : 'Lunasi Hutang'
+                                }
+                                className={`w-8 h-8 rounded-lg inline-flex items-center justify-center transition ${
+                                  isPendingApproval
+                                    ? 'bg-slate-100 border border-slate-200 text-slate-400 cursor-not-allowed opacity-60'
+                                    : 'bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 cursor-pointer'
+                                }`}
                               >
                                 <CheckCircle2 className="w-4 h-4" />
                               </button>
@@ -1063,7 +1190,8 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           </div>
                         </td>
                       </tr>
-                    ))
+                    );
+                  })
                   )}
                 </tbody>
                 <tfoot>
@@ -1080,7 +1208,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <td className="py-3 px-4 text-right text-rose-600">
                       Belum dibayar: {formatIdr(filteredPayables.reduce((s, i) => s + i.remaining_amount, 0))}
                     </td>
-                    <td colSpan={4} />
+                    <td colSpan={5} />
                   </tr>
                 </tfoot>
               </table>

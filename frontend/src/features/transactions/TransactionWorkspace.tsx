@@ -30,9 +30,8 @@ import {
   softDeleteTransactionApi,
   hardDeleteTransactionApi,
   updatePurchaseLifecycleApi,
-  updateExpenseLifecycleApi,
 } from './transactionClient';
-import type { PurchaseLifecycleAction, ExpenseLifecycleAction } from './transactionDomainTypes';
+import type { PurchaseLifecycleAction } from './transactionDomainTypes';
 import { VoidTransactionModal } from './VoidTransactionModal';
 import { TransactionSourceBadge } from './TransactionSourceBadge';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
@@ -773,50 +772,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
       const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
       setLifecycleError(msg);
       console.error(`PURCHASE-2A3: ${action} failed:`, err);
-    } finally {
-      setLifecycleSaving(prev => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-    }
-  };
-
-  // EXPENSE-1C: inline lifecycle mutation handler for expense approval, verification & workflow
-  const handleExpenseLifecycleMutation = async (
-    tx: TransactionRecord,
-    action: ExpenseLifecycleAction,
-    value: string,
-    reason?: string
-  ) => {
-    const key = `exp:${String(tx.id)}:${action}`;
-    setLifecycleSaving(prev => ({ ...prev, [key]: true }));
-    setLifecycleError(null);
-    try {
-      const payload: {
-        property_id: number;
-        action: ExpenseLifecycleAction;
-        approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' | null;
-        verification_status?: string | null;
-        workflow_status?: string | null;
-        reason?: string | null;
-      } = { property_id: propertyId, action };
-      if (action === 'SET_APPROVAL') {
-        payload.approval_status = value as any;
-        payload.reason = reason || null;
-      } else if (action === 'SET_VERIFICATION') {
-        payload.verification_status = value;
-      } else if (action === 'SET_WORKFLOW') {
-        payload.workflow_status = value;
-      }
-      await updateExpenseLifecycleApi(tx.id, payload);
-      await loadTransactions();
-      void loadDailyCards();
-    } catch (err: any) {
-      const msg = err?.response?.data?.message || err?.message || 'Gagal memperbarui status';
-      setLifecycleError(msg);
-      window.alert(msg);
-      console.error(`EXPENSE-1C: ${action} failed:`, err);
     } finally {
       setLifecycleSaving(prev => {
         const next = { ...prev };
@@ -2230,16 +2185,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div>
               <div className="text-[11px] uppercase tracking-wider text-emerald-800 font-bold mb-0.5">
-                Manajemen Pengadaan &amp; Pembelian
+                Manajemen Pengadaan, Pembelian &amp; Pengajuan Pengeluaran
               </div>
               <div className="flex items-center gap-2.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-600" />
                 <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-                  Daftar Purchase Order (PO) &amp; Otorisasi Pengadaan
+                  Daftar Purchase Order (PO) &amp; Pengajuan Pengeluaran
                 </h1>
               </div>
               <p className="text-xs text-slate-500 mt-1">
-                Pengadaan baru wajib dimulai dari PO yang disetujui. Penerimaan barang (GRN) dan pencatatan tagihan/nota berjalan pada batas kuantitas kumulatif yang sama.
+                Pusat pengajuan pembelian (PO), pencatatan nota tagihan supplier, dan pengajuan pengeluaran operasional (gaji, listrik, perbaikan). Persetujuan &amp; pelunasan diproses melalui Akuntansi &rarr; Hutang.
               </p>
             </div>
 
@@ -2292,6 +2247,22 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
                 </svg>
                 <span>+ Catat Tagihan / Nota PO</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingExpenseId(null);
+                  setEditingExpenseData(null);
+                  setActiveEditor('EXPENSE');
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-xl transition-all shadow-sm cursor-pointer"
+                title="Ajukan pengeluaran operasional (gaji, listrik, perbaikan, dll.)"
+              >
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                </svg>
+                <span>+ Ajukan Pengeluaran</span>
               </button>
             </div>
           </div>
@@ -2758,15 +2729,16 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                   </button>
                 </>
               )}
-              {activeTab === 'EXPENSE' && (
+              {activeTab === 'EXPENSE' && onNavigateToPurchaseOrders && (
                 <button
-                  onClick={() => setActiveEditor('EXPENSE')}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 rounded-lg transition-all shadow-sm cursor-pointer"
+                  onClick={() => onNavigateToPurchaseOrders()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition-all shadow-2xs cursor-pointer"
+                  title="Buka Daftar Purchase Order untuk mengajukan pengeluaran atau pembelian baru"
                 >
                   <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                   </svg>
-                  <span>+ Ajukan Pengeluaran</span>
+                  <span>Daftar Purchase Order &amp; Pengajuan</span>
                 </button>
               )}
               {activeTab === 'INCOME' && (
@@ -3703,36 +3675,28 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
                               {formatIdr(displayTransactionNet(t))}
                             </td>
-                            {/* Persetujuan — inline dropdown */}
-                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                            {/* Persetujuan — read-only informasi (diproses di Akuntansi -> Hutang) */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap">
                               {(() => {
                                 const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
                                 const ac = getPurchaseApprovalClass(appStatus);
+                                const label =
+                                  appStatus === 'APPROVED'
+                                    ? 'Disetujui'
+                                    : appStatus === 'REJECTED'
+                                    ? 'Ditolak'
+                                    : 'Menunggu';
                                 return (
-                                  <select
-                                    value={appStatus}
-                                    onChange={async (e) => {
-                                      e.stopPropagation();
-                                      const nextVal = e.target.value;
-                                      let reason: string | undefined;
-                                      if (nextVal === 'REJECTED') {
-                                        const promptRes = window.prompt('Masukkan alasan penolakan pengajuan pengeluaran:');
-                                        if (promptRes === null) return;
-                                        reason = promptRes.trim() || 'Ditolak oleh manajemen';
-                                      }
-                                      await handleExpenseLifecycleMutation(t, 'SET_APPROVAL', nextVal, reason);
-                                    }}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_APPROVAL`] || t.payment_status === 'PAID'}
-                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${ac.bg} ${ac.border} ${ac.text} hover:bg-opacity-80`}
+                                  <span
+                                    className={`inline-flex items-center text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${ac.bg} ${ac.border} ${ac.text} cursor-default`}
+                                    title="Status persetujuan diatur melalui menu Akuntansi → Hutang"
                                   >
-                                    <option value="PENDING_APPROVAL">Menunggu</option>
-                                    <option value="APPROVED">Disetujui</option>
-                                    <option value="REJECTED">Ditolak</option>
-                                  </select>
+                                    {label}
+                                  </span>
                                 );
                               })()}
                             </td>
-                            {/* Pembayaran & Bukti */}
+                            {/* Pembayaran & Bukti — read-only informasi */}
                             <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                               {(() => {
                                 const ps = String(t.payment_status || 'UNPAID').toUpperCase();
@@ -3767,117 +3731,55 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                       >
                                         <span>📎 Bukti</span>
                                       </button>
-                                    ) : isPaid ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          setPaymentProofModal({
-                                            filePath: null,
-                                            title: `Bukti Bayar — ${t.transaction_no}`,
-                                            uploadId: `HIMS-PUR-${t.id}`,
-                                          });
-                                        }}
-                                        className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-slate-50 text-slate-600 border border-slate-200 hover:bg-emerald-50 hover:text-emerald-700 cursor-pointer"
-                                        title="Unggah Bukti Bayar"
-                                      >
-                                        <span>+ Bukti</span>
-                                      </button>
                                     ) : null}
                                   </div>
                                 );
                               })()}
                             </td>
-                            {/* Verifikasi — inline dropdown */}
-                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                            {/* Verifikasi — read-only informasi */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap">
                               {(() => {
-                                const vc = getPurchaseVerificationClass(t.verification_status || 'UNVERIFIED');
-                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
-                                const canVerify = appStatus === 'APPROVED' && t.payment_status === 'PAID';
+                                const verStatus = t.verification_status || (t.payment_status === 'PAID' ? 'VERIFIED' : 'UNVERIFIED');
+                                const vc = getPurchaseVerificationClass(verStatus);
+                                const verLabel =
+                                  verStatus === 'VERIFIED'
+                                    ? 'Terverifikasi'
+                                    : verStatus === 'REJECTED'
+                                    ? 'Perlu Koreksi'
+                                    : 'Belum Diperiksa';
                                 return (
-                                  <select
-                                    value={t.verification_status || 'UNVERIFIED'}
-                                    onChange={async (e) => {
-                                      e.stopPropagation();
-                                      await handleExpenseLifecycleMutation(t, 'SET_VERIFICATION', e.target.value);
-                                    }}
-                                    title={!canVerify ? 'Setujui dan bayar pengeluaran terlebih dahulu sebelum memverifikasi' : undefined}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_VERIFICATION`] || !isTransactionEditable(t) || !canVerify}
-                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${vc.bg} ${vc.border} ${vc.text} hover:bg-opacity-80`}
+                                  <span
+                                    className={`inline-flex items-center text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${vc.bg} ${vc.border} ${vc.text} cursor-default`}
                                   >
-                                    <option value="UNVERIFIED">Belum Diperiksa</option>
-                                    <option value="VERIFIED">Terverifikasi</option>
-                                    <option value="REJECTED">Perlu Koreksi</option>
-                                  </select>
+                                    {verLabel}
+                                  </span>
                                 );
                               })()}
                             </td>
-                            {/* Status — inline dropdown */}
-                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                            {/* Status — read-only informasi */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap">
                               {(() => {
                                 const ws = t.operational_sheet || 'PROSES';
                                 const wc = getPurchaseWorkflowClass(ws);
-                                if (ws === 'BATAL') {
-                                  return (
-                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                      Batal
-                                    </span>
-                                  );
-                                }
-                                if (ws === 'HAPUS') {
-                                  return (
-                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md ${wc.bg} ${wc.border} ${wc.text} cursor-default`}>
-                                      Dihapus
-                                    </span>
-                                  );
-                                }
-                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
-                                const canFinish = appStatus === 'APPROVED' && t.payment_status === 'PAID';
+                                const wsLabel =
+                                  ws === 'BATAL'
+                                    ? 'Batal'
+                                    : ws === 'HAPUS'
+                                    ? 'Dihapus'
+                                    : ws === 'SELESAI'
+                                    ? 'Selesai'
+                                    : 'Proses';
                                 return (
-                                  <select
-                                    value={ws}
-                                    onChange={async (e) => {
-                                      e.stopPropagation();
-                                      await handleExpenseLifecycleMutation(t, 'SET_WORKFLOW', e.target.value);
-                                    }}
-                                    title={!canFinish ? 'Setujui dan bayar pengeluaran terlebih dahulu sebelum mengubah ke Selesai' : undefined}
-                                    disabled={lifecycleSaving[`exp:${String(t.id)}:SET_WORKFLOW`] || (!canFinish && ws === 'PROSES')}
-                                    className={`text-[11px] font-semibold px-2 py-0.5 rounded-lg border cursor-pointer focus:outline-none focus:ring-1 focus:ring-emerald-400 disabled:opacity-60 ${wc.bg} ${wc.border} ${wc.text} hover:bg-opacity-80`}
+                                  <span
+                                    className={`inline-flex items-center text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${wc.bg} ${wc.border} ${wc.text} cursor-default`}
                                   >
-                                    <option value="PROSES">Proses</option>
-                                    <option value="SELESAI">Selesai</option>
-                                  </select>
+                                    {wsLabel}
+                                  </span>
                                 );
                               })()}
                             </td>
                             <td className="py-3 px-3 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                               <div className="flex items-center justify-center gap-1">
-                                {(() => {
-                                  const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
-                                  const isUnpaid = t.payment_status !== 'PAID' && t.operational_sheet !== 'BATAL' && !t.deleted_at;
-                                  if (!isUnpaid) return null;
-                                  if (appStatus === 'APPROVED') {
-                                    return (
-                                      <button
-                                        type="button"
-                                        onClick={() => openDetailDrawer(t.id, true)}
-                                        className="px-2.5 py-1 text-[10px] font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg transition-colors cursor-pointer shadow-2xs"
-                                        title="Catat pembayaran / pelunasan pengeluaran yang sudah disetujui"
-                                      >
-                                        Bayar
-                                      </button>
-                                    );
-                                  }
-                                  return (
-                                    <button
-                                      type="button"
-                                      disabled
-                                      className="px-2 py-1 text-[10px] font-semibold text-slate-400 bg-slate-100 border border-slate-200 rounded-lg cursor-not-allowed opacity-70"
-                                      title="Pengajuan harus Disetujui terlebih dahulu sebelum dapat dibayar"
-                                    >
-                                      Bayar
-                                    </button>
-                                  );
-                                })()}
                                 <button
                                   onClick={() => openDetailDrawer(t.id)}
                                   className="px-2.5 py-1 text-[11px] font-semibold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors cursor-pointer"

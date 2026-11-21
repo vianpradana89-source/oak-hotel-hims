@@ -568,14 +568,16 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     {tx.verification_status === 'VERIFIED' ? 'Terverifikasi' :
                      tx.verification_status === 'REJECTED' ? 'Perlu Koreksi' : 'Belum Diperiksa'}
                   </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowVerifyModal(true)}
-                      disabled={!isTransactionVerificationEditable(tx)}
-                      className="text-[10px] text-slate-600 underline hover:text-emerald-800 font-semibold cursor-pointer ml-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
-                    >
-                      Ubah
-                    </button>
+                    {tx.transaction_type !== 'EXPENSE' && (
+                      <button
+                        type="button"
+                        onClick={() => setShowVerifyModal(true)}
+                        disabled={!isTransactionVerificationEditable(tx)}
+                        className="text-[10px] text-slate-600 underline hover:text-emerald-800 font-semibold cursor-pointer ml-1 disabled:opacity-40 disabled:cursor-not-allowed disabled:no-underline"
+                      >
+                        Ubah
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -590,18 +592,20 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                           : appStatus === 'REJECTED'
                           ? 'bg-rose-50 border-rose-200 text-rose-800'
                           : 'bg-amber-50 border-amber-200 text-amber-800';
+                      const appLabel =
+                        appStatus === 'APPROVED'
+                          ? 'Disetujui'
+                          : appStatus === 'REJECTED'
+                          ? 'Ditolak'
+                          : 'Menunggu';
                       return (
-                        <div className="flex items-center gap-1.5 mt-1">
-                          <select
-                            value={appStatus}
-                            onChange={(e) => handleApprovalChange(e.target.value as 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED')}
-                            disabled={isUpdatingApproval || tx.payment_status === 'PAID'}
-                            className={`text-xs font-bold rounded-lg px-2 py-0.5 outline-none cursor-pointer border ${appClass} disabled:opacity-60`}
-                          >
-                            <option value="PENDING_APPROVAL">Menunggu</option>
-                            <option value="APPROVED">Disetujui</option>
-                            <option value="REJECTED">Ditolak</option>
-                          </select>
+                        <div className="flex flex-col gap-0.5 mt-1">
+                          <span className={`inline-flex items-center w-fit text-xs font-bold rounded-lg px-2 py-0.5 border ${appClass}`}>
+                            {appLabel}
+                          </span>
+                          <span className="text-[10px] text-slate-400">
+                            Diproses di Akuntansi &rarr; Hutang
+                          </span>
                         </div>
                       );
                     })()}
@@ -1211,7 +1215,7 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       ? `Pembayaran POS (${payments.length})`
                       : `Pembayaran Sebelumnya (${payments.length})`}
                   </span>
-                  {!showSettleForm && canSettle && !isPosTx && (
+                  {!showSettleForm && canSettle && !isPosTx && tx.transaction_type !== 'EXPENSE' && (
                     <button
                       type="button"
                       onClick={() => {
@@ -1223,6 +1227,11 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                     >
                       + Catat Pelunasan
                     </button>
+                  )}
+                  {tx.transaction_type === 'EXPENSE' && tx.payment_status !== 'PAID' && (
+                    <span className="text-[11px] font-semibold text-amber-800 bg-amber-50 border border-amber-200 px-2.5 py-1 rounded-lg">
+                      Persetujuan &amp; pelunasan dilakukan di menu Akuntansi &rarr; Hutang
+                    </span>
                   )}
                 </div>
 

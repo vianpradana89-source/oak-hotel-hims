@@ -568,6 +568,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     paid_amount: number;
     remaining_amount: number;
     status: 'UNPAID' | 'PARTIAL' | 'PAID';
+    approval_status?: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED';
     notes: string | null;
     payment_method?: string;
     bank_name?: string | null;
@@ -585,6 +586,13 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     const remaining = Math.max(0, total - paid);
     const status: 'UNPAID' | 'PARTIAL' | 'PAID' =
       remaining <= 0 ? 'PAID' : paid > 0 ? 'PARTIAL' : 'UNPAID';
+    const approvalStatusRaw = String(p.approval_status || 'APPROVED').toUpperCase();
+    const approvalStatus: 'PENDING_APPROVAL' | 'APPROVED' | 'REJECTED' =
+      approvalStatusRaw === 'PENDING_APPROVAL'
+        ? 'PENDING_APPROVAL'
+        : approvalStatusRaw === 'REJECTED'
+        ? 'REJECTED'
+        : 'APPROVED';
     const proofUrl = p.payment_proof_attachment
       ? `/api/transactions/${p.id}/attachments/${p.payment_proof_attachment.id}/file`
       : null;
@@ -601,6 +609,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       paid_amount: paid,
       remaining_amount: remaining,
       status,
+      approval_status: approvalStatus,
       notes: p.notes ? String(p.notes) : null,
       payment_method: String(p.payment_method || 'Cash'),
       bank_name: p.bank_name || null,
@@ -635,6 +644,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       paid_amount: status === 'PAID' ? total : paid,
       remaining_amount: status === 'PAID' ? 0 : remaining,
       status,
+      approval_status: 'APPROVED',
       notes: mp.notes ? String(mp.notes) : null,
       bank_name: mp.bank_name || null,
       bank_account: mp.bank_account || null,
@@ -647,10 +657,11 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
   }
 
   payablesItems.sort((a, b) => b.tx_date.localeCompare(a.tx_date));
-  const payablesTotalAmount = payablesItems.reduce((s, i) => s + i.total_amount, 0);
-  const payablesPaidTotal = payablesItems.reduce((s, i) => s + i.paid_amount, 0);
-  const payablesUnpaidTotal = payablesItems.reduce((s, i) => s + i.remaining_amount, 0);
-  const payablesUnpaidCount = payablesItems.filter((i) => i.remaining_amount > 0).length;
+  const approvedPayablesItems = payablesItems.filter((i) => i.approval_status !== 'PENDING_APPROVAL');
+  const payablesTotalAmount = approvedPayablesItems.reduce((s, i) => s + i.total_amount, 0);
+  const payablesPaidTotal = approvedPayablesItems.reduce((s, i) => s + i.paid_amount, 0);
+  const payablesUnpaidTotal = approvedPayablesItems.reduce((s, i) => s + i.remaining_amount, 0);
+  const payablesUnpaidCount = approvedPayablesItems.filter((i) => i.remaining_amount > 0).length;
 
   // 4. Receivables (Real HIMS Sheet Piutang + Manual Receivables)
   const receivablesItems: Array<{
