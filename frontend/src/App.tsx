@@ -884,7 +884,8 @@ function AppContent() {
   }, [fetchProperties]);
   // Anchor date for the grid window and handlers to shift the window
   const [anchorDate, setAnchorDate] = useState<Date>(new Date());
-  const [windowSize, setWindowSize] = useState<number>(7);
+  const [kpiSelectedDate, setKpiSelectedDate] = useState<string>(() => hotelDateFromInstant(new Date()));
+  const [windowSize, setWindowSize] = useState<number>(14);
   const [isMonthView, setIsMonthView] = useState<boolean>(false);
   const [calendarOpen, setCalendarOpen] = useState<boolean>(false);
   const [calendarViewDate, setCalendarViewDate] = useState<Date>(new Date());
@@ -926,13 +927,16 @@ function AppContent() {
   const shiftDays = (delta: number) => {
     setAnchorDate((prev) => {
       const shifted = addHotelDays(hotelDateFromInstant(prev), delta);
+      setKpiSelectedDate(shifted);
       return hotelDateToLocalDate(shifted) || prev;
     });
   };
   const goToday = () => {
-    setWindowSize(7);
+    const todayIso = hotelDateFromInstant(new Date());
+    setWindowSize(14);
     setIsMonthView(false);
-    setAnchorDate(hotelDateToLocalDate(hotelDateFromInstant(new Date())) || new Date());
+    setKpiSelectedDate(todayIso);
+    setAnchorDate(hotelDateToLocalDate(todayIso) || new Date());
   };
   const [reservationResizePreview, setReservationResizePreview] = useState<Record<string, string>>({});
   const [reservationResizeState, setReservationResizeState] = useState<{ reservationId: number; startX: number; startCheckOut: string; pointerId: number } | null>(null);
@@ -1145,8 +1149,9 @@ function AppContent() {
 
     setCalendarViewDate(d);
     setAnchorDate(d);
+    setKpiSelectedDate(calendarSelectedDate);
     setIsMonthView(false);
-    setWindowSize(7);
+    setWindowSize(14);
     setCalendarOpen(false);
   };
 
@@ -1549,7 +1554,7 @@ function AppContent() {
   };
   fetchDataRef.current = fetchData;
 
-  const loadDailyKpis = async (targetPropId?: number | null) => {
+  const loadDailyKpis = async (targetPropId?: number | null, dateOverride?: string | null) => {
     const propId = targetPropId !== undefined ? targetPropId : propertyId;
     if (propId === null || propId === undefined) {
       setDailyKpis(null);
@@ -1557,6 +1562,7 @@ function AppContent() {
       ++dailyKpiHistoryRequestVersionRef.current;
       return;
     }
+    const targetDate = dateOverride || kpiSelectedDate || hotelDateFromInstant(anchorDate);
     // Invalidate any in-flight history request BEFORE starting the new load,
     // so stale history responses from a prior call cannot overwrite the UI.
     ++dailyKpiHistoryRequestVersionRef.current;
@@ -1565,7 +1571,7 @@ function AppContent() {
     const requestVersion = ++dailyKpiRequestVersionRef.current;
     let kpiData: DailyKpiData | null = null;
     try {
-      kpiData = await fetchDailyKpisApi(propId, undefined, authFetch);
+      kpiData = await fetchDailyKpisApi(propId, targetDate, authFetch);
       if (requestVersion !== dailyKpiRequestVersionRef.current) return;
       setDailyKpis(kpiData);
     } catch (err) {
@@ -1591,6 +1597,13 @@ function AppContent() {
   loadDailyKpisRef.current = loadDailyKpis;
 
   useEffect(() => {
+    if (propertyId !== null && kpiSelectedDate) {
+      void loadDailyKpis(propertyId, kpiSelectedDate);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [propertyId, kpiSelectedDate]);
+
+  useEffect(() => {
     const apiType = summaryDrawerType ? (DRAWER_TYPE_TO_KPI_DRILLDOWN[summaryDrawerType] as DailyKpiDrilldownType | undefined) : undefined;
     if (!apiType || propertyId === null) {
       kpiDrilldownRequestVersionRef.current += 1;
@@ -1601,7 +1614,7 @@ function AppContent() {
     }
     const requestVersion = ++kpiDrilldownRequestVersionRef.current;
     const propId = propertyId;
-    const date = dailyKpis?.business_date;
+    const date = kpiSelectedDate || dailyKpis?.business_date;
     setKpiDrilldownLoading(true);
     setKpiDrilldownError(null);
     void fetchDailyKpiDrilldownApi(propId, apiType, date, authFetch)
@@ -1619,7 +1632,7 @@ function AppContent() {
           setKpiDrilldownLoading(false);
         }
       });
-  }, [summaryDrawerType, propertyId, dailyKpis, authFetch]);
+  }, [summaryDrawerType, propertyId, dailyKpis, kpiSelectedDate, authFetch]);
 
   useEffect(() => {
     if (selectedMenu === 'Kalender' && propertyId !== null) void fetchDataRef.current();
@@ -4140,7 +4153,11 @@ function AppContent() {
               <div className="flex items-end justify-between gap-3">
                 <div>
                   <div className="text-xs uppercase tracking-[0.24em] text-blue-600 font-semibold">Operasional kalender</div>
-                  <h3 className="text-lg font-semibold text-gray-900">Ringkasan booking hari ini</h3>
+                  <h3 className="text-lg font-semibold text-gray-900">
+                    {kpiSelectedDate === getOperationalDateKey()
+                      ? 'Ringkasan booking hari ini'
+                      : `Ringkasan booking (${(hotelDateToLocalDate(kpiSelectedDate) || anchorDate).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })})`}
+                  </h3>
                 </div>
                 <div className="flex flex-col items-end gap-1.5">
                   <button
@@ -4253,22 +4270,27 @@ function AppContent() {
                 rightSlot={
                   <>
                     <div className="calendar-date-nav" role="group" aria-label="Navigasi tanggal Tape Chart">
-                      <button type="button" onClick={() => shiftDays(-7)}>‹ 7 Hari</button>
                       <button type="button" onClick={() => shiftDays(-1)}>‹ 1 Hari</button>
                       <button type="button" className="calendar-date-nav__today" onClick={goToday}>Hari Ini</button>
                       <button type="button" onClick={() => shiftDays(1)}>1 Hari ›</button>
-                      <button type="button" onClick={() => shiftDays(7)}>7 Hari ›</button>
                     </div>
                     <button
                       onClick={() => {
-                        setCalendarViewDate(anchorDate);
-                        setCalendarSelectedDate(localDateISO(anchorDate));
+                        const targetDt = hotelDateToLocalDate(kpiSelectedDate) || anchorDate;
+                        setCalendarViewDate(targetDt);
+                        setCalendarSelectedDate(kpiSelectedDate || localDateISO(anchorDate));
                         setCalendarOpen(true);
                       }}
                       className="calendar-month-picker"
+                      title="Pilih tanggal kalender & KPI"
                     >
                       <span className="text-base">📅</span>
-                      <span>{new Date(anchorDate).toLocaleString('id-ID', { month: 'long' })}</span>
+                      <span>
+                        {(hotelDateToLocalDate(kpiSelectedDate) || anchorDate).toLocaleDateString('id-ID', {
+                          day: 'numeric',
+                          month: 'long',
+                        })}
+                      </span>
                     </button>
                   </>
                 }
@@ -4286,17 +4308,30 @@ function AppContent() {
               )}
 
               <div className="overflow-x-auto calendar-grid-shell">
-                <table className="w-full border-collapse text-xs" style={{ tableLayout: 'fixed' }}>
+                <table
+                  className="border-collapse text-xs"
+                  style={{
+                    tableLayout: 'fixed',
+                    width: `${220 + days.length * 145}px`,
+                    minWidth: '100%',
+                  }}
+                >
                   <thead>
                     <tr className="bg-gray-100 border calendar-header-row">
                       <th className="p-3 border text-left calendar-sticky-corner" style={{ width: '220px', minWidth: '220px' }}>Kamar</th>
                       {days.map((d) => {
                         const todayIso = getOperationalDateKey();
                         const isToday = d.date === todayIso;
+                        const isSelectedKpiDate = d.date === kpiSelectedDate;
                         return (
                           <th
                             key={d.date}
-                            className={`header-date-cell calendar-sticky-header ${isToday ? 'header-date-cell--today' : ''}`}
+                            onClick={() => setKpiSelectedDate(d.date)}
+                            title={`Klik untuk melihat ringkasan & ketersediaan tanggal ${d.date}`}
+                            style={{ width: '145px', minWidth: '145px' }}
+                            className={`header-date-cell calendar-sticky-header cursor-pointer transition-colors ${
+                              isToday ? 'header-date-cell--today' : ''
+                            } ${isSelectedKpiDate && !isToday ? 'bg-emerald-50 ring-2 ring-inset ring-emerald-500/70' : ''}`}
                           >
                             <div className="day-header-label">{d.label}</div>
                             <div className={`day-header-number ${isToday ? 'is-today' : ''}`}>{d.raw.getDate()}</div>

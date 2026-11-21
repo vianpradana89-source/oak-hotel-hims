@@ -202,6 +202,12 @@ const BLOCKED_ROOMS_CTE = `
     SELECT DISTINCT ar.id
     FROM active_rooms ar
     WHERE UPPER(ar.status) IN ('OUT_OF_ORDER', 'OUT_OF_SERVICE')
+      AND NOT EXISTS (
+        SELECT 1 FROM room_operational_blocks b_any
+        WHERE b_any.property_id = $1
+          AND b_any.room_id = ar.id
+          AND b_any.status = 'ACTIVE'
+      )
     UNION
     SELECT DISTINCT b.room_id
     FROM room_operational_blocks b
@@ -461,10 +467,21 @@ export async function getDailyKpis(
       UNION
       SELECT ar.id
       FROM active_rooms ar
-      WHERE UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+      WHERE $2::date = (NOW() AT TIME ZONE $3)::date
+        AND UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+    ),
+    unassigned_occupied AS (
+      SELECT COUNT(*)::int AS cnt
+      FROM reservations r
+      JOIN bookings b ON b.id = r.booking_id
+      WHERE ${OCCUPANCY_PREDICATE}
+        AND r.room_id IS NULL
     ),
     available_rooms AS (
-      SELECT COUNT(*)::int AS available
+      SELECT GREATEST(
+        0,
+        COUNT(*)::int - COALESCE((SELECT cnt FROM unassigned_occupied), 0)
+      ) AS available
       FROM active_rooms ar
       WHERE ar.id NOT IN (SELECT id FROM blocked_rooms WHERE id IS NOT NULL)
         AND ar.id NOT IN (SELECT id FROM occupied_room_ids WHERE id IS NOT NULL)
@@ -692,39 +709,66 @@ export async function getDailyKpiDrilldown(
   }
 
   if (typeValue === 'available_rooms') {
-    const result = await client.query(
-      `
-      WITH ${ACTIVE_ROOMS_CTE},
-      ${BLOCKED_ROOMS_CTE},
-      occupied_room_ids AS (
-        SELECT DISTINCT r.room_id AS id
+    const todayInTz = hotelDateFromInstant(new Date(), timezone);
+    const isTodayTarget = businessDate === todayInTz;
+
+    const [result, unassignedRes] = await Promise.all([
+      client.query(
+        `
+        WITH ${ACTIVE_ROOMS_CTE},
+        ${BLOCKED_ROOMS_CTE},
+        occupied_room_ids AS (
+          SELECT DISTINCT r.room_id AS id
+          FROM reservations r
+          JOIN bookings b ON b.id = r.booking_id
+          WHERE ${OCCUPANCY_PREDICATE}
+            AND r.room_id IS NOT NULL
+          UNION
+          SELECT ar.id
+          FROM active_rooms ar
+          WHERE $2::date = (NOW() AT TIME ZONE $3)::date
+            AND UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
+        )
+        SELECT
+          ar.id AS room_id,
+          rm.room_number,
+          rm.room_type_id,
+          COALESCE(rt.name, 'Lainnya') AS room_type_name,
+          COALESCE(rt.display_order, 9999) AS display_order,
+          ar.status
+        FROM active_rooms ar
+        JOIN rooms rm ON rm.id = ar.id
+        LEFT JOIN room_types rt ON rt.id = rm.room_type_id
+        WHERE ar.id NOT IN (SELECT id FROM blocked_rooms WHERE id IS NOT NULL)
+          AND ar.id NOT IN (SELECT id FROM occupied_room_ids WHERE id IS NOT NULL)
+        ORDER BY COALESCE(rt.display_order, 9999) ASC, COALESCE(rt.name, 'Lainnya') ASC, rm.room_number ASC, ar.id ASC
+        `,
+        tzParams
+      ),
+      client.query(
+        `
+        SELECT
+          r.booked_room_type_id_snapshot AS room_type_id,
+          COUNT(*)::int AS unassigned_cnt
         FROM reservations r
         JOIN bookings b ON b.id = r.booking_id
         WHERE ${OCCUPANCY_PREDICATE}
-          AND r.room_id IS NOT NULL
-        UNION
-        SELECT ar.id
-        FROM active_rooms ar
-        WHERE UPPER(ar.status) IN ('OCCUPIED_CLEAN', 'OCCUPIED_DIRTY')
-      )
-      SELECT
-        ar.id AS room_id,
-        rm.room_number,
-        rm.room_type_id,
-        COALESCE(rt.name, 'Lainnya') AS room_type_name,
-        COALESCE(rt.display_order, 9999) AS display_order,
-        ar.status
-      FROM active_rooms ar
-      JOIN rooms rm ON rm.id = ar.id
-      LEFT JOIN room_types rt ON rt.id = rm.room_type_id
-      WHERE ar.id NOT IN (SELECT id FROM blocked_rooms WHERE id IS NOT NULL)
-        AND ar.id NOT IN (SELECT id FROM occupied_room_ids WHERE id IS NOT NULL)
-      ORDER BY COALESCE(rt.display_order, 9999) ASC, COALESCE(rt.name, 'Lainnya') ASC, rm.room_number ASC, ar.id ASC
-      `,
-      dateParams
-    );
+          AND r.room_id IS NULL
+          AND r.booked_room_type_id_snapshot IS NOT NULL
+        GROUP BY r.booked_room_type_id_snapshot
+        `,
+        dateParams
+      ),
+    ]);
 
-    const items: DailyKpiRoomItem[] = result.rows.map(mapRoomItem);
+    const unassignedByType = new Map<number, number>();
+    for (const u of unassignedRes.rows) {
+      const rtId = toNullableInt(u.room_type_id);
+      if (rtId !== null) {
+        unassignedByType.set(rtId, toCount(u.unassigned_cnt));
+      }
+    }
+
     const typeMap = new Map<string, DailyKpiAvailableRoomTypeSummary>();
 
     for (const row of result.rows) {
@@ -742,8 +786,14 @@ export async function getDailyKpiDrilldown(
         });
       }
       const group = typeMap.get(key)!;
-      const roomItem = mapRoomItem(row);
-      const st = String(row.status || '').toUpperCase();
+      const effectiveStatus = isTodayTarget ? asText(row.status) : 'VACANT_CLEAN';
+      const roomItem: DailyKpiRoomItem = {
+        room_id: Number(row.room_id),
+        room_number: asText(row.room_number),
+        room_type_name: asText(row.room_type_name),
+        status: effectiveStatus,
+      };
+      const st = String(effectiveStatus || '').toUpperCase();
       group.available_count += 1;
       if (st === 'VACANT_CLEAN' || st === 'INSPECTED') {
         group.clean_count += 1;
@@ -753,12 +803,37 @@ export async function getDailyKpiDrilldown(
       group.rooms.push(roomItem);
     }
 
+    // Deduct any unassigned bookings on that date from the corresponding room type
+    const finalGroups: DailyKpiAvailableRoomTypeSummary[] = [];
+    const finalItems: DailyKpiRoomItem[] = [];
+    for (const grp of typeMap.values()) {
+      const unassigned = grp.room_type_id != null ? (unassignedByType.get(grp.room_type_id) || 0) : 0;
+      if (unassigned > 0 && grp.rooms.length > 0) {
+        const remainingRooms = grp.rooms.slice(0, Math.max(0, grp.rooms.length - unassigned));
+        let cleanCnt = 0;
+        let dirtyCnt = 0;
+        for (const rm of remainingRooms) {
+          const st = String(rm.status || '').toUpperCase();
+          if (st === 'VACANT_CLEAN' || st === 'INSPECTED') cleanCnt += 1;
+          else dirtyCnt += 1;
+        }
+        grp.rooms = remainingRooms;
+        grp.available_count = remainingRooms.length;
+        grp.clean_count = cleanCnt;
+        grp.dirty_count = dirtyCnt;
+      }
+      if (grp.available_count > 0) {
+        finalGroups.push(grp);
+        finalItems.push(...grp.rooms);
+      }
+    }
+
     return {
       ...base,
       type: 'available_rooms',
-      count: items.length,
-      items,
-      by_room_type: Array.from(typeMap.values()),
+      count: finalItems.length,
+      items: finalItems,
+      by_room_type: finalGroups,
     };
   }
 

@@ -1,5 +1,12 @@
-import type { DailyKpiDrilldownData } from './calendarApi';
+import { useEffect, useMemo, useState } from 'react';
+import type { DailyKpiAvailableRoomTypeSummary, DailyKpiDrilldownData } from './calendarApi';
 import { formatKpiClock, formatKpiStayRange, maintenanceSourceLabel } from './dailyKpiFormat';
+
+const AVAILABLE_ROOM_ORDER_STORAGE_PREFIX = 'oak_hims_available_room_type_order_';
+
+function getGroupOrderKey(grp: DailyKpiAvailableRoomTypeSummary): string {
+  return grp.room_type_id != null ? `id:${grp.room_type_id}` : `name:${grp.room_type_name}`;
+}
 
 export function DailyKpiDrilldownList({
   data,
@@ -10,6 +17,87 @@ export function DailyKpiDrilldownList({
   loading: boolean;
   error: string | null;
 }) {
+  const [isReorderingAvailable, setIsReorderingAvailable] = useState(false);
+  const [draggedKey, setDraggedKey] = useState<string | null>(null);
+  const [customOrderKeys, setCustomOrderKeys] = useState<string[]>([]);
+
+  const propId = data?.property_id ?? 1;
+  const storageKey = `${AVAILABLE_ROOM_ORDER_STORAGE_PREFIX}${propId}`;
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          setCustomOrderKeys(parsed.map(String));
+          return;
+        }
+      }
+    } catch {
+      // ignore storage error
+    }
+    setCustomOrderKeys([]);
+  }, [storageKey]);
+
+  const orderedAvailableGroups = useMemo(() => {
+    if (!data || data.type !== 'available_rooms') return [];
+    const groups = data.by_room_type || [];
+    if (customOrderKeys.length === 0) return groups;
+    const orderIndex = new Map<string, number>();
+    customOrderKeys.forEach((k, idx) => orderIndex.set(k, idx));
+    return [...groups].sort((a, b) => {
+      const ka = getGroupOrderKey(a);
+      const kb = getGroupOrderKey(b);
+      const ia = orderIndex.has(ka) ? orderIndex.get(ka)! : 9999;
+      const ib = orderIndex.has(kb) ? orderIndex.get(kb)! : 9999;
+      if (ia !== ib) return ia - ib;
+      return a.room_type_name.localeCompare(b.room_type_name);
+    });
+  }, [data, customOrderKeys]);
+
+  const saveAvailableOrder = (nextKeys: string[]) => {
+    setCustomOrderKeys(nextKeys);
+    try {
+      if (nextKeys.length === 0) {
+        localStorage.removeItem(storageKey);
+      } else {
+        localStorage.setItem(storageKey, JSON.stringify(nextKeys));
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const moveAvailableGroup = (index: number, direction: -1 | 1) => {
+    const currentKeys = orderedAvailableGroups.map(getGroupOrderKey);
+    const targetIndex = index + direction;
+    if (targetIndex < 0 || targetIndex >= currentKeys.length) return;
+    const next = [...currentKeys];
+    const [moved] = next.splice(index, 1);
+    next.splice(targetIndex, 0, moved);
+    saveAvailableOrder(next);
+  };
+
+  const handleDropGroup = (targetKey: string) => {
+    if (!draggedKey || draggedKey === targetKey) {
+      setDraggedKey(null);
+      return;
+    }
+    const currentKeys = orderedAvailableGroups.map(getGroupOrderKey);
+    const fromIdx = currentKeys.indexOf(draggedKey);
+    const toIdx = currentKeys.indexOf(targetKey);
+    if (fromIdx === -1 || toIdx === -1) {
+      setDraggedKey(null);
+      return;
+    }
+    const next = [...currentKeys];
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    saveAvailableOrder(next);
+    setDraggedKey(null);
+  };
+
   if (loading) {
     return <div className="py-8 text-center text-xs text-slate-400">Memuat rincian KPI...</div>;
   }
@@ -171,47 +259,129 @@ export function DailyKpiDrilldownList({
   }
 
   if (data.type === 'available_rooms') {
-    const groups = data.by_room_type || [];
+    const groups = orderedAvailableGroups;
     return (
       <div className="space-y-3">
-        <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200/80 text-[11px] text-emerald-900">
-          Kamar tersedia mencakup kamar <b>Vacant Clean / Inspected</b> dan <b>Kamar Kotor (Vacant Dirty)</b>. Kamar <b>OO / OOS</b> tidak dihitung.
+        <div className="p-2.5 rounded-lg bg-emerald-50/70 border border-emerald-200/80 text-[11px] text-emerald-900 flex items-center justify-between gap-2">
+          <span>
+            Kamar tersedia mencakup kamar <b>Vacant Clean / Inspected</b> dan <b>Kamar Kotor (Vacant Dirty)</b>. Kamar <b>OO / OOS</b> tidak dihitung.
+          </span>
         </div>
-        {groups.map((grp) => (
-          <div key={`${grp.room_type_id ?? 'other'}-${grp.room_type_name}`} className="rounded-xl border border-slate-200 bg-slate-50/60 overflow-hidden text-xs">
-            <div className="px-3 py-2 bg-white border-b border-slate-200/80 flex items-center justify-between gap-2">
-              <div>
-                <div className="font-bold text-slate-900">{grp.room_type_name}</div>
-                <div className="text-[10px] text-slate-500 mt-0.5">
-                  Siap: <b className="text-emerald-700">{grp.clean_count}</b> · Kotor: <b className="text-amber-700">{grp.dirty_count}</b>
-                </div>
-              </div>
-              <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-900 border border-emerald-200">
-                {grp.available_count} kamar
-              </span>
-            </div>
-            <div className="p-2.5 flex flex-wrap gap-1.5">
-              {grp.rooms.map((rm) => {
-                const st = String(rm.status || '').toUpperCase();
-                const isClean = st === 'VACANT_CLEAN' || st === 'INSPECTED';
-                return (
-                  <span
-                    key={rm.room_id}
-                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold border ${
-                      isClean
-                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                        : 'bg-amber-50 text-amber-800 border-amber-200'
-                    }`}
-                    title={st}
-                  >
-                    <span className="font-mono font-bold">{rm.room_number}</span>
-                    <span className="text-[9px] opacity-80">({isClean ? 'Ready' : 'Kotor'})</span>
-                  </span>
-                );
-              })}
-            </div>
+
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[11px] font-semibold text-slate-500">
+            {isReorderingAvailable ? 'Geser atau klik panah ↑↓ untuk mengatur urutan:' : `${groups.length} tipe kamar tersedia`}
+          </span>
+          <div className="flex items-center gap-1.5">
+            {isReorderingAvailable && customOrderKeys.length > 0 && (
+              <button
+                type="button"
+                onClick={() => saveAvailableOrder([])}
+                className="px-2 py-1 rounded-lg text-[11px] font-semibold border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 cursor-pointer"
+              >
+                Reset Default
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setIsReorderingAvailable((v) => !v)}
+              className={`px-2.5 py-1 rounded-lg text-[11px] font-bold border transition-colors cursor-pointer ${
+                isReorderingAvailable
+                  ? 'bg-emerald-700 text-white border-emerald-700 hover:bg-emerald-800'
+                  : 'bg-white text-slate-700 border-slate-300 hover:bg-slate-50'
+              }`}
+            >
+              {isReorderingAvailable ? 'Selesai Atur Urutan' : '⇅ Atur Urutan'}
+            </button>
           </div>
-        ))}
+        </div>
+
+        {groups.map((grp, idx) => {
+          const gKey = getGroupOrderKey(grp);
+          const isBeingDragged = draggedKey === gKey;
+          return (
+            <div
+              key={gKey}
+              draggable={isReorderingAvailable}
+              onDragStart={() => {
+                if (isReorderingAvailable) setDraggedKey(gKey);
+              }}
+              onDragOver={(e) => {
+                if (isReorderingAvailable) e.preventDefault();
+              }}
+              onDrop={() => {
+                if (isReorderingAvailable) handleDropGroup(gKey);
+              }}
+              onDragEnd={() => setDraggedKey(null)}
+              className={`rounded-xl border bg-slate-50/60 overflow-hidden text-xs transition-all ${
+                isReorderingAvailable
+                  ? 'border-emerald-300 ring-1 ring-emerald-200/70 cursor-move'
+                  : 'border-slate-200'
+              } ${isBeingDragged ? 'opacity-50 scale-[0.99]' : ''}`}
+            >
+              <div className="px-3 py-2 bg-white border-b border-slate-200/80 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  {isReorderingAvailable && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <span className="text-slate-400 font-bold select-none px-0.5" title="Tarik untuk memindahkan">
+                        ⋮⋮
+                      </span>
+                      <div className="flex flex-col gap-0.5">
+                        <button
+                          type="button"
+                          disabled={idx === 0}
+                          onClick={() => moveAvailableGroup(idx, -1)}
+                          title="Pindah ke atas"
+                          className="w-5 h-4 flex items-center justify-center rounded border border-slate-200 bg-slate-50 hover:bg-emerald-50 hover:border-emerald-300 text-slate-700 disabled:opacity-30 cursor-pointer text-[10px] leading-none"
+                        >
+                          ↑
+                        </button>
+                        <button
+                          type="button"
+                          disabled={idx === groups.length - 1}
+                          onClick={() => moveAvailableGroup(idx, 1)}
+                          title="Pindah ke bawah"
+                          className="w-5 h-4 flex items-center justify-center rounded border border-slate-200 bg-slate-50 hover:bg-emerald-50 hover:border-emerald-300 text-slate-700 disabled:opacity-30 cursor-pointer text-[10px] leading-none"
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                  <div className="min-w-0">
+                    <div className="font-bold text-slate-900 truncate">{grp.room_type_name}</div>
+                    <div className="text-[10px] text-slate-500 mt-0.5">
+                      Siap: <b className="text-emerald-700">{grp.clean_count}</b> · Kotor: <b className="text-amber-700">{grp.dirty_count}</b>
+                    </div>
+                  </div>
+                </div>
+                <span className="px-2.5 py-1 rounded-full text-xs font-bold bg-emerald-100 text-emerald-900 border border-emerald-200 shrink-0">
+                  {grp.available_count} kamar
+                </span>
+              </div>
+              <div className="p-2.5 flex flex-wrap gap-1.5">
+                {grp.rooms.map((rm) => {
+                  const st = String(rm.status || '').toUpperCase();
+                  const isClean = st === 'VACANT_CLEAN' || st === 'INSPECTED';
+                  return (
+                    <span
+                      key={rm.room_id}
+                      className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold border ${
+                        isClean
+                          ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200'
+                      }`}
+                      title={st}
+                    >
+                      <span className="font-mono font-bold">{rm.room_number}</span>
+                      <span className="text-[9px] opacity-80">({isClean ? 'Ready' : 'Kotor'})</span>
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })}
       </div>
     );
   }
