@@ -219,6 +219,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const assetFileInputRef = useRef<HTMLInputElement | null>(null);
   const [importingXlsx, setImportingXlsx] = useState(false);
   const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
 
   const subledger = analytics?.accounting_subledger;
 
@@ -476,8 +477,6 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
       setImportingXlsx(false);
     }
   };
-
-  const [approvalBusyId, setApprovalBusyId] = useState<string | null>(null);
 
   const handlePayableApprovalChange = async (
     item: AccountingPayableItem,
