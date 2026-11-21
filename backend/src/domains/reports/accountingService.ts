@@ -380,7 +380,15 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
              ORDER BY CASE WHEN ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT') THEN 0 ELSE 1 END, ta.id DESC
              LIMIT 1
-           ) AS payment_proof_attachment
+           ) AS payment_proof_attachment,
+           COALESCE(
+             UPPER(t.approval_status),
+             CASE
+               WHEN t.transaction_type = 'PURCHASE' THEN 'APPROVED'
+               WHEN UPPER(COALESCE(t.payment_status, '')) = 'PAID' THEN 'APPROVED'
+               ELSE 'PENDING_APPROVAL'
+             END
+           ) AS approval_status
          FROM transactions t
          LEFT JOIN suppliers s ON s.id = t.supplier_id
          LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
@@ -396,8 +404,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            AND t.deleted_at IS NULL
            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
            AND (
-             (t.transaction_type = 'PURCHASE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED')
-             OR (t.transaction_type = 'EXPENSE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') = 'APPROVED')
+             (t.transaction_type = 'PURCHASE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED')
+             OR (t.transaction_type = 'EXPENSE' AND COALESCE(UPPER(t.approval_status), 'PENDING_APPROVAL') != 'REJECTED')
            )
 
          UNION ALL
@@ -422,14 +430,15 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            s_pos.bank_holder,
            COALESCE(s_pos.email, ps.email) AS supplier_email,
            COALESCE(sl_ppo.code, '—') AS warehouse_code,
-           NULL::json AS payment_proof_attachment
+           NULL::json AS payment_proof_attachment,
+           COALESCE(UPPER(ppo.approval_status), 'APPROVED') AS approval_status
          FROM pos_purchase_orders ppo
          LEFT JOIN pos_suppliers ps ON ps.id = ppo.supplier_id AND ps.property_id = ppo.property_id
          LEFT JOIN suppliers s_pos ON s_pos.id = COALESCE(ppo.canonical_supplier_id, ps.canonical_supplier_id)
          LEFT JOIN stock_locations sl_ppo ON sl_ppo.id = ppo.destination_location_id AND sl_ppo.property_id = ppo.property_id
          WHERE ppo.property_id = $1
            AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
-           AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') = 'APPROVED'
+           AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') != 'REJECTED'
            AND NOT EXISTS (
              SELECT 1
              FROM transactions t
