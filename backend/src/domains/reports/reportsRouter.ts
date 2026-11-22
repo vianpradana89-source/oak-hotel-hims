@@ -7,7 +7,7 @@ import { hotelDateFromInstant, normalizeHotelDate } from '../../utils/hotelDate'
 import { getDailyKpiDrilldown, getDailyKpiHistory, getDailyKpis } from './dailyKpiService';
 import { calculateOccupancy } from './occupancyService';
 import { calculateFinancials } from './financialsService';
-import { getTransactions, settleTransactionPayment, addTransactionAttachment, executePurchaseLifecycle, executeExpenseLifecycle } from '../transactions/transactionService';
+import { getTransactions, settleTransactionPayment, addTransactionAttachment, executePurchaseLifecycle, executeExpenseLifecycle, hardDeleteTransaction } from '../transactions/transactionService';
 import { calculateHotelCollectibleBalance } from '../reservations/reservationFinancialCalculator';
 import { buildAccountingSubledgerData, ensureAccountingSchema } from './accountingService';
 import { TRANSACTION_ATTACHMENT_UPLOAD_DIR } from '../transactions/transactionAttachmentAccess';
@@ -3028,16 +3028,32 @@ export function createReportsRouter(pool: Pool): Router {
   router.delete('/accounting/payables/:id', async (req: Request, res: Response) => {
     try {
       const rawId = String(req.params.id || '');
-      await ensureAccountingSchema(pool, 1);
+      const propertyId = parsePositiveInt(req.query.property_id) || parsePositiveInt(req.body?.property_id) || 1;
+      await ensureAccountingSchema(pool, propertyId);
       if (rawId.startsWith('MANUAL-AP-')) {
         const id = parsePositiveInt(rawId.replace('MANUAL-AP-', ''));
         if (!id) return res.status(400).json({ status: 'ERROR', message: 'ID tidak valid' });
         await pool.query(`DELETE FROM accounting_manual_payables WHERE id = $1`, [id]);
         return res.json({ status: 'SUCCESS' });
       }
+      if (rawId.startsWith('HIMS-PUR-')) {
+        const txId = parsePositiveInt(rawId.replace('HIMS-PUR-', ''));
+        if (!txId) return res.status(400).json({ status: 'ERROR', message: 'ID transaksi tidak valid' });
+        await hardDeleteTransaction(pool, propertyId, txId, { actorName: 'Akuntansi' });
+        return res.json({ status: 'SUCCESS' });
+      }
+      if (rawId.startsWith('HIMS-PO-')) {
+        const poId = parsePositiveInt(rawId.replace('HIMS-PO-', ''));
+        if (!poId) return res.status(400).json({ status: 'ERROR', message: 'ID PO tidak valid' });
+        await pool.query(
+          `UPDATE pos_purchase_orders SET status = 'CANCELLED', archived_at = NOW(), updated_at = NOW() WHERE id = $1 AND property_id = $2`,
+          [poId, propertyId]
+        );
+        return res.json({ status: 'SUCCESS' });
+      }
       return res.status(400).json({
         status: 'ERROR',
-        message: 'Transaksi pembelian HIMS hanya dapat dibatalkan melalui menu Pusat Transaksi',
+        message: 'Format ID hutang tidak dikenali',
       });
     } catch (err: any) {
       return res.status(500).json({ status: 'ERROR', message: err.message || 'Gagal menghapus hutang' });

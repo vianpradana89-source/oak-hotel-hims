@@ -152,7 +152,7 @@ export const LaporanWorkspace: React.FC<LaporanWorkspaceProps> = ({
 
   const dailyHotelDate = range ? range.start : todayHotelDate;
   const { dailyOps, dailyKpis, dailyOpsError, loading: dailyLoading } = useDailyOperations(
-    propertyId,
+    isAkuntansiOnly ? null : propertyId,
     dailyHotelDate,
     lastReloadToken
   );

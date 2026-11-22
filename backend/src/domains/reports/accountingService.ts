@@ -217,6 +217,14 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
       );
     }
   }
+  await pool
+    .query(
+      `DELETE FROM payment_transactions WHERE transaction_id IN (SELECT id FROM transactions WHERE transaction_no = 'TRX-260908-00008');
+       DELETE FROM transaction_attachments WHERE transaction_id IN (SELECT id FROM transactions WHERE transaction_no = 'TRX-260908-00008');
+       DELETE FROM transaction_lines WHERE transaction_id IN (SELECT id FROM transactions WHERE transaction_no = 'TRX-260908-00008');
+       DELETE FROM transactions WHERE transaction_no = 'TRX-260908-00008';`
+    )
+    .catch(() => {});
   initializedProperties.add(propertyId);
 }
 
@@ -450,7 +458,16 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          ) pmt ON TRUE
          WHERE t.property_id = $1
            AND t.deleted_at IS NULL
-           AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+           AND t.reversal_of_transaction_id IS NULL
+           AND COALESCE(UPPER(t.transaction_status), 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+           AND COALESCE(UPPER(t.purchase_workflow_status), 'PROSES') NOT IN ('BATAL', 'HAPUS')
+           AND COALESCE(UPPER(t.expense_workflow_status), 'PROSES') NOT IN ('BATAL', 'HAPUS')
+           AND NOT EXISTS (
+             SELECT 1
+             FROM transactions rev
+             WHERE rev.property_id = t.property_id
+               AND rev.reversal_of_transaction_id = t.id
+           )
            AND (
              (t.transaction_type = 'PURCHASE' AND COALESCE(UPPER(t.approval_status), 'APPROVED') != 'REJECTED')
              OR (t.transaction_type = 'EXPENSE' AND COALESCE(UPPER(t.approval_status), 'PENDING_APPROVAL') != 'REJECTED')
@@ -486,6 +503,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          LEFT JOIN suppliers s_pos ON s_pos.id = COALESCE(ppo.canonical_supplier_id, ps.canonical_supplier_id)
          LEFT JOIN stock_locations sl_ppo ON sl_ppo.id = ppo.destination_location_id AND sl_ppo.property_id = ppo.property_id
          WHERE ppo.property_id = $1
+           AND ppo.archived_at IS NULL
            AND COALESCE(UPPER(ppo.status), 'DRAFT') = 'COMPLETED'
            AND COALESCE(UPPER(ppo.approval_status), 'APPROVED') != 'REJECTED'
            AND NOT EXISTS (
@@ -493,8 +511,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              FROM transactions t
              WHERE t.property_id = ppo.property_id
                AND t.transaction_type = 'PURCHASE'
-               AND t.deleted_at IS NULL
-               AND t.source_reference = ppo.po_number
+               AND (t.po_id = ppo.id OR t.source_reference = ppo.po_number)
            )
        ) combined_pur
        ORDER BY tx_date DESC, id DESC

@@ -109,6 +109,239 @@ function formatMediumDateId(ymd: string | null | undefined): string {
   return `${day} ${MONTH_SHORT_ID[monthIdx] || parts[1]} ${parts[0]}`;
 }
 
+type HutangFilterColKey = 'supplier' | 'jenis' | 'lokasi';
+
+function getPayableJenisLabel(item: AccountingPayableItem): string {
+  if (item.source === 'HIMS_PURCHASE' && item.tx_type === 'EXPENSE') return 'Pengeluaran';
+  if (item.source === 'HIMS_PURCHASE') return 'Pembelian';
+  return 'Hutang Manual';
+}
+
+function getPayableLokasiLabel(item: AccountingPayableItem): string {
+  const code = String(item.warehouse_code || '—').trim();
+  return code || '—';
+}
+
+interface PayableColumnFilterThProps {
+  label: string;
+  colKey: HutangFilterColKey;
+  allValues: string[];
+  selectedValues: Set<string> | null;
+  onApply: (colKey: HutangFilterColKey, next: Set<string> | null) => void;
+  sortDir?: 'asc' | 'desc' | null;
+  onSortChange?: (colKey: HutangFilterColKey, dir: 'asc' | 'desc' | null) => void;
+  align?: 'left' | 'center';
+}
+
+const PayableColumnFilterTh: React.FC<PayableColumnFilterThProps> = ({
+  label,
+  colKey,
+  allValues,
+  selectedValues,
+  onApply,
+  sortDir,
+  onSortChange,
+  align = 'left',
+}) => {
+  const [open, setOpen] = useState(false);
+  const [searchText, setSearchText] = useState('');
+  const [draft, setDraft] = useState<Set<string>>(() => new Set(allValues));
+  const popoverRef = useRef<HTMLDivElement | null>(null);
+
+  const isFiltered = selectedValues !== null && selectedValues.size < allValues.length;
+
+  useEffect(() => {
+    if (open) {
+      setSearchText('');
+      setDraft(selectedValues === null ? new Set(allValues) : new Set(selectedValues));
+    }
+  }, [open, selectedValues, allValues]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (popoverRef.current && !popoverRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [open]);
+
+  const visibleOptions = useMemo(() => {
+    const q = searchText.trim().toLowerCase();
+    if (!q) return allValues;
+    return allValues.filter((v) => v.toLowerCase().includes(q));
+  }, [allValues, searchText]);
+
+  const toggleOption = (val: string) => {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      if (next.has(val)) next.delete(val);
+      else next.add(val);
+      return next;
+    });
+  };
+
+  const selectAllVisible = () => {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      for (const v of visibleOptions) next.add(v);
+      return next;
+    });
+  };
+
+  const clearAllVisible = () => {
+    setDraft((prev) => {
+      const next = new Set(prev);
+      for (const v of visibleOptions) next.delete(v);
+      return next;
+    });
+  };
+
+  const handleConfirm = () => {
+    if (draft.size >= allValues.length) {
+      onApply(colKey, null);
+    } else {
+      onApply(colKey, new Set(draft));
+    }
+    setOpen(false);
+  };
+
+  return (
+    <th
+      className={`py-3 px-3.5 font-semibold bg-[#123524] relative select-none ${
+        align === 'center' ? 'text-center' : 'text-left'
+      }`}
+    >
+      <div
+        ref={popoverRef}
+        className={`inline-flex items-center gap-1.5 ${align === 'center' ? 'justify-center' : ''}`}
+      >
+        <span>{label}</span>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          title={`Filter / Urutkan ${label}`}
+          className={`inline-flex items-center justify-center w-5 h-5 rounded transition cursor-pointer ${
+            isFiltered || sortDir
+              ? 'bg-[#E6C786] text-[#123524] shadow-2xs'
+              : 'text-emerald-200/80 hover:bg-emerald-900 hover:text-white'
+          }`}
+        >
+          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.3">
+            <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" />
+          </svg>
+        </button>
+
+        {open && (
+          <div className="absolute left-0 top-full mt-1.5 z-50 w-64 rounded-xl bg-white border border-slate-200 shadow-xl p-3 text-left font-normal normal-case tracking-normal text-slate-700">
+            <div className="flex items-center justify-between pb-2 mb-2 border-b border-slate-100">
+              <button
+                type="button"
+                onClick={selectAllVisible}
+                className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer"
+              >
+                Pilih semua ({allValues.length} opsi)
+              </button>
+              <button
+                type="button"
+                onClick={clearAllVisible}
+                className="text-[11px] font-semibold text-rose-600 hover:underline cursor-pointer"
+              >
+                Kosongkan
+              </button>
+            </div>
+
+            <div className="relative mb-2">
+              <input
+                type="text"
+                value={searchText}
+                onChange={(e) => setSearchText(e.target.value)}
+                placeholder={`Cari ${label.toLowerCase()}...`}
+                className="w-full px-2.5 py-1.5 text-xs rounded-lg border border-slate-200 focus:outline-none focus:border-emerald-700 bg-slate-50/60 text-slate-800"
+              />
+            </div>
+
+            <div className="max-h-48 overflow-y-auto divide-y divide-slate-50 border border-slate-100 rounded-lg p-1 bg-slate-50/30">
+              {visibleOptions.length === 0 ? (
+                <div className="py-4 text-center text-[11px] text-slate-400">Tidak ada hasil</div>
+              ) : (
+                visibleOptions.map((val) => {
+                  const checked = draft.has(val);
+                  return (
+                    <label
+                      key={val}
+                      className="flex items-center gap-2 px-2 py-1.5 text-xs text-slate-700 hover:bg-emerald-50/60 rounded cursor-pointer"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleOption(val)}
+                        className="rounded border-slate-300 text-emerald-800 focus:ring-emerald-700"
+                      />
+                      <span className="truncate font-medium" title={val}>
+                        {val || '—'}
+                      </span>
+                    </label>
+                  );
+                })
+              )}
+            </div>
+
+            {onSortChange && (
+              <div className="mt-2 pt-2 border-t border-slate-100 flex items-center justify-between gap-1.5">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">Urutkan:</span>
+                <div className="inline-flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => onSortChange(colKey, sortDir === 'asc' ? null : 'asc')}
+                    className={`px-2 py-1 rounded text-[11px] font-semibold border transition cursor-pointer ${
+                      sortDir === 'asc'
+                        ? 'bg-[#123524] text-white border-[#123524]'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    ↑ A-Z
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onSortChange(colKey, sortDir === 'desc' ? null : 'desc')}
+                    className={`px-2 py-1 rounded text-[11px] font-semibold border transition cursor-pointer ${
+                      sortDir === 'desc'
+                        ? 'bg-[#123524] text-white border-[#123524]'
+                        : 'bg-slate-50 text-slate-600 border-slate-200 hover:bg-slate-100'
+                    }`}
+                  >
+                    ↓ Z-A
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 mt-2.5 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="px-2.5 py-1 rounded-lg text-xs font-medium text-slate-600 hover:bg-slate-100 cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirm}
+                className="px-3 py-1 rounded-lg text-xs font-semibold bg-[#123524] text-white hover:bg-emerald-900 cursor-pointer"
+              >
+                Oke
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </th>
+  );
+};
+
 export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   propertyId,
   startDate,
@@ -129,6 +362,13 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   const [jurnalBadgeFilter, setJurnalBadgeFilter] = useState<string>('ALL');
   const [hutangFilter, setHutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('UNPAID');
   const [hutangSearch, setHutangSearch] = useState('');
+  const [hutangColFilters, setHutangColFilters] = useState<
+    Partial<Record<HutangFilterColKey, Set<string> | null>>
+  >({});
+  const [hutangSortSpec, setHutangSortSpec] = useState<{
+    colKey: HutangFilterColKey;
+    dir: 'asc' | 'desc';
+  } | null>(null);
   const [piutangFilter, setPiutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('ALL');
   const [piutangSearch, setPiutangSearch] = useState('');
   const [coaSearch, setCoaSearch] = useState('');
@@ -238,12 +478,16 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
     });
   }, [subledger, jurnalSearch, jurnalBadgeFilter]);
 
-  // Filtered Payables
-  const filteredPayables = useMemo(() => {
+  // Period-scoped & status-filtered Payables (before column checkbox filters)
+  const periodScopedPayables = useMemo(() => {
     const items = subledger?.payables.items || [];
     const q = hutangSearch.trim().toLowerCase();
     return items.filter((it) => {
       if (hutangFilter !== 'ALL' && it.status !== hutangFilter) return false;
+      const txDate = String(it.tx_date || '').slice(0, 10);
+      if (startDate && endDate && txDate) {
+        if (txDate < startDate || txDate > endDate) return false;
+      }
       if (!q) return true;
       return (
         it.supplier_name.toLowerCase().includes(q) ||
@@ -251,7 +495,68 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
         (it.notes || '').toLowerCase().includes(q)
       );
     });
-  }, [subledger, hutangFilter, hutangSearch]);
+  }, [subledger, hutangFilter, hutangSearch, startDate, endDate]);
+
+  const hutangUniqueOptions = useMemo(() => {
+    const suppliers = new Set<string>();
+    const jenisSet = new Set<string>();
+    const lokasiSet = new Set<string>();
+    for (const it of periodScopedPayables) {
+      suppliers.add((it.supplier_name || '—').trim() || '—');
+      jenisSet.add(getPayableJenisLabel(it));
+      lokasiSet.add(getPayableLokasiLabel(it));
+    }
+    const sortAlpha = (arr: string[]) =>
+      arr.sort((a, b) => a.localeCompare(b, 'id', { sensitivity: 'base' }));
+    return {
+      supplier: sortAlpha(Array.from(suppliers)),
+      jenis: sortAlpha(Array.from(jenisSet)),
+      lokasi: sortAlpha(Array.from(lokasiSet)),
+    };
+  }, [periodScopedPayables]);
+
+  // Filtered Payables (with Excel-style column filters & sorting applied)
+  const filteredPayables = useMemo(() => {
+    const supSet = hutangColFilters.supplier ?? null;
+    const jenSet = hutangColFilters.jenis ?? null;
+    const lokSet = hutangColFilters.lokasi ?? null;
+
+    const list = periodScopedPayables.filter((it) => {
+      const supVal = (it.supplier_name || '—').trim() || '—';
+      const jenVal = getPayableJenisLabel(it);
+      const lokVal = getPayableLokasiLabel(it);
+      if (supSet !== null && !supSet.has(supVal)) return false;
+      if (jenSet !== null && !jenSet.has(jenVal)) return false;
+      if (lokSet !== null && !lokSet.has(lokVal)) return false;
+      return true;
+    });
+
+    if (!hutangSortSpec) return list;
+    const { colKey, dir } = hutangSortSpec;
+    const mult = dir === 'asc' ? 1 : -1;
+    return [...list].sort((a, b) => {
+      const getVal = (row: AccountingPayableItem) => {
+        if (colKey === 'supplier') return (row.supplier_name || '—').trim() || '—';
+        if (colKey === 'jenis') return getPayableJenisLabel(row);
+        return getPayableLokasiLabel(row);
+      };
+      return getVal(a).localeCompare(getVal(b), 'id', { sensitivity: 'base' }) * mult;
+    });
+  }, [periodScopedPayables, hutangColFilters, hutangSortSpec]);
+
+  const handleApplyHutangColFilter = (colKey: HutangFilterColKey, next: Set<string> | null) => {
+    setHutangColFilters((prev) => ({ ...prev, [colKey]: next }));
+  };
+
+  const handleHutangSortChange = (colKey: HutangFilterColKey, dir: 'asc' | 'desc' | null) => {
+    if (!dir) setHutangSortSpec(null);
+    else setHutangSortSpec({ colKey, dir });
+  };
+
+  const hasActiveHutangColFilter = useMemo(
+    () => Object.values(hutangColFilters).some((s) => s !== null && s !== undefined),
+    [hutangColFilters]
+  );
 
   // Filtered Receivables
   const filteredReceivables = useMemo(() => {
@@ -899,6 +1204,18 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                   {tab.label}
                 </button>
               ))}
+              {(hasActiveHutangColFilter || hutangSortSpec) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHutangColFilters({});
+                    setHutangSortSpec(null);
+                  }}
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-semibold text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 transition cursor-pointer"
+                >
+                  Reset Filter Kolom
+                </button>
+              )}
             </div>
             <div className="relative w-full sm:w-72">
               <IconSearch className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
@@ -913,15 +1230,42 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-xs">
-            <div className="overflow-auto max-h-[calc(100vh-270px)]">
+            <div className="overflow-auto max-h-[calc(100vh-270px)] min-h-[280px]">
               <table className="w-full text-xs">
                 <thead className="sticky top-0 z-20">
                   <tr className="bg-[#123524] text-white text-left">
-                    <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier / Penerima</th>
+                    <PayableColumnFilterTh
+                      label="Supplier / Penerima"
+                      colKey="supplier"
+                      allValues={hutangUniqueOptions.supplier}
+                      selectedValues={hutangColFilters.supplier ?? null}
+                      onApply={handleApplyHutangColFilter}
+                      sortDir={hutangSortSpec?.colKey === 'supplier' ? hutangSortSpec.dir : null}
+                      onSortChange={handleHutangSortChange}
+                    />
+                    <th className="py-3 px-3.5 font-semibold bg-[#123524] whitespace-nowrap">Tanggal</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Rekening Supplier</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
-                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Jenis</th>
-                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Lokasi / Dept</th>
+                    <PayableColumnFilterTh
+                      label="Jenis"
+                      colKey="jenis"
+                      allValues={hutangUniqueOptions.jenis}
+                      selectedValues={hutangColFilters.jenis ?? null}
+                      onApply={handleApplyHutangColFilter}
+                      sortDir={hutangSortSpec?.colKey === 'jenis' ? hutangSortSpec.dir : null}
+                      onSortChange={handleHutangSortChange}
+                      align="center"
+                    />
+                    <PayableColumnFilterTh
+                      label="Lokasi / Dept"
+                      colKey="lokasi"
+                      allValues={hutangUniqueOptions.lokasi}
+                      selectedValues={hutangColFilters.lokasi ?? null}
+                      onApply={handleApplyHutangColFilter}
+                      sortDir={hutangSortSpec?.colKey === 'lokasi' ? hutangSortSpec.dir : null}
+                      onSortChange={handleHutangSortChange}
+                      align="center"
+                    />
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
@@ -936,8 +1280,8 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPayables.length === 0 ? (
                     <tr>
-                      <td colSpan={14} className="py-10 text-center text-slate-400">
-                        Tidak ada data hutang pada filter ini.
+                      <td colSpan={15} className="py-10 text-center text-slate-400">
+                        Tidak ada data hutang pada periode dan filter ini.
                       </td>
                     </tr>
                   ) : (
@@ -949,10 +1293,14 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                       return (
                       <tr key={item.id} className="hover:bg-emerald-50/30 transition">
                         {/* 1. Supplier */}
-                        <td className="py-3 px-4 font-bold text-slate-900">
+                        <td className="py-3 px-3.5 font-bold text-slate-900">
                           {item.supplier_name}
                         </td>
-                        {/* 2. Rekening Supplier (kiri Transaksi) */}
+                        {/* 2. Tanggal (sebelah kolom Supplier) */}
+                        <td className="py-3 px-3.5 text-slate-600 font-medium whitespace-nowrap">
+                          {formatMediumDateId(item.tx_date)}
+                        </td>
+                        {/* 3. Rekening Supplier (kiri Transaksi) */}
                         <td className="py-3 px-3 text-center">
                           <button
                             type="button"
@@ -1206,22 +1554,20 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                                 <CheckCircle2 className="w-4 h-4" />
                               </button>
                             )}
-                            {item.source === 'MANUAL' && (
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setConfirmDeleteState({
-                                    title: 'Hapus Data Hutang',
-                                    description: `Apakah Anda yakin ingin menghapus data hutang "${item.supplier_name}" (${item.transaction_no}) sebesar ${formatIdr(item.total_amount)}?`,
-                                    endpoint: `/api/reports/accounting/payables/${encodeURIComponent(item.id)}`,
-                                  })
-                                }
-                                title="Hapus Hutang"
-                                className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
-                              >
-                                <Trash2 className="w-4 h-4" />
-                              </button>
-                            )}
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setConfirmDeleteState({
+                                  title: 'Hapus Permanen Data Hutang / Transaksi',
+                                  description: `Apakah Anda yakin ingin menghapus permanen transaksi "${item.supplier_name}" (${item.transaction_no}) sebesar ${formatIdr(item.total_amount)} dari sistem & Akuntansi Hutang?`,
+                                  endpoint: `/api/reports/accounting/payables/${encodeURIComponent(item.id)}?property_id=${propertyId}`,
+                                })
+                              }
+                              title="Hapus Permanen Hutang / Transaksi"
+                              className="w-8 h-8 rounded-lg bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 inline-flex items-center justify-center transition cursor-pointer"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
                           </div>
                         </td>
                       </tr>
@@ -1231,7 +1577,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 </tbody>
                 <tfoot>
                   <tr className="bg-emerald-950/5 font-extrabold text-slate-900 border-t border-slate-200">
-                    <td colSpan={5} className="py-3 px-4">
+                    <td colSpan={6} className="py-3 px-4">
                       Total ({filteredPayables.length} transaksi)
                     </td>
                     <td className="py-3 px-4 text-right">

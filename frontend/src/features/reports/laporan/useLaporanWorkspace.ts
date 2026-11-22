@@ -82,6 +82,11 @@ async function fetchJson(url: string): Promise<{ ok: boolean; status: number; js
  * inclusive period. The two requests are independent: one failing never blanks
  * the other. Stale responses are discarded via a monotonic version ref.
  */
+const laporanSvrCache = new Map<
+  string,
+  { analytics?: AnalyticsHubData | null; financials?: FinancialsData | null }
+>();
+
 export function useLaporanWorkspace(
   propertyId: number | null,
   externalRefreshTrigger: number = 0
@@ -94,22 +99,35 @@ export function useLaporanWorkspace(
   const [reloadToken, setReloadToken] = useState<number>(0);
   const [lastReloadToken, setLastReloadToken] = useState<number>(0);
 
-  const [analytics, setAnalytics] = useState<AnalyticsHubData | null>(null);
-  const [financials, setFinancials] = useState<FinancialsData | null>(null);
+  const range = resolvePeriodRange(period, customStart, customEnd, todayHotelDate);
+  const rangeStart = range?.start ?? null;
+  const rangeEnd = range?.end ?? null;
+  const initialCacheKey =
+    propertyId !== null && rangeStart && rangeEnd ? `${propertyId}:${rangeStart}:${rangeEnd}` : '';
+  const initialCached = initialCacheKey ? laporanSvrCache.get(initialCacheKey) : undefined;
+
+  const [analytics, setAnalytics] = useState<AnalyticsHubData | null>(initialCached?.analytics ?? null);
+  const [financials, setFinancials] = useState<FinancialsData | null>(initialCached?.financials ?? null);
   const [analyticsError, setAnalyticsError] = useState<LaporanError | null>(null);
   const [financialsError, setFinancialsError] = useState<LaporanError | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
 
   const versionRef = useRef<number>(0);
-
-  const range = resolvePeriodRange(period, customStart, customEnd, todayHotelDate);
-  const rangeStart = range?.start ?? null;
-  const rangeEnd = range?.end ?? null;
+  const hasAnalyticsRef = useRef<boolean>(Boolean(initialCached?.analytics));
+  hasAnalyticsRef.current = Boolean(analytics);
 
   const load = useCallback(
     async (targetProp: number, start: string, end: string) => {
       const version = ++versionRef.current;
-      setLoading(true);
+      const cacheKey = `${targetProp}:${start}:${end}`;
+      const cached = laporanSvrCache.get(cacheKey);
+      if (cached?.analytics) {
+        setAnalytics(cached.analytics);
+        if (cached.financials) setFinancials(cached.financials);
+        setLoading(false);
+      } else if (!hasAnalyticsRef.current) {
+        setLoading(true);
+      }
       setAnalyticsError(null);
       setFinancialsError(null);
       setLastReloadToken(version);
@@ -122,10 +140,12 @@ export function useLaporanWorkspace(
           const { ok, status, json } = await fetchJson(base);
           if (version !== versionRef.current) return;
           if (ok && json?.status === 'SUCCESS' && json.data) {
+            const prev = laporanSvrCache.get(cacheKey) || {};
+            laporanSvrCache.set(cacheKey, { ...prev, analytics: json.data });
             setAnalytics(json.data);
             setAnalyticsError(null);
           } else {
-            setAnalytics(null);
+            if (!cached?.analytics && !hasAnalyticsRef.current) setAnalytics(null);
             setAnalyticsError({
               code: json?.code || (status === 409 ? 'CAPACITY_HISTORY_UNAVAILABLE' : 'ERROR'),
               message: json?.message || 'Gagal memuat data analitik',
@@ -134,7 +154,7 @@ export function useLaporanWorkspace(
           }
         } catch (err: any) {
           if (version !== versionRef.current) return;
-          setAnalytics(null);
+          if (!cached?.analytics && !hasAnalyticsRef.current) setAnalytics(null);
           setAnalyticsError({
             code: 'NETWORK_ERROR',
             message: err?.message || 'Gagal terhubung ke server',
@@ -148,10 +168,12 @@ export function useLaporanWorkspace(
           const { ok, json } = await fetchJson(finBase);
           if (version !== versionRef.current) return;
           if (ok && json?.status === 'SUCCESS' && json.data) {
+            const prev = laporanSvrCache.get(cacheKey) || {};
+            laporanSvrCache.set(cacheKey, { ...prev, financials: json.data });
             setFinancials(json.data);
             setFinancialsError(null);
           } else {
-            setFinancials(null);
+            if (!cached?.financials) setFinancials(null);
             setFinancialsError({
               code: json?.code || 'ERROR',
               message: json?.message || 'Gagal memuat data finansial',
@@ -160,7 +182,7 @@ export function useLaporanWorkspace(
           }
         } catch (err: any) {
           if (version !== versionRef.current) return;
-          setFinancials(null);
+          if (!cached?.financials) setFinancials(null);
           setFinancialsError({
             code: 'NETWORK_ERROR',
             message: err?.message || 'Gagal terhubung ke server',

@@ -6910,6 +6910,9 @@ export async function hardDeleteTransaction(
     } else {
       // Standalone PURCHASE, EXPENSE, INCOME, or manual SALE
       await safeExec(`DELETE FROM payment_transactions WHERE transaction_id = $1`, [Number(tx.id)]);
+      await safeExec(`DELETE FROM transaction_attachments WHERE transaction_id = $1`, [Number(tx.id)]);
+      await safeExec(`DELETE FROM transaction_lines WHERE transaction_id = $1`, [Number(tx.id)]);
+      await safeExec(`UPDATE pos_goods_receipts SET transaction_id = NULL WHERE transaction_id = $1`, [Number(tx.id)]);
       await safeExec(
         `UPDATE transactions
             SET reversal_of_transaction_id = NULL
