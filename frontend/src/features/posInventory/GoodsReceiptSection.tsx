@@ -53,8 +53,10 @@ function formatQty(value: number | string | null | undefined): string {
 function isPoEligibleForReceipt(p: PosPurchaseOrder): boolean {
   const st = String(p.status || '').toUpperCase();
   const app = String(p.approval_status || '').toUpperCase();
+  const rec = String((p as any).receiving_status || '').toUpperCase();
   if (['CANCELLED', 'REJECTED', 'DRAFT', 'PENDING_APPROVAL', 'COMPLETED'].includes(st)) return false;
   if (['REJECTED', 'DRAFT', 'PENDING_APPROVAL'].includes(app)) return false;
+  if (['RECEIVED', 'DITERIMA', 'DITERIMA_LENGKAP', 'COMPLETED'].includes(rec)) return false;
   return app === 'APPROVED' || (!app && ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'].includes(st));
 }
 
@@ -743,7 +745,13 @@ export default function GoodsReceiptSection({
         setErrorMsg('Belum ada lokasi gudang fisik aktif yang dikonfigurasi.');
       }
 
-      setApprovedPurchases(purchasesRes);
+      const postedTxIds = new Set(
+        receipts
+          .filter((r) => String(r.status || '').toUpperCase() === 'POSTED' && r.transaction_id)
+          .map((r) => Number(r.transaction_id))
+      );
+      const filteredPurchases = purchasesRes.filter((tx) => !postedTxIds.has(Number(tx.id)));
+      setApprovedPurchases(filteredPurchases);
 
       // Filter POs that can be received (APPROVED and not pending re-approval)
       const receivablePos = poRes.orders.filter((p) => isPoEligibleForReceipt(p));
@@ -755,10 +763,10 @@ export default function GoodsReceiptSection({
         setReceiptType('FROM_PO');
         setSelectedPoId(String(receivablePos[0].id));
         void handleSelectPoChange(String(receivablePos[0].id));
-      } else if (purchasesRes.length > 0) {
+      } else if (filteredPurchases.length > 0) {
         setReceiptType('FROM_PURCHASE');
-        setSelectedPurchaseTxId(String(purchasesRes[0].id));
-        void handleSelectPurchaseTxChange(String(purchasesRes[0].id));
+        setSelectedPurchaseTxId(String(filteredPurchases[0].id));
+        void handleSelectPurchaseTxChange(String(filteredPurchases[0].id));
       } else {
         setReceiptType('FROM_PO');
         setFormItems([]);

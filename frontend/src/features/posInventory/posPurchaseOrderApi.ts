@@ -729,11 +729,13 @@ export async function fetchApprovedPurchaseOrdersForReceiving(
   return (res.orders || []).filter((po) => {
     const appSt = String(po.approval_status || po.status || '').toUpperCase();
     const st = String(po.status || '').toUpperCase();
+    const recSt = String((po as any).receiving_status || '').toUpperCase();
     const isApproved =
       appSt === 'APPROVED' ||
-      ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED', 'COMPLETED'].includes(st);
-    const notCancelled = !['CANCELLED', 'REJECTED', 'DRAFT', 'PENDING_APPROVAL'].includes(st);
-    return isApproved && notCancelled;
+      ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED'].includes(st);
+    const notCancelled = !['CANCELLED', 'REJECTED', 'DRAFT', 'PENDING_APPROVAL', 'COMPLETED'].includes(st);
+    const notFullyReceived = !['RECEIVED', 'DITERIMA', 'DITERIMA_LENGKAP', 'COMPLETED'].includes(recSt);
+    return isApproved && notCancelled && notFullyReceived;
   });
 }
 
@@ -741,18 +743,31 @@ export async function fetchApprovedPurchasesForReceiving(
   propertyId: number
 ): Promise<ApprovedPurchaseOption[]> {
   const res = await authenticatedFetch(
-    `/api/transactions?property_id=${propertyId}&transaction_type=PURCHASE&limit=100`
+    `/api/transactions?property_id=${propertyId}&transaction_type=PURCHASE&operational_sheet=PROSES&limit=100`
   );
   const json = await res.json().catch(() => null);
   const rows: any[] = json?.data?.transactions || json?.transactions || [];
-  return rows.filter(
-    (r) =>
+  return rows.filter((r) => {
+    const recStatus = String(r.receiving_status || '').toUpperCase();
+    const poRecStatus = String(r.po_receiving_status || '').toUpperCase();
+    const poStatus = String(r.po_status || '').toUpperCase();
+    const wfStatus = String(r.purchase_workflow_status || '').toUpperCase();
+    const sheet = String(r.operational_sheet || '').toUpperCase();
+    return (
       r.transaction_type === 'PURCHASE' &&
       r.transaction_status === 'POSTED' &&
       r.approval_status === 'APPROVED' &&
-      r.receiving_status !== 'RECEIVED' &&
-      r.receiving_status !== 'DITERIMA'
-  );
+      !r.has_posted_grn &&
+      r.has_receivable_stock_lines !== false &&
+      !['RECEIVED', 'DITERIMA', 'DITERIMA_LENGKAP', 'COMPLETED'].includes(recStatus) &&
+      !['RECEIVED', 'DITERIMA', 'DITERIMA_LENGKAP', 'COMPLETED'].includes(poRecStatus) &&
+      poStatus !== 'COMPLETED' &&
+      wfStatus !== 'SELESAI' &&
+      sheet !== 'SELESAI' &&
+      sheet !== 'BATAL' &&
+      sheet !== 'HAPUS'
+    );
+  });
 }
 
 export async function fetchProductPackagingsForGrn(

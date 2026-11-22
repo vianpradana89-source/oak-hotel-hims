@@ -4675,6 +4675,16 @@ function buildHapusConditionsAndValues(
     idx++;
   }
   conditions.push('t.deleted_at IS NOT NULL');
+  conditions.push(`NOT (
+    t.reversal_of_transaction_id IS NOT NULL
+    AND UPPER(COALESCE(t.transaction_status, '')) = 'REVERSED'
+    AND EXISTS (
+      SELECT 1 FROM transactions t_orig
+      WHERE t_orig.id = t.reversal_of_transaction_id
+        AND t_orig.property_id = t.property_id
+        AND t_orig.deleted_at IS NOT NULL
+    )
+  )`);
 
   return { conditions, values };
 }
@@ -4805,6 +4815,16 @@ async function ensureExpenseRecipientSchema(pool: Pool): Promise<void> {
       WHERE transaction_type = 'PURCHASE'
         AND verification_status = 'VERIFIED'
         AND COALESCE(purchase_workflow_status, 'PROSES') != 'SELESAI';
+      UPDATE transactions t
+      SET receiving_status = 'DITERIMA_LENGKAP'
+      WHERE t.transaction_type = 'PURCHASE'
+        AND COALESCE(t.receiving_status, 'BELUM_DITERIMA') NOT IN ('DITERIMA', 'DITERIMA_LENGKAP')
+        AND EXISTS (
+          SELECT 1 FROM pos_goods_receipts gr
+          WHERE gr.property_id = t.property_id
+            AND UPPER(COALESCE(gr.status, '')) IN ('POSTED', 'COMPLETED')
+            AND (gr.transaction_id = t.id OR (t.po_id IS NOT NULL AND gr.po_id = t.po_id))
+        );
       UPDATE transaction_attachments ta
       SET attachment_purpose = 'INVOICE'
       FROM transactions t
@@ -4982,6 +5002,22 @@ export async function getTransactions(
             ota.name AS ota_source_name,
             po_ref.po_number AS po_number,
             po_ref.status AS po_status,
+            po_ref.receiving_status AS po_receiving_status,
+            EXISTS (
+              SELECT 1 FROM pos_goods_receipts gr_chk
+              WHERE gr_chk.property_id = t.property_id
+                AND UPPER(COALESCE(gr_chk.status, '')) IN ('POSTED', 'COMPLETED')
+                AND (
+                  gr_chk.transaction_id = t.id
+                  OR (t.po_id IS NOT NULL AND gr_chk.po_id = t.po_id)
+                )
+            ) AS has_posted_grn,
+            EXISTS (
+              SELECT 1 FROM transaction_lines tl_chk
+              WHERE tl_chk.transaction_id = t.id
+                AND tl_chk.property_id = t.property_id
+                AND tl_chk.product_id IS NOT NULL
+            ) AS has_receivable_stock_lines,
             pos_ord.pos_table_number AS pos_table_number,
             pos_ord.pos_order_items AS pos_order_items,
             COALESCE(pmt.total_paid, 0) AS paid_amount,
@@ -6405,9 +6441,14 @@ export async function softDeleteTransaction(
 
     const txRes = await client.query(
       `SELECT t.*,
+              r.status AS reservation_status,
+              r.stay_status AS reservation_stay_status,
+              b.booking_status AS booking_status,
               COALESCE(pmt.total_paid, 0) AS paid_amount,
               COALESCE(pmt.payment_count, 0) AS payment_count
        FROM transactions t
+       LEFT JOIN reservations r ON r.id = t.reservation_id
+       LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
        LEFT JOIN LATERAL (
          SELECT SUM(pt.amount)::bigint AS total_paid,
                 COUNT(*)::int AS payment_count
@@ -6435,44 +6476,59 @@ export async function softDeleteTransaction(
       throw err;
     }
 
-    // Only PURCHASE and EXPENSE can be soft-deleted
-    if (!['PURCHASE', 'EXPENSE'].includes(tx.transaction_type)) {
-      const err: any = new Error(`Transaksi tipe ${tx.transaction_type} tidak mendukung penghapusan draft. Gunakan Batal / Void.`);
-      err.statusCode = 400;
-      throw err;
-    }
+    const txStatus = String(tx.transaction_status || '').toUpperCase();
+    const isAlreadyCancelledOrBatal =
+      ['VOIDED', 'REVERSED', 'CANCELLED'].includes(txStatus) ||
+      Boolean(tx.reversal_of_transaction_id) ||
+      String(tx.approval_status || '').toUpperCase() === 'REJECTED' ||
+      ['CANCELLED', 'VOIDED', 'NO_SHOW'].includes(String(tx.reservation_status || '').toUpperCase()) ||
+      ['CANCELLED', 'VOIDED', 'NO_SHOW'].includes(String(tx.booking_status || '').toUpperCase()) ||
+      deriveOperationalSheet(tx) === 'BATAL';
 
-    // Guard: cannot delete if payments exist
-    if (Number(tx.payment_count) > 0 || Number(tx.paid_amount) > 0) {
-      const err: any = new Error(`Transaksi #${tx.transaction_no} tidak dapat dihapus karena sudah memiliki pembayaran. Gunakan Batal / Void.`);
-      err.statusCode = 400;
-      throw err;
-    }
+    if (!isAlreadyCancelledOrBatal) {
+      // Only PURCHASE and EXPENSE can be soft-deleted directly as draft
+      if (!['PURCHASE', 'EXPENSE'].includes(tx.transaction_type)) {
+        const err: any = new Error(`Transaksi tipe ${tx.transaction_type} tidak mendukung penghapusan draft. Gunakan Batal / Void.`);
+        err.statusCode = 400;
+        throw err;
+      }
 
-    // Guard: cannot delete if fully received
-    if (tx.receiving_status === 'DITERIMA' || tx.receiving_status === 'DITERIMA_LENGKAP') {
-      const err: any = new Error(`Transaksi pembelian #${tx.transaction_no} tidak dapat dihapus karena barang sudah diterima lengkap. Gunakan Batal / Void.`);
-      err.statusCode = 400;
-      throw err;
-    }
+      // Guard: cannot delete if payments exist
+      if (Number(tx.payment_count) > 0 || Number(tx.paid_amount) > 0) {
+        const err: any = new Error(`Transaksi #${tx.transaction_no} tidak dapat dihapus karena sudah memiliki pembayaran. Gunakan Batal / Void.`);
+        err.statusCode = 400;
+        throw err;
+      }
 
-    // Guard: cannot delete if verified
-    if (tx.verification_status === 'VERIFIED') {
-      const err: any = new Error(`Transaksi #${tx.transaction_no} tidak dapat dihapus karena sudah terverifikasi. Batalkan verifikasi terlebih dahulu.`);
-      err.statusCode = 400;
-      throw err;
-    }
+      // Guard: cannot delete if fully received
+      if (tx.receiving_status === 'DITERIMA' || tx.receiving_status === 'DITERIMA_LENGKAP') {
+        const err: any = new Error(`Transaksi pembelian #${tx.transaction_no} tidak dapat dihapus karena barang sudah diterima lengkap. Gunakan Batal / Void.`);
+        err.statusCode = 400;
+        throw err;
+      }
 
-    // Guard: cannot delete if reversal or folio/pos projection
-    if (tx.reversal_of_transaction_id || tx.reservation_id || tx.booking_id) {
-      const err: any = new Error(`Transaksi terkait reservasi/reversal tidak dapat dihapus.`);
-      err.statusCode = 400;
-      throw err;
+      // Guard: cannot delete if verified
+      if (tx.verification_status === 'VERIFIED') {
+        const err: any = new Error(`Transaksi #${tx.transaction_no} tidak dapat dihapus karena sudah terverifikasi. Batalkan verifikasi terlebih dahulu.`);
+        err.statusCode = 400;
+        throw err;
+      }
+
+      // Guard: cannot delete if reversal or folio/pos projection
+      if (tx.reversal_of_transaction_id || tx.reservation_id || tx.booking_id) {
+        const err: any = new Error(`Transaksi terkait reservasi/reversal tidak dapat dihapus.`);
+        err.statusCode = 400;
+        throw err;
+      }
     }
 
     const deleteReason = dto.delete_reason.trim();
     const actorName = dto.actor_name || 'Staff';
     const actorUserId = dto.actor_user_id || null;
+    const origOrSelfId = tx.reversal_of_transaction_id ? Number(tx.reversal_of_transaction_id) : null;
+    const corrGroupId = tx.correction_group_id || null;
+    const bookingIdNum = tx.booking_id ? Number(tx.booking_id) : null;
+    const cascadeSaleBooking = Boolean(isAlreadyCancelledOrBatal && String(tx.transaction_type || '').toUpperCase() === 'SALE' && bookingIdNum);
 
     const updateRes = await client.query(
       `UPDATE transactions
@@ -6481,9 +6537,16 @@ export async function softDeleteTransaction(
            deleted_by_name_snapshot = $2,
            delete_reason = $3,
            updated_at = NOW()
-       WHERE id = $4 AND property_id = $5
+       WHERE property_id = $5
+         AND (
+           id = $4
+           OR reversal_of_transaction_id = $4
+           OR ($6::bigint IS NOT NULL AND (id = $6 OR reversal_of_transaction_id = $6))
+           OR ($7::text IS NOT NULL AND correction_group_id = $7)
+           OR ($8::bigint IS NOT NULL AND $9::boolean = true AND booking_id = $8 AND transaction_type = 'SALE')
+         )
        RETURNING *`,
-      [actorUserId, actorName, deleteReason, id, propertyId]
+      [actorUserId, actorName, deleteReason, Number(id), propertyId, origOrSelfId, corrGroupId, bookingIdNum, cascadeSaleBooking]
     );
 
     // Audit log
