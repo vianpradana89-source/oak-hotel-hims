@@ -1014,12 +1014,15 @@ export function createReportsRouter(pool: Pool): Router {
           LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
           LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = t.property_id
           LEFT JOIN folio_entries fe_mb
-            ON UPPER(COALESCE(t.source_type, '')) = 'FOLIO_ENTRY'
+            ON UPPER(COALESCE(t.source_type, '')) IN ('FOLIO_ENTRY', 'MINIBAR')
            AND fe_mb.id::text = COALESCE(t.source_id, '')
            AND fe_mb.property_id = t.property_id
           LEFT JOIN housekeeping_tasks ht_mb
             ON ht_mb.property_id = t.property_id
-           AND ht_mb.id::text = COALESCE(fe_mb.source_id, CASE WHEN UPPER(COALESCE(t.source_type, '')) = 'MINIBAR' THEN t.source_id ELSE NULL END)
+           AND (
+             ht_mb.id::text = fe_mb.source_id
+             OR (fe_mb.id IS NULL AND UPPER(COALESCE(t.source_type, '')) = 'MINIBAR' AND ht_mb.id::text = t.source_id)
+           )
           LEFT JOIN LATERAL (
             SELECT
               (mb_el.ord)::int AS item_idx,

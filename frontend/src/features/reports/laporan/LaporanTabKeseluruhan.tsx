@@ -154,14 +154,10 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
   const activeRoomSalesRows = (analytics?.room_sales || []).filter((r) => !r.is_complimentary);
   const activePosSalesRows = (analytics?.pos_item_sales || []).filter((p) => !p.is_complimentary);
   const activePosOnlySalesRows = activePosSalesRows.filter(
-    (p) =>
-      String(p.sale_source || '').toUpperCase() !== 'MINIBAR' &&
-      !String(p.category_name || '').toLowerCase().includes('minibar')
+    (p) => String(p.sale_source || '').toUpperCase() !== 'MINIBAR'
   );
   const activeMinibarSalesRows = activePosSalesRows.filter(
-    (p) =>
-      String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
-      String(p.category_name || '').toLowerCase().includes('minibar')
+    (p) => String(p.sale_source || '').toUpperCase() === 'MINIBAR'
   );
   const roomSalesFromAnalytics =
     activeRoomSalesRows.length > 0

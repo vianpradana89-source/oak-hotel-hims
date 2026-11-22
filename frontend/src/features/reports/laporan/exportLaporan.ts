@@ -230,9 +230,7 @@ export function buildLaporanSheets(opts: {
   ];
   if (analytics) {
     for (const s of analytics.pos_item_sales || []) {
-      const isMb =
-        String(s.sale_source || '').toUpperCase() === 'MINIBAR' ||
-        String(s.category_name || '').toLowerCase().includes('minibar');
+      const isMb = String(s.sale_source || '').toUpperCase() === 'MINIBAR';
       salesRows.push([
         s.tx_date,
         s.booking_or_order_no,

@@ -237,9 +237,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
     const isComp = Boolean(i.is_complimentary);
     const amountPaid = isComp ? 0 : netTotal;
     const profit = amountPaid - hpp;
-    const isMinibar =
-      String(i.sale_source || '').toUpperCase() === 'MINIBAR' ||
-      String(i.category_name || '').toLowerCase().includes('minibar');
+    const isMinibar = String(i.sale_source || '').toUpperCase() === 'MINIBAR';
     const statusBadge = formatShortStatusBadge('POS', i.payment_status, isComp);
 
     return {
@@ -390,7 +388,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   // Table-based views: rincian_penjualan, penjualan_kamar, penjualan_item, penjualan_minibar, complimentary_only, discounted_only
   let modeRows: UnifiedSaleRow[] = [];
   if (reportMode === 'penjualan_item') {
-    modeRows = unifiedPosRows;
+    modeRows = unifiedPosRows.filter((r) => r.source === 'POS');
   } else if (reportMode === 'penjualan_minibar') {
     modeRows = unifiedPosRows.filter((r) => r.source === 'MINIBAR');
   } else if (reportMode === 'penjualan_kamar') {
@@ -507,6 +505,16 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
   const totalPaidAmount = filteredRows.reduce((s, r) => s + r.amountPaid, 0);
   const totalHppAmount = filteredRows.reduce((s, r) => s + r.hpp, 0);
   const totalProfitAmount = filteredRows.reduce((s, r) => s + r.profit, 0);
+  const isMinibarOnlyView = reportMode === 'penjualan_minibar';
+  const displayedDiscountTotal = isMinibarOnlyView
+    ? filteredRows.reduce((s, r) => s + r.discountAmount, 0)
+    : totalDiscountAmount;
+  const displayedCompCount = isMinibarOnlyView
+    ? filteredRows.filter((r) => r.isComplimentary).length
+    : allCompTotalCount;
+  const displayedCompEstValue = isMinibarOnlyView
+    ? filteredRows.filter((r) => r.isComplimentary).reduce((s, r) => s + r.estimatedCompValue, 0)
+    : allCompEstValue;
 
   const handleCopyBid = (bid: string) => {
     if (navigator?.clipboard) {
@@ -581,10 +589,12 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
             <span className="truncate">Total Diskon</span>
           </div>
           <div className="text-base font-extrabold text-purple-900 mt-1 tabular-nums truncate">
-            {formatIdr(totalDiscountAmount)}
+            {formatIdr(displayedDiscountTotal)}
           </div>
           <div className="text-[10px] text-purple-700 mt-0.5 truncate">
-            Kmr: {formatIdr(roomDiscountTotal)} • POS: {formatIdr(posDiscountTotal)}
+            {isMinibarOnlyView
+              ? 'Diskon Minibar Kamar'
+              : `Kmr: ${formatIdr(roomDiscountTotal)} • POS: ${formatIdr(posDiscountTotal)}`}
           </div>
         </div>
         <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-xs min-w-0">
@@ -611,10 +621,12 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
             <span className="truncate">Complimentary</span>
           </div>
           <div className="text-base font-extrabold text-amber-900 mt-1 tabular-nums truncate">
-            {allCompTotalCount} transaksi
+            {displayedCompCount} transaksi
           </div>
           <div className="text-[10px] text-amber-700 mt-0.5 truncate">
-            Kmr: {allCompRoomCount} • POS: {allCompPosCount} (Est. {formatIdr(allCompEstValue)})
+            {isMinibarOnlyView
+              ? `Minibar: ${displayedCompCount} (Est. ${formatIdr(displayedCompEstValue)})`
+              : `Kmr: ${allCompRoomCount} • POS: ${allCompPosCount} (Est. ${formatIdr(allCompEstValue)})`}
           </div>
         </div>
       </div>

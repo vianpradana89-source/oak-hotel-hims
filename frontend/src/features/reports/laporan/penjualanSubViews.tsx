@@ -781,9 +781,7 @@ export const SubViewSumberTransaksi: React.FC<{
     });
 
     const posMapped = posItems.map((p) => {
-      const isMinibar =
-        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
-        String(p.category_name || '').toLowerCase().includes('minibar');
+      const isMinibar = String(p.sale_source || '').toUpperCase() === 'MINIBAR';
       return {
         key: `p-${p.order_item_id}`,
         bid: p.booking_or_order_no,
@@ -1000,18 +998,12 @@ export const SubViewPenjualanLabaRugi: React.FC<{
     .reduce((s, r) => s + (Number(r.total_price) || 0), 0);
   const posRevenue = posItems
     .filter(
-      (p) =>
-        !p.is_complimentary &&
-        String(p.sale_source || '').toUpperCase() !== 'MINIBAR' &&
-        !String(p.category_name || '').toLowerCase().includes('minibar')
+      (p) => !p.is_complimentary && String(p.sale_source || '').toUpperCase() !== 'MINIBAR'
     )
     .reduce((s, p) => s + (Number(p.line_total) || 0), 0);
   const minibarRevenue = posItems
     .filter(
-      (p) =>
-        !p.is_complimentary &&
-        (String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
-          String(p.category_name || '').toLowerCase().includes('minibar'))
+      (p) => !p.is_complimentary && String(p.sale_source || '').toUpperCase() === 'MINIBAR'
     )
     .reduce((s, p) => s + (Number(p.line_total) || 0), 0);
   const totalRevenue = roomRevenue + posRevenue + minibarRevenue;
@@ -1182,9 +1174,7 @@ export const SubViewRekapItem: React.FC<{
   const productRecap = useMemo(() => {
     const map = new Map<string, { name: string; qty: number; subtotal: number }>();
     for (const p of posItems) {
-      const isMinibar =
-        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
-        String(p.category_name || '').toLowerCase().includes('minibar');
+      const isMinibar = String(p.sale_source || '').toUpperCase() === 'MINIBAR';
       if (isMinibar) continue;
       const name = p.item_name || 'Item POS';
       const cur = map.get(name) || { name, qty: 0, subtotal: 0 };
@@ -1198,9 +1188,7 @@ export const SubViewRekapItem: React.FC<{
   const minibarRecap = useMemo(() => {
     const map = new Map<string, { name: string; qty: number; subtotal: number }>();
     for (const p of posItems) {
-      const isMinibar =
-        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
-        String(p.category_name || '').toLowerCase().includes('minibar');
+      const isMinibar = String(p.sale_source || '').toUpperCase() === 'MINIBAR';
       if (!isMinibar) continue;
       const name = p.item_name || 'Item Minibar';
       const cur = map.get(name) || { name, qty: 0, subtotal: 0 };
