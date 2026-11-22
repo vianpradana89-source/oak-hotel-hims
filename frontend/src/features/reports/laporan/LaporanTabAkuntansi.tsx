@@ -18,6 +18,7 @@ import {
   IconCreditCard,
   IconDownload,
   IconFileSpreadsheet,
+  IconFileText,
   IconLayoutGrid,
   IconPackage,
   IconScale,
@@ -28,6 +29,7 @@ import {
 } from './LaporanIcons';
 import { LaporanTabKeseluruhan } from './LaporanTabKeseluruhan';
 import { downloadExportXml } from './exportLaporan';
+import { printJurnalUmumPdf } from './printAccountingPdf';
 import { downloadAssetsXlsx, parseUploadedAssetsFile } from './xlsxAsetUtils';
 import {
   AddAssetModal,
@@ -1036,13 +1038,35 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 Kronologi transaksi uang masuk, uang keluar, dan saldo berjalan dari seluruh aktivitas HIMS ({startDate} s/d {endDate}).
               </p>
             </div>
-            <button
-              onClick={handleExportJurnalExcel}
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition"
-            >
-              <IconDownload className="w-3.5 h-3.5" />
-              Export Excel
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() =>
+                  void printJurnalUmumPdf({
+                    startDate,
+                    endDate,
+                    badgeFilter: jurnalBadgeFilter,
+                    searchQuery: jurnalSearch,
+                    totalIn: subledger?.general_journal.total_in || 0,
+                    totalOut: subledger?.general_journal.total_out || 0,
+                    closingBalance: subledger?.general_journal.closing_balance || 0,
+                    rows: filteredJournalRows,
+                  })
+                }
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl border border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-700 text-xs font-bold shadow-xs transition cursor-pointer"
+              >
+                <IconFileText className="w-3.5 h-3.5" />
+                <span>PDF</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleExportJurnalExcel}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#123524] hover:bg-emerald-950 text-[#E6C786] text-xs font-bold shadow-xs transition cursor-pointer"
+              >
+                <IconDownload className="w-3.5 h-3.5" />
+                Export Excel
+              </button>
+            </div>
           </div>
 
           {/* 4 Summary Cards matching ANKA reference in OAK Emerald/Gold */}

@@ -29,6 +29,7 @@ import {
 } from './LaporanIcons';
 import { formatIndonesianLongDate } from './laporanPeriods';
 import { downloadExportXml } from './exportLaporan';
+import { printArusKasPdf, printLabaRugiPdf, printNeracaPdf } from './printAccountingPdf';
 import type { DailyOperationsData } from './useDailyOperations';
 import type {
   AnalyticsHubData,
@@ -435,7 +436,30 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={() =>
+                void printLabaRugiPdf({
+                  startDate: String(analytics?.start_date || financials?.start_date || ''),
+                  endDate: String(analytics?.end_date || financials?.end_date || ''),
+                  pendapatanKamar,
+                  pendapatanPos,
+                  pendapatanLain,
+                  potonganDiskon,
+                  subTotalPendapatan,
+                  hppProduk,
+                  subTotalHpp,
+                  labaKotor,
+                  expCategories,
+                  subTotalPengeluaran,
+                  stokKeluarVal,
+                  opnameStokVal,
+                  totalStokVal,
+                  poDiskon,
+                  poPengiriman,
+                  poPajak,
+                  totalPembelianAdj,
+                  labaBersih,
+                })
+              }
               className="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50/60 hover:bg-rose-100/70 text-rose-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
             >
               <IconFileText className="w-3.5 h-3.5" />
@@ -782,7 +806,19 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={() =>
+                void printArusKasPdf({
+                  startDate: String(analytics?.start_date || financials?.start_date || ''),
+                  endDate: String(analytics?.end_date || financials?.end_date || ''),
+                  saldoAwal,
+                  op,
+                  invSubtotal,
+                  totalPendapatanCf,
+                  finSubtotal,
+                  kenaikanKas,
+                  saldoAkhir,
+                })
+              }
               className="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50/60 hover:bg-rose-100/70 text-rose-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
             >
               <IconFileText className="w-3.5 h-3.5" />
@@ -1034,7 +1070,18 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
           <div className="flex items-center gap-2">
             <button
               type="button"
-              onClick={() => window.print()}
+              onClick={() =>
+                void printNeracaPdf({
+                  startDate: String(analytics?.start_date || financials?.start_date || ''),
+                  endDate: String(analytics?.end_date || financials?.end_date || ''),
+                  ca,
+                  nca,
+                  totalAset,
+                  kew,
+                  mod,
+                  totalKewajibanModal,
+                })
+              }
               className="px-3 py-1.5 rounded-lg border border-rose-200 bg-rose-50/60 hover:bg-rose-100/70 text-rose-700 text-xs font-bold flex items-center gap-1.5 cursor-pointer"
             >
               <IconFileText className="w-3.5 h-3.5" />
