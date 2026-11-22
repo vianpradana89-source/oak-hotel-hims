@@ -1314,13 +1314,23 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
       const updatedItem = (await res.json()).data;
 
       // Update state locally in selectedTask
-      setSelectedTask((prev) => {
-        if (!prev) return null;
-        const newItems = (prev.checklist_items || []).map((i) =>
-          i.id === item.id ? updatedItem : i
-        );
-        return { ...prev, checklist_items: newItems };
-      });
+      if (item.id <= 0) {
+        const listRes = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist?property_id=${propertyId}`);
+        if (listRes.ok) {
+          const listJson = await listRes.json().catch(() => ({}));
+          if (Array.isArray(listJson.data)) {
+            setSelectedTask((prev) => (prev ? { ...prev, checklist_items: listJson.data } : null));
+          }
+        }
+      } else {
+        setSelectedTask((prev) => {
+          if (!prev) return null;
+          const newItems = (prev.checklist_items || []).map((i) =>
+            i.id === item.id ? updatedItem : i
+          );
+          return { ...prev, checklist_items: newItems };
+        });
+      }
       fetchDailyOperations(true);
     } catch (err: any) {
       alert(err.message);
@@ -1334,7 +1344,7 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
     isCompleted: boolean
   ) => {
     try {
-      const itemIds = items.map((i) => i.id);
+      const itemIds = items.map((i) => i.id).filter((id) => id > 0);
       const res = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist/bulk-category`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
@@ -1356,11 +1366,21 @@ export const HousekeepingWorkspace: React.FC<HousekeepingWorkspaceProps> = ({
       const updatedRows: TaskChecklistItem[] = data.data?.updated_items || [];
       const updatedMap = new Map<number, TaskChecklistItem>(updatedRows.map((r) => [r.id, r]));
 
-      setSelectedTask((prev) => {
-        if (!prev) return null;
-        const newItems = (prev.checklist_items || []).map((i) => updatedMap.get(i.id) || i);
-        return { ...prev, checklist_items: newItems };
-      });
+      if (items.some((i) => i.id <= 0)) {
+        const listRes = await authenticatedFetch(`${apiBaseUrl}/housekeeping/tasks/${task.id}/checklist?property_id=${propertyId}`);
+        if (listRes.ok) {
+          const listJson = await listRes.json().catch(() => ({}));
+          if (Array.isArray(listJson.data)) {
+            setSelectedTask((prev) => (prev ? { ...prev, checklist_items: listJson.data } : null));
+          }
+        }
+      } else {
+        setSelectedTask((prev) => {
+          if (!prev) return null;
+          const newItems = (prev.checklist_items || []).map((i) => updatedMap.get(i.id) || i);
+          return { ...prev, checklist_items: newItems };
+        });
+      }
       fetchDailyOperations(true);
     } catch (err: any) {
       alert(err.message);

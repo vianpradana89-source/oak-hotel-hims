@@ -368,13 +368,27 @@ export async function getChecklistTemplateByCode(
 }
 
 export async function snapshotTemplateToChecklist(
-  client: PoolClient,
+  client: PoolClient | Pool,
   taskId: number,
   propertyId: number,
   templateCode: string
 ): Promise<TaskChecklistItem[]> {
   await ensureChecklistItemRoomTypeScopeColumn(client);
-  const template = await getChecklistTemplateByCode(client, propertyId, templateCode);
+  let template = await getChecklistTemplateByCode(client as PoolClient, propertyId, templateCode);
+  const hasActiveItems = (tpl: ChecklistTemplate | null) =>
+    Boolean(tpl && tpl.is_active && !tpl.is_archived && Array.isArray(tpl.items) && tpl.items.some((it) => it.is_active && !it.is_archived));
+
+  if (!hasActiveItems(template)) {
+    const settings = await getPropertyHousekeepingSettings(client as PoolClient, propertyId);
+    const fallbackCode = settings.default_cleaning_template_code || 'STANDARD_ROOM_CLEANING';
+    if (fallbackCode !== templateCode) {
+      template = await getChecklistTemplateByCode(client as PoolClient, propertyId, fallbackCode);
+    }
+    if (!hasActiveItems(template) && fallbackCode !== 'STANDARD_ROOM_CLEANING') {
+      template = await getChecklistTemplateByCode(client as PoolClient, propertyId, 'STANDARD_ROOM_CLEANING');
+    }
+  }
+
   if (!template || !template.items || template.items.length === 0) {
     return [];
   }
@@ -607,61 +621,13 @@ export async function getTaskChecklistItems(
     }
 
     if (templateCodeToUse) {
-      let taskRoomTypeId: number | null = null;
-      if (task.room_id) {
-        const rtRes = await client.query('SELECT room_type_id FROM rooms WHERE id = $1 LIMIT 1', [task.room_id]);
-        if (hasRows(rtRes) && rtRes.rows[0].room_type_id) {
-          taskRoomTypeId = Number(rtRes.rows[0].room_type_id);
-        }
-      }
-
-      const template = await getChecklistTemplateByCode(client, propertyId, templateCodeToUse);
-      if (template && template.is_active && !template.is_archived && template.items && template.items.length > 0) {
-        const activeGroupIds = new Set(
-          (template.groups || [])
-            .filter((g) => g.is_active && !g.is_archived)
-            .map((g) => g.id)
+      const createdItems = await snapshotTemplateToChecklist(client, taskId, propertyId, templateCodeToUse);
+      if (createdItems.length > 0) {
+        await client.query(
+          `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          ['HOUSEKEEPING', 'HK_TASK_CHECKLIST_REPAIRED', 'HOUSEKEEPING_TASK', String(taskId), JSON.stringify({ repaired_items_count: createdItems.length, template_code: templateCodeToUse }), actor?.name || 'System Auto-Repair', propertyId]
         );
-
-        const createdItems: TaskChecklistItem[] = [];
-        for (const item of template.items) {
-          if (!item.is_active || item.is_archived) continue;
-          if (item.group_id && !activeGroupIds.has(item.group_id)) continue;
-          if (!isChecklistItemApplicableToRoomType(item.applicable_room_type_ids, taskRoomTypeId)) continue;
-
-          const groupName = item.group_name || item.section || 'RUANGAN KAMAR';
-          const groupSort = item.group_sort_order !== undefined ? item.group_sort_order : 10;
-
-          const ins = await client.query(
-            `INSERT INTO housekeeping_task_checklist_items
-              (task_id, template_item_id, group_id, source_group_id, group_code, group_name, group_sort_order, section, label, sort_order, is_required, requires_note, requires_photo, is_completed, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, false, NOW(), NOW())
-             RETURNING *`,
-            [
-              taskId,
-              item.id,
-              item.group_id || null,
-              item.group_id || null,
-              item.group_code || null,
-              groupName,
-              groupSort,
-              item.section,
-              item.label,
-              item.sort_order,
-              item.is_required,
-              item.requires_note,
-              item.requires_photo
-            ]
-          );
-          createdItems.push(ins.rows[0]);
-        }
-        if (createdItems.length > 0) {
-          await client.query(
-            `INSERT INTO audit_logs (module, action, entity, record_id, new_value, correlation_id, property_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-            ['HOUSEKEEPING', 'HK_TASK_CHECKLIST_REPAIRED', 'HOUSEKEEPING_TASK', String(taskId), JSON.stringify({ repaired_items_count: createdItems.length, template_code: templateCodeToUse }), actor?.name || 'System Auto-Repair', propertyId]
-          );
-        }
         return createdItems;
       }
     }
@@ -1015,6 +981,36 @@ export async function getHousekeepingDailyOperations(
       if (item.is_required) {
         sum.required_total++;
         if (item.is_completed) sum.required_completed++;
+      }
+    }
+
+    // Materialize checklist items in DB for any active room task that has 0 items so item.id is always a real positive DB ID
+    for (const t of tasksRes.rows) {
+      const tid = Number(t.id);
+      const isTerminal = t.status === 'DONE' || t.status === 'VERIFIED' || t.status === 'CANCELLED';
+      if (
+        !isTerminal &&
+        ['ROOM_CLEANING', 'STAYOVER_CLEANING', 'DEEP_CLEAN', 'VIP_ROOM_PREPARATION', 'FINAL_INSPECTION', 'CHECKOUT_ROOM_CHECK'].includes(t.task_type) &&
+        (!checklistItemsMap.has(tid) || checklistItemsMap.get(tid)!.length === 0)
+      ) {
+        try {
+          const lazyItems = await getTaskChecklistItems(client, propertyId, tid);
+          if (lazyItems.length > 0) {
+            checklistItemsMap.set(tid, lazyItems);
+            const sum = { total: 0, completed: 0, required_total: 0, required_completed: 0 };
+            for (const item of lazyItems) {
+              sum.total++;
+              if (item.is_completed) sum.completed++;
+              if (item.is_required) {
+                sum.required_total++;
+                if (item.is_completed) sum.required_completed++;
+              }
+            }
+            checklistSummaryMap.set(tid, sum);
+          }
+        } catch {
+          // non-fatal
+        }
       }
     }
   }
@@ -1709,7 +1705,16 @@ export async function updateTaskChecklistItem(
     throw Object.assign(new Error('Task not found in this property'), { statusCode: 404 });
   }
 
-  const res = await client.query(
+  let effectiveItemId = itemId;
+  if (effectiveItemId <= 0) {
+    const materialized = await getTaskChecklistItems(client, propertyId, taskId, actor);
+    const idx = Math.abs(effectiveItemId) - 1;
+    if (idx >= 0 && idx < materialized.length) {
+      effectiveItemId = Number(materialized[idx].id);
+    }
+  }
+
+  let res = await client.query(
     `UPDATE housekeeping_task_checklist_items
      SET is_completed = $1,
          completed_at = CASE WHEN $1 = true THEN COALESCE(completed_at, NOW()) ELSE NULL END,
@@ -1718,8 +1723,26 @@ export async function updateTaskChecklistItem(
          photo_storage_key = COALESCE($4, photo_storage_key)
      WHERE id = $5 AND task_id = $6
      RETURNING *`,
-    [payload.is_completed, actor?.name || 'Staff', payload.note || null, payload.photo_storage_key || null, itemId, taskId]
+    [payload.is_completed, actor?.name || 'Staff', payload.note || null, payload.photo_storage_key || null, effectiveItemId, taskId]
   );
+
+  if (!hasRows(res)) {
+    const materialized = await getTaskChecklistItems(client, propertyId, taskId, actor);
+    if (materialized.length > 0) {
+      const fallbackTarget = materialized[0];
+      res = await client.query(
+        `UPDATE housekeeping_task_checklist_items
+         SET is_completed = $1,
+             completed_at = CASE WHEN $1 = true THEN COALESCE(completed_at, NOW()) ELSE NULL END,
+             completed_by_name = CASE WHEN $1 = true THEN COALESCE(completed_by_name, $2) ELSE NULL END,
+             note = COALESCE($3, note),
+             photo_storage_key = COALESCE($4, photo_storage_key)
+         WHERE id = $5 AND task_id = $6
+         RETURNING *`,
+        [payload.is_completed, actor?.name || 'Staff', payload.note || null, payload.photo_storage_key || null, fallbackTarget.id, taskId]
+      );
+    }
+  }
 
   if (!hasRows(res)) {
     throw Object.assign(new Error('Checklist item not found for this task'), { statusCode: 404 });
@@ -1763,9 +1786,22 @@ export async function bulkUpdateCategoryChecklistItems(
     throw Object.assign(new Error('Tugas yang sudah selesai atau dibatalkan tidak dapat diubah.'), { statusCode: 400, code: 'TASK_FINALIZED' });
   }
 
+  // Ensure checklist items are materialized in DB if task currently has 0 items
+  const existingCountRes = await client.query(
+    `SELECT COUNT(*)::int AS cnt FROM housekeeping_task_checklist_items WHERE task_id = $1`,
+    [taskId]
+  );
+  if (Number(existingCountRes.rows[0]?.cnt || 0) === 0) {
+    await getTaskChecklistItems(client, propertyId, taskId, actor);
+  }
+
+  const positiveItemIds = Array.isArray(payload.item_ids)
+    ? payload.item_ids.map(Number).filter((n) => !isNaN(n) && n > 0)
+    : [];
+
   let targetItemIds: number[] = [];
-  if (Array.isArray(payload.item_ids) && payload.item_ids.length > 0) {
-    targetItemIds = payload.item_ids.map(Number).filter((n) => !isNaN(n) && n > 0);
+  if (positiveItemIds.length > 0) {
+    targetItemIds = positiveItemIds;
   } else {
     const catName = payload.category || payload.group_name || payload.section;
     if (!catName) {
