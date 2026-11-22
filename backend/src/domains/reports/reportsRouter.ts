@@ -2644,6 +2644,7 @@ export function createReportsRouter(pool: Pool): Router {
           await pool.query(
             `UPDATE transactions
              SET payment_status = 'PAID',
+                 approval_status = 'APPROVED',
                  verification_status = 'VERIFIED',
                  verified_at = COALESCE(verified_at, NOW()),
                  verified_by_name = COALESCE(verified_by_name, 'Akuntansi'),

@@ -171,7 +171,15 @@ export interface TransactionRecord {
   supplier_bank_name?: string | null;
   supplier_bank_account?: string | null;
   supplier_bank_holder?: string | null;
+  supplier_email?: string | null;
   supplier_address?: string | null;
+  invoice_attachment?: {
+    id: number;
+    file_path?: string;
+    original_name?: string;
+    file_name?: string;
+    mime_type?: string;
+  } | null;
   payment_proof_attachment?: {
     id: number;
     file_path: string;
@@ -181,6 +189,7 @@ export interface TransactionRecord {
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;
   recipient_bank_holder?: string | null;
+  recipient_email?: string | null;
   /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
   expense_workflow_status?: string | null;
   approval_status?: PurchaseApprovalStatus | null;

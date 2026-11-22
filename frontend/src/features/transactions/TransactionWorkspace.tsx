@@ -2225,18 +2225,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
               <button
                 type="button"
-                onClick={() => setShowVendorSupplierMaster(true)}
-                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-                title="Buka direktori master vendor & supplier"
-              >
-                <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-                </svg>
-                <span>Vendor &amp; Supplier</span>
-              </button>
-
-              <button
-                type="button"
                 onClick={() => {
                   setInitialPoIdForInvoice(null);
                   setActiveEditor('PURCHASE');
@@ -2388,18 +2376,6 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
 
           {/* Action Buttons */}
           <div className="flex items-center gap-2 flex-wrap">
-            {/* Global Vendor/Supplier Master Shortcut — clean SVG, no emoji */}
-            <button
-              onClick={() => setShowVendorSupplierMaster(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-semibold text-slate-700 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl transition-all shadow-sm cursor-pointer"
-              title="Buka direktori master vendor & supplier"
-            >
-              <svg className="w-3.5 h-3.5 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.8" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
-              </svg>
-              <span>Vendor &amp; Supplier</span>
-            </button>
-
             {activeTab === 'SALE' && (
               <button
                 onClick={() => {
@@ -3094,9 +3070,10 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-3 bg-slate-50">Kategori</th>
                         <th className="py-3 px-4 bg-slate-50">Keterangan</th>
                         <th className="py-3 px-3 text-right bg-slate-50">Nominal</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Nota</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Persetujuan</th>
-                        <th className="py-3 px-2 text-center bg-slate-50">Pembayaran</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Bukti Bayar</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Status</th>
                         <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
@@ -3608,7 +3585,15 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       const isLoading = expenseLoadingIds.has(t.id);
                       const error = expenseExpandErrors.get(t.id);
                       const party = t.party_name || ' -';
-                      const hasRecipientBank = !!(t.recipient_bank_name || t.recipient_bank_account || t.recipient_bank_holder);
+                      const hasRecipientBank = !!(
+                        t.recipient_bank_name ||
+                        t.recipient_bank_account ||
+                        t.recipient_bank_holder ||
+                        t.recipient_email ||
+                        t.supplier_bank_name ||
+                        t.supplier_bank_account ||
+                        t.supplier_email
+                      );
 
                       return (
                         <React.Fragment key={t.id}>
@@ -3675,10 +3660,34 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                             <td className="py-3 px-3 text-right font-mono font-bold text-rose-800 whitespace-nowrap">
                               {formatIdr(displayTransactionNet(t))}
                             </td>
+                            {/* Nota — lampiran pengajuan di sebelah kiri Persetujuan */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                              {t.invoice_attachment ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const attach = t.invoice_attachment;
+                                    if (attach) {
+                                      setPaymentProofModal({
+                                        filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
+                                        title: `Nota Pengajuan — ${t.transaction_no}`,
+                                        uploadId: null,
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 cursor-pointer"
+                                  title="Lihat Lampiran Nota Pengajuan"
+                                >
+                                  <span>📎 Nota</span>
+                                </button>
+                              ) : (
+                                <span className="text-slate-400 text-xs">—</span>
+                              )}
+                            </td>
                             {/* Persetujuan — read-only informasi (diproses di Akuntansi -> Hutang) */}
                             <td className="py-3 px-2 text-center whitespace-nowrap">
                               {(() => {
-                                const appStatus = t.approval_status || (t.payment_status === 'PAID' ? 'APPROVED' : 'PENDING_APPROVAL');
+                                const appStatus = t.payment_status === 'PAID' ? 'APPROVED' : (t.approval_status || 'PENDING_APPROVAL');
                                 const ac = getPurchaseApprovalClass(appStatus);
                                 const label =
                                   appStatus === 'APPROVED'
@@ -3696,7 +3705,27 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 );
                               })()}
                             </td>
-                            {/* Pembayaran & Bukti — read-only informasi */}
+                            {/* Verifikasi — read-only informasi */}
+                            <td className="py-3 px-2 text-center whitespace-nowrap">
+                              {(() => {
+                                const verStatus = t.verification_status || (t.payment_status === 'PAID' ? 'VERIFIED' : 'UNVERIFIED');
+                                const vc = getPurchaseVerificationClass(verStatus);
+                                const verLabel =
+                                  verStatus === 'VERIFIED'
+                                    ? 'Terverifikasi'
+                                    : verStatus === 'REJECTED'
+                                    ? 'Perlu Koreksi'
+                                    : 'Belum Diperiksa';
+                                return (
+                                  <span
+                                    className={`inline-flex items-center text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${vc.bg} ${vc.border} ${vc.text} cursor-default`}
+                                  >
+                                    {verLabel}
+                                  </span>
+                                );
+                              })()}
+                            </td>
+                            {/* Bukti Bayar — sebelah kanan Verifikasi (berisi gambar upload dari Akuntansi Hutang) */}
                             <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                               {(() => {
                                 const ps = String(t.payment_status || 'UNPAID').toUpperCase();
@@ -3721,38 +3750,18 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                           if (attach) {
                                             setPaymentProofModal({
                                               filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
-                                              title: `Bukti Pengeluaran — ${t.transaction_no}`,
+                                              title: `Bukti Bayar — ${t.transaction_no}`,
                                               uploadId: `HIMS-PUR-${t.id}`,
                                             });
                                           }
                                         }}
                                         className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 cursor-pointer"
-                                        title="Lihat Bukti Bayar / Lampiran"
+                                        title="Lihat Bukti Bayar dari Akuntansi Hutang"
                                       >
                                         <span>📎 Bukti</span>
                                       </button>
                                     ) : null}
                                   </div>
-                                );
-                              })()}
-                            </td>
-                            {/* Verifikasi — read-only informasi */}
-                            <td className="py-3 px-2 text-center whitespace-nowrap">
-                              {(() => {
-                                const verStatus = t.verification_status || (t.payment_status === 'PAID' ? 'VERIFIED' : 'UNVERIFIED');
-                                const vc = getPurchaseVerificationClass(verStatus);
-                                const verLabel =
-                                  verStatus === 'VERIFIED'
-                                    ? 'Terverifikasi'
-                                    : verStatus === 'REJECTED'
-                                    ? 'Perlu Koreksi'
-                                    : 'Belum Diperiksa';
-                                return (
-                                  <span
-                                    className={`inline-flex items-center text-[10px] font-bold px-2.5 py-0.5 rounded-md border ${vc.bg} ${vc.border} ${vc.text} cursor-default`}
-                                  >
-                                    {verLabel}
-                                  </span>
                                 );
                               })()}
                             </td>
@@ -3828,7 +3837,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                           </tr>
                           {isExpanded && (
                             <tr className="bg-slate-50/60">
-                              <td colSpan={11} className="px-4 py-3">
+                              <td colSpan={12} className="px-4 py-3">
                                 <div className="rounded-lg border border-slate-200 bg-white/90 overflow-hidden">
                                   <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500 border-b border-slate-100 bg-slate-50/50">
                                     Rincian Operasional Pengeluaran
@@ -4764,20 +4773,26 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
               {/* EXPENSE: recipient bank snapshot fields */}
               {bankPopoverTx?.transaction_type === 'EXPENSE' && (
                 <>
-                  {bankPopoverTx.recipient_bank_name && (
+                  {(bankPopoverTx.recipient_bank_name || bankPopoverTx.supplier_bank_name) && (
                     <div>
                       <span className="text-[11px] text-stone-500 block font-medium">Nama Bank</span>
-                      <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.recipient_bank_name}</span>
+                      <span className="text-sm font-semibold text-stone-800">{bankPopoverTx.recipient_bank_name || bankPopoverTx.supplier_bank_name}</span>
                     </div>
                   )}
-                  {bankPopoverTx.recipient_bank_account && (
+                  {(bankPopoverTx.recipient_bank_account || bankPopoverTx.supplier_bank_account) && (
                     <div>
                       <span className="text-[11px] text-stone-500 block font-medium">No. Rekening</span>
                       <div className="flex items-center justify-between gap-2 mt-0.5">
-                        <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.recipient_bank_account}</span>
+                        <span className="text-sm font-mono font-bold text-stone-900">{bankPopoverTx.recipient_bank_account || bankPopoverTx.supplier_bank_account}</span>
                         <button
                           type="button"
-                          onClick={(e) => { e.stopPropagation(); handleCopyBankAccount(bankPopoverTx.id, bankPopoverTx.recipient_bank_account!); }}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleCopyBankAccount(
+                              bankPopoverTx.id,
+                              (bankPopoverTx.recipient_bank_account || bankPopoverTx.supplier_bank_account)!
+                            );
+                          }}
                           className={`px-2 py-0.5 rounded text-[11px] font-medium transition-colors cursor-pointer ${
                             bankCopied === String(bankPopoverTx.id)
                               ? 'bg-emerald-100 text-emerald-700'
@@ -4789,17 +4804,31 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                       </div>
                     </div>
                   )}
-                  {bankPopoverTx.recipient_bank_holder && (
+                  {(bankPopoverTx.recipient_bank_holder || bankPopoverTx.supplier_bank_holder) && (
                     <div>
                       <span className="text-[11px] text-stone-500 block font-medium">Atas Nama</span>
-                      <span className="text-sm text-stone-700">{bankPopoverTx.recipient_bank_holder}</span>
+                      <span className="text-sm text-stone-700">{bankPopoverTx.recipient_bank_holder || bankPopoverTx.supplier_bank_holder}</span>
+                    </div>
+                  )}
+                  {(bankPopoverTx.recipient_email || bankPopoverTx.supplier_email) && (
+                    <div>
+                      <span className="text-[11px] text-stone-500 block font-medium">Email</span>
+                      <span className="text-sm text-stone-700">{bankPopoverTx.recipient_email || bankPopoverTx.supplier_email}</span>
                     </div>
                   )}
                 </>
               )}
               {bankPopoverTx?.transaction_type === 'EXPENSE' ? (
-                !(bankPopoverTx.recipient_bank_name || bankPopoverTx.recipient_bank_account || bankPopoverTx.recipient_bank_holder) && (
-                  <p className="text-xs text-stone-400 italic">Tidak ada data rekening</p>
+                !(
+                  bankPopoverTx.recipient_bank_name ||
+                  bankPopoverTx.recipient_bank_account ||
+                  bankPopoverTx.recipient_bank_holder ||
+                  bankPopoverTx.recipient_email ||
+                  bankPopoverTx.supplier_bank_name ||
+                  bankPopoverTx.supplier_bank_account ||
+                  bankPopoverTx.supplier_email
+                ) && (
+                  <p className="text-xs text-stone-400 italic">Tidak ada data rekening / email</p>
                 )
               ) : (
                 !(bankPopoverTx.supplier_bank_name || bankPopoverTx.supplier_bank_account || bankPopoverTx.supplier_bank_holder) && (

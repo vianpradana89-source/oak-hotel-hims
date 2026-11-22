@@ -368,6 +368,10 @@ export function createTransactionsRouter(pool: Pool): Router {
         source_reference: req.body.source_reference,
         is_paid: req.body.is_paid !== false,
         notes: req.body.notes,
+        recipient_bank_name: req.body.recipient_bank_name || null,
+        recipient_bank_account: req.body.recipient_bank_account || null,
+        recipient_bank_holder: req.body.recipient_bank_holder || null,
+        recipient_email: req.body.recipient_email || null,
         actor_name: req.body.actor_name || (req as any).user?.name || 'Staff',
         actor_user_id: req.body.actor_user_id || (req as any).user?.id || null
       });
@@ -1162,6 +1166,7 @@ export function createTransactionsRouter(pool: Pool): Router {
         recipient_bank_name: body.recipient_bank_name || null,
         recipient_bank_account: body.recipient_bank_account || null,
         recipient_bank_holder: body.recipient_bank_holder || null,
+        recipient_email: body.recipient_email || null,
         actor_name: actorName,
         actor_user_id: actorUserId,
       });

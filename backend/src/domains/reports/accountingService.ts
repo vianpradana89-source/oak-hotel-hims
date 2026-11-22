@@ -137,6 +137,21 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS bank_holder VARCHAR(100) NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS supplier_email VARCHAR(160) NULL;
       ALTER TABLE accounting_manual_payables ADD COLUMN IF NOT EXISTS warehouse_code VARCHAR(40) NULL;
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL;
+
+      UPDATE transactions
+      SET approval_status = 'APPROVED'
+      WHERE transaction_type IN ('EXPENSE', 'PURCHASE')
+        AND UPPER(COALESCE(payment_status, '')) = 'PAID'
+        AND COALESCE(UPPER(approval_status), 'PENDING_APPROVAL') = 'PENDING_APPROVAL';
+
+      UPDATE transaction_attachments ta
+      SET attachment_purpose = 'INVOICE'
+      FROM transactions t
+      WHERE ta.transaction_id = t.id
+        AND t.transaction_type = 'EXPENSE'
+        AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
+        AND ta.attachment_purpose = 'RECEIPT';
 
       CREATE TABLE IF NOT EXISTS accounting_manual_receivables (
         id SERIAL PRIMARY KEY,
@@ -357,7 +372,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            COALESCE(NULLIF(BTRIM(t.recipient_bank_name), ''), s.bank_name) AS bank_name,
            COALESCE(NULLIF(BTRIM(t.recipient_bank_account), ''), s.bank_account) AS bank_account,
            COALESCE(NULLIF(BTRIM(t.recipient_bank_holder), ''), s.bank_holder) AS bank_holder,
-           s.email AS supplier_email,
+           COALESCE(NULLIF(BTRIM(t.recipient_email), ''), s.email) AS supplier_email,
            COALESCE(
              sl_po.code,
              (
@@ -378,19 +393,32 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              )
              FROM transaction_attachments ta
              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
-             ORDER BY CASE WHEN ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT') THEN 0 ELSE 1 END, ta.id DESC
+               AND (
+                 (t.transaction_type = 'EXPENSE' AND (ta.attachment_purpose = 'PAYMENT_PROOF' OR COALESCE(ta.uploaded_by, '') = 'Akuntansi'))
+                 OR (t.transaction_type != 'EXPENSE' AND ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT'))
+               )
+             ORDER BY CASE WHEN ta.attachment_purpose = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
              LIMIT 1
            ) AS payment_proof_attachment,
-           COALESCE(
-             UPPER(t.approval_status),
-             CASE
-               WHEN t.transaction_type = 'PURCHASE' THEN 'APPROVED'
-               WHEN UPPER(COALESCE(t.payment_status, '')) = 'PAID' THEN 'APPROVED'
-               ELSE 'PENDING_APPROVAL'
-             END
-           ) AS approval_status
+           CASE
+             WHEN UPPER(COALESCE(t.payment_status, '')) = 'PAID' THEN 'APPROVED'
+             WHEN t.approval_status IS NOT NULL AND BTRIM(t.approval_status) != '' THEN UPPER(t.approval_status)
+             WHEN t.transaction_type = 'PURCHASE' THEN 'APPROVED'
+             ELSE 'PENDING_APPROVAL'
+           END AS approval_status
          FROM transactions t
-         LEFT JOIN suppliers s ON s.id = t.supplier_id
+         LEFT JOIN LATERAL (
+           SELECT s1.id, s1.name, s1.bank_name, s1.bank_account, s1.bank_holder, s1.email
+           FROM suppliers s1
+           WHERE s1.property_id = t.property_id
+             AND s1.deleted_at IS NULL
+             AND (
+               s1.id = t.supplier_id
+               OR (t.supplier_id IS NULL AND NULLIF(BTRIM(t.party_name), '') IS NOT NULL AND LOWER(BTRIM(s1.name)) = LOWER(BTRIM(t.party_name)))
+             )
+           ORDER BY CASE WHEN s1.id = t.supplier_id THEN 0 ELSE 1 END, s1.id DESC
+           LIMIT 1
+         ) s ON TRUE
          LEFT JOIN pos_purchase_orders ppo ON ppo.id = t.po_id AND ppo.property_id = t.property_id
          LEFT JOIN stock_locations sl_po ON sl_po.id = ppo.destination_location_id AND sl_po.property_id = t.property_id
          LEFT JOIN LATERAL (

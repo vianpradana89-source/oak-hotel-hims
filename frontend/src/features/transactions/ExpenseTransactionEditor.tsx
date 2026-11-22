@@ -53,6 +53,7 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
   const [recipientBankName, setRecipientBankName] = useState<string>('');
   const [recipientBankAccount, setRecipientBankAccount] = useState<string>('');
   const [recipientBankHolder, setRecipientBankHolder] = useState<string>('');
+  const [recipientEmail, setRecipientEmail] = useState<string>('');
 
   // Upload Evidence
   const [paymentProofFile, setPaymentProofFile] = useState<File | null>(null);
@@ -79,9 +80,10 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           setPaymentMethod(data.payment_method || 'CASH');
           setSourceRef(data.source_reference || '');
           setNotes(data.notes || '');
-          setRecipientBankName(data.recipient_bank_name || '');
-          setRecipientBankAccount(data.recipient_bank_account || '');
-          setRecipientBankHolder(data.recipient_bank_holder || '');
+          setRecipientBankName(data.recipient_bank_name || data.supplier_bank_name || '');
+          setRecipientBankAccount(data.recipient_bank_account || data.supplier_bank_account || '');
+          setRecipientBankHolder(data.recipient_bank_holder || data.supplier_bank_holder || '');
+          setRecipientEmail(data.recipient_email || data.supplier_email || '');
           setLoading(false);
         })
         .catch(() => {
@@ -156,20 +158,21 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           recipient_bank_name: recipientBankName.trim() || null,
           recipient_bank_account: recipientBankAccount.trim() || null,
           recipient_bank_holder: recipientBankHolder.trim() || null,
+          recipient_email: recipientEmail.trim() || null,
         });
 
-        // Upload Payment Proof Attachment (if provided)
+        // Upload Nota Pengajuan Attachment (if provided)
         if (paymentProofFile) {
           try {
             await uploadTransactionAttachmentApi(
               updated.id,
               propertyId,
               paymentProofFile,
-              'PAYMENT_PROOF',
+              'INVOICE',
               actorName
             );
           } catch (_e) {
-            console.error('Failed to upload expense payment proof', _e);
+            console.error('Failed to upload expense invoice attachment', _e);
           }
         }
 
@@ -194,16 +197,17 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
           recipient_bank_name: recipientBankName.trim() || null,
           recipient_bank_account: recipientBankAccount.trim() || null,
           recipient_bank_holder: recipientBankHolder.trim() || null,
+          recipient_email: recipientEmail.trim() || null,
         });
 
-        // Upload Supporting Invoice/Receipt Attachment if provided during submission
+        // Upload Supporting Invoice/Nota Attachment if provided during submission
         if (paymentProofFile) {
           try {
             await uploadTransactionAttachmentApi(
               created.id,
               propertyId,
               paymentProofFile,
-              'RECEIPT',
+              'INVOICE',
               actorName
             );
           } catch (_e) {
@@ -347,8 +351,8 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
               </div>
             </div>
 
-            {/* EXPENSE-1D: Recipient Bank Snapshot */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* EXPENSE-1D: Recipient Bank & Email Snapshot */}
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               <div>
                 <label className="block text-xs font-bold text-slate-700 mb-1">
                   Nama Bank (Opsional)
@@ -382,6 +386,18 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
                   placeholder="Contoh: PT Listrik Jaya"
                   value={recipientBankHolder}
                   onChange={(e) => setRecipientBankHolder(e.target.value)}
+                  className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">
+                  Email Penerima / Vendor (Opsional)
+                </label>
+                <input
+                  type="email"
+                  placeholder="Contoh: billing@pln.co.id"
+                  value={recipientEmail}
+                  onChange={(e) => setRecipientEmail(e.target.value)}
                   className="w-full px-3 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:border-emerald-600 outline-none"
                 />
               </div>
@@ -602,6 +618,10 @@ export const ExpenseTransactionEditor: React.FC<ExpenseTransactionEditorProps> =
         onSelect={(sup) => {
           setSelectedSupplier(sup);
           setPartyName(sup.name);
+          if (sup.bank_name) setRecipientBankName(sup.bank_name);
+          if (sup.bank_account) setRecipientBankAccount(sup.bank_account);
+          if (sup.bank_holder) setRecipientBankHolder(sup.bank_holder);
+          if (sup.email) setRecipientEmail(sup.email);
         }}
         onClose={() => setShowSupplierModal(false)}
       />

@@ -3074,6 +3074,7 @@ export async function createExpenseTransaction(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL`);
 
     let partyName = dto.party_name?.trim() || null;
     let supplierId = dto.supplier_id ? Number(dto.supplier_id) : null;
@@ -3104,7 +3105,7 @@ export async function createExpenseTransaction(
         payment_status, payment_method, transaction_status,
         supplier_id, receiving_status, received_at, verification_status,
         notes, metadata, created_by,
-        recipient_bank_name, recipient_bank_account, recipient_bank_holder,
+        recipient_bank_name, recipient_bank_account, recipient_bank_holder, recipient_email,
         expense_workflow_status, approval_status
       ) VALUES (
         $1, $2, $3, CURRENT_TIMESTAMP,
@@ -3114,8 +3115,8 @@ export async function createExpenseTransaction(
         $11, $12, 'POSTED',
         $13, NULL, NULL, 'UNVERIFIED',
         $14, $15, $16,
-        $17, $18, $19,
-        'PROSES', $20
+        $17, $18, $19, $20,
+        'PROSES', $21
       ) RETURNING *`,
       [
         propertyId,
@@ -3137,6 +3138,7 @@ export async function createExpenseTransaction(
         dto.recipient_bank_name?.trim() || null,
         dto.recipient_bank_account?.trim() || null,
         dto.recipient_bank_holder?.trim() || null,
+        dto.recipient_email?.trim() || null,
         initialApprovalStatus,
       ]
     );
@@ -3240,6 +3242,7 @@ export async function updateExpenseTransaction(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL`);
 
     // 1. Row-lock and validate
     const prevRes = await client.query(
@@ -3249,7 +3252,7 @@ export async function updateExpenseTransaction(
               verified_by_user_id, verified_by_name_snapshot, verified_at, deleted_at,
               party_name, description, amount, payment_method,
               category_code, department_code, source_reference, notes,
-              recipient_bank_name, recipient_bank_account, recipient_bank_holder
+              recipient_bank_name, recipient_bank_account, recipient_bank_holder, recipient_email
        FROM transactions
        WHERE id = $1 AND property_id = $2 FOR UPDATE`,
       [id, propertyId]
@@ -3351,6 +3354,7 @@ export async function updateExpenseTransaction(
       recipient_bank_name: prev.recipient_bank_name,
       recipient_bank_account: prev.recipient_bank_account,
       recipient_bank_holder: prev.recipient_bank_holder,
+      recipient_email: prev.recipient_email,
     };
 
     // 5. Update transaction header
@@ -3370,13 +3374,14 @@ export async function updateExpenseTransaction(
           recipient_bank_name = $11,
           recipient_bank_account = $12,
           recipient_bank_holder = $13,
-          transaction_date = $14,
+          recipient_email = $14,
+          transaction_date = $15,
           verification_status = 'UNVERIFIED',
           verified_by_user_id = NULL,
           verified_by_name_snapshot = NULL,
           verified_at = NULL,
           updated_at = NOW()
-        WHERE id = $15 AND property_id = $16
+        WHERE id = $16 AND property_id = $17
         RETURNING *`,
       [
         dto.category_code,
@@ -3392,6 +3397,7 @@ export async function updateExpenseTransaction(
         dto.recipient_bank_name?.trim() || null,
         dto.recipient_bank_account?.trim() || null,
         dto.recipient_bank_holder?.trim() || null,
+        dto.recipient_email?.trim() || null,
         newTransactionDate,
         id,
         propertyId,
@@ -4085,6 +4091,9 @@ export async function settleTransactionPayment(
       await client.query(
         `UPDATE transactions
          SET payment_status = $1,
+             approval_status = 'APPROVED',
+             approved_by_name_snapshot = COALESCE(approved_by_name_snapshot, $4),
+             approved_at = COALESCE(approved_at, NOW()),
              verification_status = 'VERIFIED',
              verified_by_name_snapshot = COALESCE(verified_by_name_snapshot, $4),
              verified_at = COALESCE(verified_at, NOW()),
@@ -4093,6 +4102,15 @@ export async function settleTransactionPayment(
              updated_at = NOW()
          WHERE id = $2 AND property_id = $3`,
         [newPaymentStatus, id, propertyId, dto.actor_name || 'Akuntansi']
+      );
+    } else if (txTypeUpper === 'PURCHASE' && newPaymentStatus === 'PAID') {
+      await client.query(
+        `UPDATE transactions
+         SET payment_status = $1,
+             approval_status = 'APPROVED',
+             updated_at = NOW()
+         WHERE id = $2 AND property_id = $3`,
+        [newPaymentStatus, id, propertyId]
       );
     } else {
       await client.query(
@@ -4759,6 +4777,31 @@ async function healPartiallyVoidedBookingsFromAudit(pool: Pool, propertyId: numb
   }
 }
 
+let expenseRecipientSchemaReady = false;
+async function ensureExpenseRecipientSchema(pool: Pool): Promise<void> {
+  if (expenseRecipientSchemaReady) return;
+  try {
+    await pool.query(`
+      ALTER TABLE transactions ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL;
+      UPDATE transactions
+      SET approval_status = 'APPROVED'
+      WHERE transaction_type IN ('EXPENSE', 'PURCHASE')
+        AND UPPER(COALESCE(payment_status, '')) = 'PAID'
+        AND COALESCE(UPPER(approval_status), 'PENDING_APPROVAL') = 'PENDING_APPROVAL';
+      UPDATE transaction_attachments ta
+      SET attachment_purpose = 'INVOICE'
+      FROM transactions t
+      WHERE ta.transaction_id = t.id
+        AND t.transaction_type = 'EXPENSE'
+        AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
+        AND ta.attachment_purpose = 'RECEIPT';
+    `);
+    expenseRecipientSchemaReady = true;
+  } catch {
+    // non-fatal
+  }
+}
+
 /**
  * Queries transactions with dynamic payment settlement derivation from payment_transactions.
  */
@@ -4773,6 +4816,7 @@ export async function getTransactions(
     throw err;
   }
 
+  await ensureExpenseRecipientSchema(pool);
   await healPartiallyVoidedBookingsFromAudit(pool, propertyId);
 
   const baseConditions: string[] = ['t.property_id = $1'];
@@ -4898,6 +4942,8 @@ export async function getTransactions(
             s.bank_name AS supplier_bank_name,
             s.bank_account AS supplier_bank_account,
             s.bank_holder AS supplier_bank_holder,
+            s.email AS supplier_email,
+            COALESCE(NULLIF(BTRIM(t.recipient_email), ''), s.email) AS recipient_email,
            r.booking_number,
            r.stay_type,
            r.stay_sequence,
@@ -4932,7 +4978,31 @@ export async function getTransactions(
               )
               FROM transaction_attachments ta
               WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
-              ORDER BY CASE WHEN ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT') THEN 0 ELSE 1 END, ta.id DESC
+                AND (
+                  ta.attachment_purpose = 'INVOICE'
+                  OR (
+                    t.transaction_type = 'EXPENSE'
+                    AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
+                    AND ta.attachment_purpose != 'PAYMENT_PROOF'
+                  )
+                )
+              ORDER BY CASE WHEN ta.attachment_purpose = 'INVOICE' THEN 0 ELSE 1 END, ta.id DESC
+              LIMIT 1
+            ) AS invoice_attachment,
+            (
+              SELECT json_build_object(
+                'id', ta.id,
+                'original_name', ta.original_name,
+                'file_name', ta.file_name,
+                'mime_type', ta.mime_type
+              )
+              FROM transaction_attachments ta
+              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
+                AND (
+                  (t.transaction_type = 'EXPENSE' AND (ta.attachment_purpose = 'PAYMENT_PROOF' OR COALESCE(ta.uploaded_by, '') = 'Akuntansi'))
+                  OR (t.transaction_type != 'EXPENSE' AND ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT'))
+                )
+              ORDER BY CASE WHEN ta.attachment_purpose = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
               LIMIT 1
             ) AS payment_proof_attachment
      FROM transactions t
@@ -5439,12 +5509,16 @@ export async function getTransactionById(
   propertyId: number,
   id: number | string
 ): Promise<any> {
+  await ensureExpenseRecipientSchema(pool);
   const txRes = await pool.query(
     `SELECT t.*,
             s.name AS supplier_name,
             s.phone AS supplier_phone,
             s.bank_name AS supplier_bank_name,
             s.bank_account AS supplier_bank_account,
+            s.bank_holder AS supplier_bank_holder,
+            s.email AS supplier_email,
+            COALESCE(NULLIF(BTRIM(t.recipient_email), ''), s.email) AS recipient_email,
             s.address AS supplier_address,
             r.check_in,
             r.check_out,

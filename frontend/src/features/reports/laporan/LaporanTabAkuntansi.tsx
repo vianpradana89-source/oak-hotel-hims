@@ -921,6 +921,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Supplier / Penerima</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Rekening Supplier</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Jenis</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Lokasi / Dept</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Total</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
@@ -935,26 +936,21 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPayables.length === 0 ? (
                     <tr>
-                      <td colSpan={12} className="py-10 text-center text-slate-400">
+                      <td colSpan={13} className="py-10 text-center text-slate-400">
                         Tidak ada data hutang pada filter ini.
                       </td>
                     </tr>
                   ) : (
                     filteredPayables.map((item) => {
-                      const effApproval = item.approval_status || 'APPROVED';
+                      const effApproval = item.status === 'PAID' ? 'APPROVED' : (item.approval_status || 'APPROVED');
                       const isPendingApproval = effApproval === 'PENDING_APPROVAL';
+                      const isExpenseItem = item.source === 'HIMS_PURCHASE' && item.tx_type === 'EXPENSE';
+                      const isPurchaseItem = item.source === 'HIMS_PURCHASE' && item.tx_type !== 'EXPENSE';
                       return (
                       <tr key={item.id} className="hover:bg-emerald-50/30 transition">
                         {/* 1. Supplier */}
                         <td className="py-3 px-4 font-bold text-slate-900">
                           {item.supplier_name}
-                          <div className="text-[10px] font-normal text-slate-400">
-                            {item.source === 'HIMS_PURCHASE'
-                              ? item.tx_type === 'EXPENSE'
-                                ? 'Pengajuan Pengeluaran HIMS'
-                                : 'Pembelian HIMS'
-                              : 'Hutang Manual'}
-                          </div>
                         </td>
                         {/* 2. Rekening Supplier (kiri Transaksi) */}
                         <td className="py-3 px-3 text-center">
@@ -984,7 +980,23 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                             </div>
                           )}
                         </td>
-                        {/* 4. Lokasi Gudang (kanan Transaksi, hanya kode) */}
+                        {/* 4. Jenis (Pembelian / Pengeluaran) */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          {isExpenseItem ? (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-rose-50 text-rose-700 border border-rose-200">
+                              Pengeluaran
+                            </span>
+                          ) : isPurchaseItem ? (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                              Pembelian
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-slate-100 text-slate-700 border border-slate-200">
+                              Hutang Manual
+                            </span>
+                          )}
+                        </td>
+                        {/* 5. Lokasi Gudang / Dept */}
                         <td className="py-3 px-3 text-center whitespace-nowrap">
                           {item.warehouse_code ? (
                             <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-bold bg-slate-100 text-slate-700 border border-slate-200">
@@ -1145,27 +1157,27 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                               : 'Belum Bayar'}
                           </span>
                         </td>
-                        {/* 12. Aksi */}
+                        {/* 13. Aksi */}
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1.5">
                             {item.status !== 'PAID' && (
                               <button
                                 type="button"
-                                disabled={isPendingApproval}
                                 onClick={() => {
-                                  if (isPendingApproval) return;
+                                  if (isPendingApproval) {
+                                    const ok = window.confirm(
+                                      `Pengajuan ${item.transaction_no} (${item.supplier_name}) masih berstatus "Menunggu". Setujui pengajuan ini dan lanjutkan ke pelunasan?`
+                                    );
+                                    if (!ok) return;
+                                  }
                                   setSettleModalState({ mode: 'PAYABLE', item });
                                 }}
                                 title={
                                   isPendingApproval
-                                    ? 'Setujui pengajuan pada kolom Persetujuan terlebih dahulu sebelum melunasi'
+                                    ? 'Setujui & Lunasi Hutang'
                                     : 'Lunasi Hutang'
                                 }
-                                className={`w-8 h-8 rounded-lg inline-flex items-center justify-center transition ${
-                                  isPendingApproval
-                                    ? 'bg-slate-100 border border-slate-200 text-slate-400 cursor-not-allowed opacity-60'
-                                    : 'bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 cursor-pointer'
-                                }`}
+                                className="w-8 h-8 rounded-lg inline-flex items-center justify-center transition bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-800 cursor-pointer"
                               >
                                 <CheckCircle2 className="w-4 h-4" />
                               </button>
@@ -1195,7 +1207,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 </tbody>
                 <tfoot>
                   <tr className="bg-emerald-950/5 font-extrabold text-slate-900 border-t border-slate-200">
-                    <td colSpan={4} className="py-3 px-4">
+                    <td colSpan={5} className="py-3 px-4">
                       Total ({filteredPayables.length} transaksi)
                     </td>
                     <td className="py-3 px-4 text-right">
@@ -2235,38 +2247,40 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
           <div className="space-y-2.5">
             <div>
               <span className="text-[10px] uppercase tracking-wider font-semibold text-slate-400 block">Rekening Bank</span>
-              {activeBankPopoverPayable.bank_account ? (
-                <div className="mt-0.5">
+              {activeBankPopoverPayable.bank_account || activeBankPopoverPayable.bank_name || activeBankPopoverPayable.bank_holder ? (
+                <div className="mt-0.5 space-y-1">
                   <div className="font-medium text-slate-800">
                     {activeBankPopoverPayable.bank_name || 'Bank'}
                     {activeBankPopoverPayable.bank_holder ? ` a.n ${activeBankPopoverPayable.bank_holder}` : ''}
                   </div>
-                  <div className="flex items-center justify-between gap-1.5 mt-1 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
-                    <span className="font-mono font-bold text-slate-900 text-xs">
-                      {activeBankPopoverPayable.bank_account}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => handleCopyText('bank', activeBankPopoverPayable.bank_account!)}
-                      className={`px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
-                        bankCopiedField === 'bank'
-                          ? 'bg-emerald-600 text-white'
-                          : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
-                      }`}
-                    >
-                      {bankCopiedField === 'bank' ? (
-                        <>
-                          <Check className="w-3 h-3" />
-                          <span>Tersalin</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          <span>Salin</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
+                  {activeBankPopoverPayable.bank_account && (
+                    <div className="flex items-center justify-between gap-1.5 bg-slate-50 p-1.5 rounded-lg border border-slate-200">
+                      <span className="font-mono font-bold text-slate-900 text-xs">
+                        {activeBankPopoverPayable.bank_account}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopyText('bank', activeBankPopoverPayable.bank_account!)}
+                        className={`px-2 py-0.5 rounded text-[10px] font-bold transition flex items-center gap-1 cursor-pointer ${
+                          bankCopiedField === 'bank'
+                            ? 'bg-emerald-600 text-white'
+                            : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'
+                        }`}
+                      >
+                        {bankCopiedField === 'bank' ? (
+                          <>
+                            <Check className="w-3 h-3" />
+                            <span>Tersalin</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span>Salin</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <span className="text-slate-400 italic text-[11px]">Belum diatur</span>

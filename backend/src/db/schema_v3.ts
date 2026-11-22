@@ -7475,5 +7475,8 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
 
     ALTER TABLE IF EXISTS checklist_template_items
       ADD COLUMN IF NOT EXISTS applicable_room_type_ids JSONB DEFAULT NULL;
+
+    ALTER TABLE IF EXISTS transactions
+      ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL;
   `);
 }

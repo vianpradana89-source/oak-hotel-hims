@@ -910,9 +910,9 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                   </div>
                 )}
                 {/* EXPENSE-1D: Recipient Bank Snapshot (manual, not from Supplier Master) */}
-                {tx.transaction_type === 'EXPENSE' && (tx.recipient_bank_name || tx.recipient_bank_account || tx.recipient_bank_holder) && (
+                {tx.transaction_type === 'EXPENSE' && (tx.recipient_bank_name || tx.recipient_bank_account || tx.recipient_bank_holder || tx.recipient_email) && (
                   <div className="pt-2 border-t border-slate-100 space-y-1">
-                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Data Rekening Penerima Dana</span>
+                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-1">Data Rekening &amp; Kontak Penerima Dana</span>
                     {tx.recipient_bank_name && (
                       <div>
                         <span className="text-slate-500 text-[11px]">Bank: </span>
@@ -937,6 +937,12 @@ export const TransactionDetailDrawer: React.FC<TransactionDetailDrawerProps> = (
                       <div>
                         <span className="text-slate-500 text-[11px]">Atas Nama: </span>
                         <span className="text-slate-700 text-xs">{tx.recipient_bank_holder}</span>
+                      </div>
+                    )}
+                    {tx.recipient_email && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-500 text-[11px]">Email: </span>
+                        <span className="text-slate-800 font-medium text-xs">{tx.recipient_email}</span>
                       </div>
                     )}
                   </div>

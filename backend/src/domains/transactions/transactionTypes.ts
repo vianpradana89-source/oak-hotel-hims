@@ -215,6 +215,14 @@ export interface TransactionRow {
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;
   recipient_bank_holder?: string | null;
+  recipient_email?: string | null;
+  supplier_email?: string | null;
+  invoice_attachment?: {
+    id: number | string;
+    original_name: string;
+    file_name: string;
+    mime_type: string;
+  } | null;
   /** EXPENSE-1B: expense operational workflow (PROSES/SELESAI). NULL for non-expense. */
   expense_workflow_status?: ExpenseWorkflowStatus | null;
   verification_status: VerificationStatus;
@@ -409,6 +417,7 @@ export interface CreateExpenseTransactionDto {
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;
   recipient_bank_holder?: string | null;
+  recipient_email?: string | null;
 }
 
 /** EDIT-1B: DTO for updating an existing Expense transaction (PROSES only) */
@@ -428,6 +437,7 @@ export interface UpdateExpenseTransactionDto {
   recipient_bank_name?: string | null;
   recipient_bank_account?: string | null;
   recipient_bank_holder?: string | null;
+  recipient_email?: string | null;
   actor_name?: string | null;
   actor_user_id?: string | null;
 }
