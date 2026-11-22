@@ -186,6 +186,9 @@ export function deriveOperationalSheet(row: {
   }
   const type = String(row.transaction_type || '').toUpperCase();
   if (type === 'PURCHASE') {
+    if (String((row as any).verification_status || '').toUpperCase() === 'VERIFIED') {
+      return 'SELESAI';
+    }
     return resolvePurchaseWorkflowStatus(row.purchase_workflow_status) === 'SELESAI'
       ? 'SELESAI'
       : 'PROSES';
@@ -3804,6 +3807,15 @@ export async function verifyTransaction(
       );
     }
 
+    // Purchase-specific workflow auto-transition: VERIFIED => SELESAI, UNVERIFIED/REJECTED => PROSES
+    if (prevRow.transaction_type.toUpperCase() === 'PURCHASE') {
+      const newWorkflow = status === 'VERIFIED' ? 'SELESAI' : 'PROSES';
+      await client.query(
+        `UPDATE transactions SET purchase_workflow_status = $1, updated_at = NOW() WHERE id = $2 AND property_id = $3`,
+        [newWorkflow, id, propertyId]
+      );
+    }
+
     // Audit log — TRANSACTION_VERIFIED action (preserved from committed contract)
     await client.query(
       `INSERT INTO audit_logs (
@@ -4788,6 +4800,11 @@ async function ensureExpenseRecipientSchema(pool: Pool): Promise<void> {
       WHERE transaction_type IN ('EXPENSE', 'PURCHASE')
         AND UPPER(COALESCE(payment_status, '')) = 'PAID'
         AND COALESCE(UPPER(approval_status), 'PENDING_APPROVAL') = 'PENDING_APPROVAL';
+      UPDATE transactions
+      SET purchase_workflow_status = 'SELESAI'
+      WHERE transaction_type = 'PURCHASE'
+        AND verification_status = 'VERIFIED'
+        AND COALESCE(purchase_workflow_status, 'PROSES') != 'SELESAI';
       UPDATE transaction_attachments ta
       SET attachment_purpose = 'INVOICE'
       FROM transactions t
@@ -5365,18 +5382,18 @@ export async function getTransactions(
       .filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE')
       .reduce((sum, row: any) => sum + (row.booking_bid_group?.net != null ? Number(row.booking_bid_group.net || 0) : Number(row.effective_net_amount || 0)), 0),
     total_purchase: scopeAListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     total_expense: scopeAListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     total_income: scopeAListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     count_sale: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE').length,
-    count_purchase: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE').length,
-    count_expense: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE').length,
-    count_income: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
+    count_purchase: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
+    count_expense: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
+    count_income: scopeAListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
   };
 
   const scopeAActiveListSource = scopeAListSource.filter(
@@ -5387,18 +5404,18 @@ export async function getTransactions(
       .filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE')
       .reduce((sum, row: any) => sum + (row.booking_bid_group?.net != null ? Number(row.booking_bid_group.net || 0) : Number(row.effective_net_amount || 0)), 0),
     total_purchase: scopeAActiveListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     total_expense: scopeAActiveListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     total_income: scopeAActiveListSource
-      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME')
+      .filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI')
       .reduce((sum, row: any) => sum + Number(row.effective_net_amount || 0), 0),
     count_sale: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'SALE').length,
-    count_purchase: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE').length,
-    count_expense: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE').length,
-    count_income: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME').length,
+    count_purchase: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'PURCHASE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
+    count_expense: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'EXPENSE' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
+    count_income: scopeAActiveListSource.filter((row: any) => String(row.transaction_type).toUpperCase() === 'INCOME' && String(row.operational_sheet || row.sheet || '').toUpperCase() === 'SELESAI').length,
   };
 
   // HAPUS path: explicit condition builder (NO regex placeholder renumbering).
@@ -7226,10 +7243,15 @@ export async function executePurchaseLifecycle(
         newVerifiedByUserId = actorUserId;
         newVerifiedByName = actor;
         newVerifiedAt = new Date().toISOString();
+        newWorkflow = 'SELESAI';
+        autoRules.verified_forced_workflow_complete = true;
       } else if (v === 'UNVERIFIED') {
         newVerifiedByUserId = null;
         newVerifiedByName = null;
         newVerifiedAt = null;
+        newWorkflow = 'PROSES';
+      } else if (v === 'REJECTED') {
+        newWorkflow = 'PROSES';
       }
     } else if (actionUpper === 'SET_WORKFLOW') {
       const w = dto.workflow_status;

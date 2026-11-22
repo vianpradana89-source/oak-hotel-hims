@@ -646,7 +646,9 @@ export function mapToOperationalStatus(tx: {
   }
   if (type === 'PURCHASE') {
     const recStatus = String(tx.receiving_status || '').toUpperCase();
-    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(recStatus)) {
+    const verStatus = String((tx as any).verification_status || '').toUpperCase();
+    const wfStatus = String((tx as any).purchase_workflow_status || '').toUpperCase();
+    if (['DITERIMA', 'DITERIMA_LENGKAP'].includes(recStatus) || verStatus === 'VERIFIED' || wfStatus === 'SELESAI') {
       return {
         label: 'Selesai',
         group: 'SELESAI',

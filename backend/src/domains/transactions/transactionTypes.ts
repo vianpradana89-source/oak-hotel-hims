@@ -20,7 +20,10 @@ export const EXPENSE_WORKFLOW_STATUSES: readonly ExpenseWorkflowStatus[] = ['PRO
  */
 export const PURCHASE_WORKFLOW_SHEET_SQL = `
   WHEN UPPER(t.transaction_type) = 'PURCHASE'
-    AND UPPER(COALESCE(t.purchase_workflow_status, 'PROSES')) = 'SELESAI' THEN 'SELESAI'
+    AND (
+      UPPER(COALESCE(t.purchase_workflow_status, 'PROSES')) = 'SELESAI'
+      OR UPPER(COALESCE(t.verification_status, '')) = 'VERIFIED'
+    ) THEN 'SELESAI'
   WHEN UPPER(t.transaction_type) = 'PURCHASE' THEN 'PROSES'`;
 
 /**

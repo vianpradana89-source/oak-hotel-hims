@@ -243,8 +243,7 @@ export function deriveLifecycleSheet(row: LifecycleMemberInput): OperationalShee
   if (reservationSheet) return reservationSheet;
   const type = upper(row.transaction_type);
   if (type === 'PURCHASE') {
-    // PURCHASE-2A1: must match deriveOperationalSheet + PURCHASE_WORKFLOW_SHEET_SQL.
-    // Receiving / verification do not directly drive the sheet.
+    if (upper((row as any).verification_status) === 'VERIFIED') return 'SELESAI';
     const workflow = upper(row.purchase_workflow_status) || 'PROSES';
     return workflow === 'SELESAI' ? 'SELESAI' : 'PROSES';
   }

@@ -469,22 +469,22 @@ export async function queryPresentedPage(
       (SELECT COUNT(*)::int FROM domain_scoped WHERE operational_sheet = 'BATAL') AS sheet_batal,
       /* SCOPE A — global summary, from FULL presented (no Scope-B filter) */
       (SELECT COALESCE(SUM(sale_net), 0) FROM presented WHERE has_sale) AS global_total_sale,
-      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase) AS global_total_purchase,
-      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense) AS global_total_expense,
-      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income) AS global_total_income,
+      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase AND operational_sheet = 'SELESAI') AS global_total_purchase,
+      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense AND operational_sheet = 'SELESAI') AS global_total_expense,
+      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income AND operational_sheet = 'SELESAI') AS global_total_income,
       (SELECT COUNT(*)::int FROM presented WHERE has_sale) AS global_count_sale,
-      (SELECT COUNT(*)::int FROM presented WHERE has_purchase) AS global_count_purchase,
-      (SELECT COUNT(*)::int FROM presented WHERE has_expense) AS global_count_expense,
-      (SELECT COUNT(*)::int FROM presented WHERE has_income) AS global_count_income,
-      /* SCOPE A — active summary, excluding BATAL */
+      (SELECT COUNT(*)::int FROM presented WHERE has_purchase AND operational_sheet = 'SELESAI') AS global_count_purchase,
+      (SELECT COUNT(*)::int FROM presented WHERE has_expense AND operational_sheet = 'SELESAI') AS global_count_expense,
+      (SELECT COUNT(*)::int FROM presented WHERE has_income AND operational_sheet = 'SELESAI') AS global_count_income,
+      /* SCOPE A — active summary: sale excludes BATAL; purchase, expense, income must be SELESAI */
       (SELECT COALESCE(SUM(active_sale_net), 0) FROM presented WHERE has_sale AND operational_sheet <> 'BATAL') AS active_total_sale,
-      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase AND operational_sheet <> 'BATAL') AS active_total_purchase,
-      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense AND operational_sheet <> 'BATAL') AS active_total_expense,
-      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income AND operational_sheet <> 'BATAL') AS active_total_income,
+      (SELECT COALESCE(SUM(purchase_net), 0) FROM presented WHERE has_purchase AND operational_sheet = 'SELESAI') AS active_total_purchase,
+      (SELECT COALESCE(SUM(expense_net), 0) FROM presented WHERE has_expense AND operational_sheet = 'SELESAI') AS active_total_expense,
+      (SELECT COALESCE(SUM(income_net), 0) FROM presented WHERE has_income AND operational_sheet = 'SELESAI') AS active_total_income,
       (SELECT COUNT(*)::int FROM presented WHERE has_sale AND operational_sheet <> 'BATAL') AS active_count_sale,
-      (SELECT COUNT(*)::int FROM presented WHERE has_purchase AND operational_sheet <> 'BATAL') AS active_count_purchase,
-      (SELECT COUNT(*)::int FROM presented WHERE has_expense AND operational_sheet <> 'BATAL') AS active_count_expense,
-      (SELECT COUNT(*)::int FROM presented WHERE has_income AND operational_sheet <> 'BATAL') AS active_count_income,
+      (SELECT COUNT(*)::int FROM presented WHERE has_purchase AND operational_sheet = 'SELESAI') AS active_count_purchase,
+      (SELECT COUNT(*)::int FROM presented WHERE has_expense AND operational_sheet = 'SELESAI') AS active_count_expense,
+      (SELECT COUNT(*)::int FROM presented WHERE has_income AND operational_sheet = 'SELESAI') AS active_count_income,
       /* SCOPE C — pagination keys */
       COALESCE(
         (
