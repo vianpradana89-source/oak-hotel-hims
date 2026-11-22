@@ -394,6 +394,26 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              FROM transaction_attachments ta
              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
                AND (
+                 ta.attachment_purpose = 'INVOICE'
+                 OR (
+                   t.transaction_type = 'EXPENSE'
+                   AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
+                   AND ta.attachment_purpose != 'PAYMENT_PROOF'
+                 )
+               )
+             ORDER BY CASE WHEN ta.attachment_purpose = 'INVOICE' THEN 0 ELSE 1 END, ta.id DESC
+             LIMIT 1
+           ) AS invoice_attachment,
+           (
+             SELECT json_build_object(
+               'id', ta.id,
+               'original_name', ta.original_name,
+               'file_name', ta.file_name,
+               'mime_type', ta.mime_type
+             )
+             FROM transaction_attachments ta
+             WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
+               AND (
                  (t.transaction_type = 'EXPENSE' AND (ta.attachment_purpose = 'PAYMENT_PROOF' OR COALESCE(ta.uploaded_by, '') = 'Akuntansi'))
                  OR (t.transaction_type != 'EXPENSE' AND ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT'))
                )
@@ -458,6 +478,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
            s_pos.bank_holder,
            COALESCE(s_pos.email, ps.email) AS supplier_email,
            COALESCE(sl_ppo.code, '—') AS warehouse_code,
+           NULL::json AS invoice_attachment,
            NULL::json AS payment_proof_attachment,
            COALESCE(UPPER(ppo.approval_status), 'APPROVED') AS approval_status
          FROM pos_purchase_orders ppo
@@ -614,6 +635,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
     supplier_email?: string | null;
     warehouse_code?: string | null;
     proof_url?: string | null;
+    invoice_attachment?: any;
     payment_proof_attachment?: any;
   }> = [];
 
@@ -655,6 +677,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
       supplier_email: p.supplier_email || null,
       warehouse_code: p.warehouse_code || '—',
       proof_url: proofUrl,
+      invoice_attachment: p.invoice_attachment || null,
       payment_proof_attachment: p.payment_proof_attachment || null,
     });
   }

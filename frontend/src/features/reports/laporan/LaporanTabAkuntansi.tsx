@@ -127,7 +127,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   // Search & filter states across sub-views
   const [jurnalSearch, setJurnalSearch] = useState('');
   const [jurnalBadgeFilter, setJurnalBadgeFilter] = useState<string>('ALL');
-  const [hutangFilter, setHutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('ALL');
+  const [hutangFilter, setHutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('UNPAID');
   const [hutangSearch, setHutangSearch] = useState('');
   const [piutangFilter, setPiutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('ALL');
   const [piutangSearch, setPiutangSearch] = useState('');
@@ -882,7 +882,6 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
             <div className="flex flex-wrap items-center gap-1.5">
               {(
                 [
-                  { key: 'ALL', label: 'Semua' },
                   { key: 'UNPAID', label: 'Belum Bayar' },
                   { key: 'PARTIAL', label: 'Sebagian' },
                   { key: 'PAID', label: 'Lunas' },
@@ -927,6 +926,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sudah Bayar</th>
                     <th className="py-3 px-4 font-semibold text-right bg-[#123524]">Sisa</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Jatuh Tempo</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Nota</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Persetujuan</th>
                     <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Bukti Bayar</th>
                     <th className="py-3 px-4 font-semibold text-center bg-[#123524]">Status</th>
@@ -936,7 +936,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 <tbody className="divide-y divide-slate-100">
                   {filteredPayables.length === 0 ? (
                     <tr>
-                      <td colSpan={13} className="py-10 text-center text-slate-400">
+                      <td colSpan={14} className="py-10 text-center text-slate-400">
                         Tidak ada data hutang pada filter ini.
                       </td>
                     </tr>
@@ -1022,7 +1022,31 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                         <td className="py-3 px-4 text-slate-600 whitespace-nowrap">
                           {formatMediumDateId(item.due_date)}
                         </td>
-                        {/* 9. Persetujuan */}
+                        {/* 9. Nota (sebelah kiri Persetujuan) */}
+                        <td className="py-3 px-3 text-center whitespace-nowrap">
+                          {item.invoice_attachment ? (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setSelectedProofModal({
+                                  filePath: buildTransactionAttachmentFilePath(
+                                    item.raw_id,
+                                    item.invoice_attachment!.id
+                                  ),
+                                  title: `Nota Pengajuan — ${item.transaction_no}`,
+                                  uploadId: null,
+                                })
+                              }
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 hover:bg-amber-100 transition-colors cursor-pointer"
+                              title="Lihat Lampiran Nota Pengajuan"
+                            >
+                              <span>📎 Nota</span>
+                            </button>
+                          ) : (
+                            <span className="text-slate-400 text-xs">—</span>
+                          )}
+                        </td>
+                        {/* 10. Persetujuan */}
                         <td className="py-3 px-3 text-center whitespace-nowrap">
                           {item.source === 'HIMS_PURCHASE' ? (
                             <div className="relative inline-flex items-center">
@@ -1219,7 +1243,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                     <td className="py-3 px-4 text-right text-rose-600">
                       Belum dibayar: {formatIdr(filteredPayables.reduce((s, i) => s + i.remaining_amount, 0))}
                     </td>
-                    <td colSpan={5} />
+                    <td colSpan={6} />
                   </tr>
                 </tfoot>
               </table>

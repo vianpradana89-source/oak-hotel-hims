@@ -363,6 +363,11 @@ export interface AccountingPayableItem {
   warehouse_code?: string | null;
   proof_url?: string | null;
   proof_filename?: string | null;
+  invoice_attachment?: {
+    id: number;
+    file_path?: string;
+    original_name?: string;
+  } | null;
   payment_proof_attachment?: {
     id: number;
     file_path: string;

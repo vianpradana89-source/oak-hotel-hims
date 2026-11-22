@@ -15,6 +15,12 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
     description: 'Visual Tape Chart, ketersediaan kamar harian, dan alur pergerakan tamu.'
   },
   {
+    key: 'Pemeriksaan Kamar Pre-Checkout',
+    label: 'Pemeriksaan Kamar Pre-Checkout (FO → HK)',
+    group: 'Front Office',
+    description: 'Permintaan cek kamar sebelum check-out (FO ke Housekeeping) dan konfirmasi tagihan minibar.'
+  },
+  {
     key: 'Dokumen & Print',
     label: 'Dokumen & Print',
     group: 'Front Office',
@@ -127,6 +133,7 @@ export const AVAILABLE_MENUS: MenuDefinition[] = [
 export const SOP_DEFAULT_PERMISSIONS: Record<string, string[]> = {
   'Super Admin': [
     'Kalender',
+    'Pemeriksaan Kamar Pre-Checkout',
     'Transaksi',
     'Pelanggan',
     'Housekeeping',
@@ -140,6 +147,7 @@ export const SOP_DEFAULT_PERMISSIONS: Record<string, string[]> = {
   ],
   'General Manager': [
     'Kalender',
+    'Pemeriksaan Kamar Pre-Checkout',
     'Transaksi',
     'Pelanggan',
     'Housekeeping',
@@ -153,6 +161,7 @@ export const SOP_DEFAULT_PERMISSIONS: Record<string, string[]> = {
   ],
   'Front Office': [
     'Kalender',
+    'Pemeriksaan Kamar Pre-Checkout',
     'Transaksi',
     'Pelanggan',
     'POS',
@@ -160,6 +169,7 @@ export const SOP_DEFAULT_PERMISSIONS: Record<string, string[]> = {
   ],
   'Housekeeping': [
     'Housekeeping',
+    'Pemeriksaan Kamar Pre-Checkout',
     'Employee Mobile'
   ],
   'Accounting': [

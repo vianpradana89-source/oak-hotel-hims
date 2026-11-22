@@ -51,6 +51,27 @@ export const OPERATIONAL_ACCESS_RULES: OperationalAccessRule[] = [
   { pattern: /^\/api\/guest-profiles/, resources: ['Pelanggan'] },
   { pattern: /^\/api\/guests/, resources: ['Pelanggan'] },
 
+  {
+    pattern: /^\/api\/housekeeping\/checkout-room-check$/,
+    resources: ['Pemeriksaan Kamar Pre-Checkout', 'Kalender', 'Housekeeping'],
+    action: 'view',
+  },
+  {
+    pattern: /^\/api\/housekeeping\/urgent-room-readiness-request$/,
+    resources: ['Pemeriksaan Kamar Pre-Checkout', 'Kalender', 'Housekeeping'],
+    action: 'view',
+  },
+  {
+    pattern: /^\/api\/housekeeping\/tasks\/[^/]+\/confirm-minibar-billing$/,
+    resources: ['Pemeriksaan Kamar Pre-Checkout', 'Kalender', 'Transaksi', 'Housekeeping'],
+    action: 'view',
+  },
+  {
+    pattern: /^\/api\/housekeeping\/findings$/,
+    resources: ['Pemeriksaan Kamar Pre-Checkout', 'Kalender', 'Housekeeping'],
+    action: 'view',
+    methods: ['GET', 'HEAD'],
+  },
   { pattern: /^\/api\/housekeeping/, resources: ['Housekeeping'] },
 
   { pattern: /^\/api\/hr(\/|$)/, resources: ['HRD'] },

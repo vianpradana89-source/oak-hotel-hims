@@ -53,6 +53,7 @@ export const ACCESS_ACTION_LABELS: Record<AccessAction, string> = {
  */
 export const MODULE_SUPPORTED_ACTIONS: Record<string, AccessAction[]> = {
   Kalender: ['view', 'detail', 'create', 'edit', 'delete'],
+  'Pemeriksaan Kamar Pre-Checkout': ['view', 'detail', 'create', 'edit'],
   'Dokumen & Print': ['view', 'detail', 'edit', 'export'],
   Transaksi: ['view', 'detail', 'create', 'edit', 'delete', 'export'],
   Pelanggan: ['view', 'detail', 'create', 'edit', 'delete', 'export', 'import'],
@@ -196,9 +197,15 @@ export function getOverrideChoice(
  * Navigation visibility derived from the same effective grid used for API
  * enforcement: a menu is shown when its VIEW permission resolves to allowed.
  */
+const NON_NAV_RESOURCE_KEYS = new Set([
+  'Persetujuan PO',
+  'Persetujuan Komplimentari',
+  'Pemeriksaan Kamar Pre-Checkout',
+]);
+
 export function getVisibleNavKeys(effective: EffectiveAccessGrid): MainNavKey[] {
   return Object.keys(effective).filter(
-    resource => effective[resource]?.view?.allowed === true
+    resource => !NON_NAV_RESOURCE_KEYS.has(resource) && effective[resource]?.view?.allowed === true
   ) as MainNavKey[];
 }
 

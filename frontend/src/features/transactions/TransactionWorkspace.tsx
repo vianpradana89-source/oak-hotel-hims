@@ -3073,7 +3073,7 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                         <th className="py-3 px-2 text-center bg-slate-50">Nota</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Persetujuan</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Verifikasi</th>
-                        <th className="py-3 px-2 text-center bg-slate-50">Bukti Bayar</th>
+                        <th className="py-3 px-2 text-center bg-slate-50">Bukti</th>
                         <th className="py-3 px-2 text-center bg-slate-50">Status</th>
                         <th className="py-3 px-3 text-center bg-slate-50">Aksi</th>
                       </tr>
@@ -3725,45 +3725,29 @@ export const TransactionWorkspace: React.FC<TransactionWorkspaceProps> = ({
                                 );
                               })()}
                             </td>
-                            {/* Bukti Bayar — sebelah kanan Verifikasi (berisi gambar upload dari Akuntansi Hutang) */}
+                            {/* Bukti — sebelah kanan Verifikasi (hanya berisi gambar upload dari Akuntansi Hutang) */}
                             <td className="py-3 px-2 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
-                              {(() => {
-                                const ps = String(t.payment_status || 'UNPAID').toUpperCase();
-                                const isPaid = ps === 'PAID';
-                                const isPartial = ps === 'PARTIAL' || ps === 'PARTIALLY_PAID';
-                                return (
-                                  <div className="inline-flex flex-col items-center gap-0.5">
-                                    <span className={`inline-flex items-center text-[10px] font-bold px-2 py-0.5 rounded-md border ${
-                                      isPaid
-                                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
-                                        : isPartial
-                                        ? 'bg-blue-50 text-blue-700 border-blue-200'
-                                        : 'bg-amber-50 text-amber-700 border-amber-200'
-                                    }`}>
-                                      {isPaid ? 'Sudah Bayar' : isPartial ? 'Dibayar Sebagian' : 'Belum Bayar'}
-                                    </span>
-                                    {t.payment_proof_attachment ? (
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          const attach = t.payment_proof_attachment;
-                                          if (attach) {
-                                            setPaymentProofModal({
-                                              filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
-                                              title: `Bukti Bayar — ${t.transaction_no}`,
-                                              uploadId: `HIMS-PUR-${t.id}`,
-                                            });
-                                          }
-                                        }}
-                                        className="inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[9px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 cursor-pointer"
-                                        title="Lihat Bukti Bayar dari Akuntansi Hutang"
-                                      >
-                                        <span>📎 Bukti</span>
-                                      </button>
-                                    ) : null}
-                                  </div>
-                                );
-                              })()}
+                              {t.payment_proof_attachment ? (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const attach = t.payment_proof_attachment;
+                                    if (attach) {
+                                      setPaymentProofModal({
+                                        filePath: buildTransactionAttachmentFilePath(t.id, attach.id),
+                                        title: `Bukti Bayar — ${t.transaction_no}`,
+                                        uploadId: `HIMS-PUR-${t.id}`,
+                                      });
+                                    }
+                                  }}
+                                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 hover:bg-emerald-100 cursor-pointer"
+                                  title="Lihat Bukti Bayar dari Akuntansi Hutang"
+                                >
+                                  <span>📎 Bukti</span>
+                                </button>
+                              ) : (
+                                <span className="text-slate-400 text-xs">—</span>
+                              )}
                             </td>
                             {/* Status — read-only informasi */}
                             <td className="py-3 px-2 text-center whitespace-nowrap">

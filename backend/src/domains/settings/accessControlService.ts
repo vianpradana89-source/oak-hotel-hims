@@ -28,6 +28,16 @@ const RESOURCE_PERMISSION_KEYS: Record<string, Record<AccessAction, string[]>> =
     import: ['reservations.create'],
     approve: ['reservations.approve'],
   },
+  'Pemeriksaan Kamar Pre-Checkout': {
+    view: ['room_check.view'],
+    detail: ['room_check.view'],
+    create: ['room_check.create'],
+    edit: ['room_check.edit'],
+    delete: ['room_check.edit'],
+    export: ['room_check.view'],
+    import: ['room_check.create'],
+    approve: ['room_check.edit'],
+  },
   'Dokumen & Print': {
     view: ['documents.view'],
     detail: ['documents.view'],
@@ -338,6 +348,32 @@ export interface AccessRoleSummary {
   access: AccessGrid;
 }
 
+let roomCheckPermissionsSeeded = false;
+async function ensureRoomCheckPermissions(client: Pool | PoolClient): Promise<void> {
+  if (roomCheckPermissionsSeeded) return;
+  try {
+    await client.query(`
+      INSERT INTO permissions (module, action, key, description, is_system_permission)
+      VALUES
+        ('room_check', 'view',   'room_check.view',   'Hak akses VIEW pada Pemeriksaan Kamar Pre-Checkout', TRUE),
+        ('room_check', 'create', 'room_check.create', 'Hak akses CREATE pada Pemeriksaan Kamar Pre-Checkout', TRUE),
+        ('room_check', 'edit',   'room_check.edit',   'Hak akses EDIT pada Pemeriksaan Kamar Pre-Checkout', TRUE)
+      ON CONFLICT (key) DO NOTHING;
+
+      INSERT INTO role_permissions (role_id, permission_id, granted, created_by)
+      SELECT r.id, p.id, TRUE, 'MIGRATION_ROOM_CHECK_FO_HK'
+      FROM roles r
+      CROSS JOIN permissions p
+      WHERE LOWER(BTRIM(r.name)) IN ('super admin', 'general manager', 'owner', 'admin', 'front office', 'receptionist', 'housekeeping')
+        AND p.key IN ('room_check.view', 'room_check.create', 'room_check.edit')
+      ON CONFLICT (role_id, permission_id) DO NOTHING;
+    `);
+    roomCheckPermissionsSeeded = true;
+  } catch {
+    // non-fatal
+  }
+}
+
 /**
  * Property-scoped role list: the property's own roles plus platform system
  * roles, which are visible everywhere but protected from property edits.
@@ -346,6 +382,7 @@ export async function getRoleAccessMatrix(
   client: Pool | PoolClient,
   propertyId: number
 ): Promise<{ property_id: number; resources: AccessResourceDefinition[]; roles: AccessRoleSummary[] }> {
+  await ensureRoomCheckPermissions(client);
   const rolesRes = await client.query(
     `SELECT id, name, description, property_id, is_system_role, is_active
      FROM roles
@@ -578,6 +615,7 @@ export async function resolveEffectiveAccess(
   propertyId: number,
   userId: number
 ): Promise<EffectiveAccessResult> {
+  await ensureRoomCheckPermissions(client);
   const user = await loadPropertyUser(client, propertyId, userId);
   const platformSuperAdmin = await isPlatformSuperAdmin(client, userId);
 
@@ -664,6 +702,21 @@ export async function hasAnyEffectivePermission(
   action: AccessAction
 ): Promise<boolean> {
   if (await isPlatformSuperAdmin(client, userId)) return true;
+  // If the first resource is 'Pemeriksaan Kamar Pre-Checkout' and the user has an explicit DENY override on it,
+  // respect the explicit user override even if fallback resources (e.g. 'Kalender' or 'Housekeeping') are allowed.
+  if (resources[0] === 'Pemeriksaan Kamar Pre-Checkout') {
+    const resolved = await resolveEffectiveAccess(client, propertyId, userId);
+    const checkCell = resolved.effective['Pemeriksaan Kamar Pre-Checkout']?.[action];
+    if (checkCell && checkCell.source === 'USER_OVERRIDE' && checkCell.allowed === false) {
+      return false;
+    }
+    for (const resource of resources) {
+      if (resolved.effective[resource]?.[action]?.allowed === true) {
+        return true;
+      }
+    }
+    return false;
+  }
   for (const resource of resources) {
     if (await hasEffectivePermission(client, propertyId, userId, resource, action)) {
       return true;
