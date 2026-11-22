@@ -360,6 +360,8 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
   // Search & filter states across sub-views
   const [jurnalSearch, setJurnalSearch] = useState('');
   const [jurnalBadgeFilter, setJurnalBadgeFilter] = useState<string>('ALL');
+  const [jurnalPageSize, setJurnalPageSize] = useState<'30' | '50' | '100' | 'semua'>('30');
+  const [jurnalPage, setJurnalPage] = useState<number>(1);
   const [hutangFilter, setHutangFilter] = useState<'ALL' | 'UNPAID' | 'PARTIAL' | 'PAID'>('UNPAID');
   const [hutangSearch, setHutangSearch] = useState('');
   const [hutangColFilters, setHutangColFilters] = useState<
@@ -477,6 +479,18 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
       );
     });
   }, [subledger, jurnalSearch, jurnalBadgeFilter]);
+
+  const jurnalNumericSize = jurnalPageSize === 'semua' ? filteredJournalRows.length || 1 : Number(jurnalPageSize);
+  const jurnalTotalPages =
+    jurnalPageSize === 'semua'
+      ? 1
+      : Math.max(1, Math.ceil(filteredJournalRows.length / jurnalNumericSize));
+  const jurnalSafePage = Math.min(Math.max(1, jurnalPage), jurnalTotalPages);
+  const jurnalStartIdx = jurnalPageSize === 'semua' ? 0 : (jurnalSafePage - 1) * jurnalNumericSize;
+  const paginatedJournalRows = useMemo(() => {
+    if (jurnalPageSize === 'semua') return filteredJournalRows;
+    return filteredJournalRows.slice(jurnalStartIdx, jurnalStartIdx + jurnalNumericSize);
+  }, [filteredJournalRows, jurnalPageSize, jurnalStartIdx, jurnalNumericSize]);
 
   // Period-scoped & status-filtered Payables (before column checkbox filters)
   const periodScopedPayables = useMemo(() => {
@@ -1061,23 +1075,47 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
 
           {/* Search & Category Filter */}
           <div className="bg-white rounded-xl border border-slate-200 p-3.5 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
-            <div className="relative flex-1">
-              <IconSearch className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-              <input
-                type="text"
-                value={jurnalSearch}
-                onChange={(e) => setJurnalSearch(e.target.value)}
-                placeholder="Cari BID, nomor transaksi, atau keterangan..."
-                className="w-full pl-9 pr-4 py-2 text-xs rounded-lg border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-emerald-700"
-              />
+            <div className="flex flex-1 items-center gap-2.5">
+              <div className="relative flex-1">
+                <IconSearch className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={jurnalSearch}
+                  onChange={(e) => {
+                    setJurnalSearch(e.target.value);
+                    setJurnalPage(1);
+                  }}
+                  placeholder="Cari BID, nomor transaksi, atau keterangan..."
+                  className="w-full pl-9 pr-4 py-2 text-xs rounded-lg border border-slate-200 focus:outline-hidden focus:ring-2 focus:ring-emerald-700"
+                />
+              </div>
+              <div className="flex items-center gap-1.5 shrink-0">
+                <label className="text-[11px] text-slate-400 shrink-0">Baris</label>
+                <select
+                  value={jurnalPageSize}
+                  onChange={(e) => {
+                    setJurnalPageSize(e.target.value as '30' | '50' | '100' | 'semua');
+                    setJurnalPage(1);
+                  }}
+                  className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1.5 text-slate-700 font-medium focus:outline-hidden focus:ring-1 focus:ring-emerald-400 cursor-pointer"
+                >
+                  <option value="30">30</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                  <option value="semua">Semua</option>
+                </select>
+              </div>
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               {(['ALL', 'Penjualan', 'Pemasukan', 'Pengeluaran', 'Pembelian', 'Transfer Investor'] as const).map(
                 (cat) => (
                   <button
                     key={cat}
-                    onClick={() => setJurnalBadgeFilter(cat)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${
+                    onClick={() => {
+                      setJurnalBadgeFilter(cat);
+                      setJurnalPage(1);
+                    }}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition cursor-pointer ${
                       jurnalBadgeFilter === cat
                         ? 'bg-[#123524] text-[#E6C786]'
                         : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
@@ -1107,14 +1145,14 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {filteredJournalRows.length === 0 ? (
+                  {paginatedJournalRows.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-10 text-center text-slate-400">
                         Belum ada transaksi jurnal pada periode ini.
                       </td>
                     </tr>
                   ) : (
-                    filteredJournalRows.map((row, idx) => {
+                    paginatedJournalRows.map((row, idx) => {
                       const badgeColor =
                         row.badge_type === 'Penjualan'
                           ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
@@ -1127,7 +1165,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                           : 'bg-rose-50 text-rose-800 border-rose-200';
                       return (
                         <tr key={row.id} className="hover:bg-emerald-50/30 transition">
-                          <td className="py-3 px-3 text-slate-500 font-medium">{idx + 1}</td>
+                          <td className="py-3 px-3 text-slate-500 font-medium">{jurnalStartIdx + idx + 1}</td>
                           <td className="py-3 px-3">
                             <div className="font-bold text-slate-800">{row.bid_or_ref}</div>
                             <span
@@ -1159,6 +1197,36 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                 </tbody>
               </table>
             </div>
+            {filteredJournalRows.length > 0 && (
+              <div className="px-4 py-2.5 bg-slate-50/70 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">
+                <span>
+                  {jurnalStartIdx + 1}&ndash;{Math.min(jurnalStartIdx + paginatedJournalRows.length, filteredJournalRows.length)} dari {filteredJournalRows.length}
+                </span>
+                {jurnalPageSize !== 'semua' && jurnalTotalPages > 1 && (
+                  <div className="flex items-center gap-1.5">
+                    <button
+                      type="button"
+                      disabled={jurnalSafePage <= 1}
+                      onClick={() => setJurnalPage((p) => Math.max(1, p - 1))}
+                      className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                    >
+                      Sebelumnya
+                    </button>
+                    <span className="px-2 font-semibold text-slate-700">
+                      Hal {jurnalSafePage} / {jurnalTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={jurnalSafePage >= jurnalTotalPages}
+                      onClick={() => setJurnalPage((p) => Math.min(jurnalTotalPages, p + 1))}
+                      className="px-2.5 py-1 rounded-lg border border-slate-200 bg-white text-slate-700 font-semibold hover:bg-slate-50 disabled:opacity-40 cursor-pointer"
+                    >
+                      Berikutnya
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1244,7 +1312,7 @@ export const LaporanTabAkuntansi: React.FC<LaporanTabAkuntansiProps> = ({
                       onSortChange={handleHutangSortChange}
                     />
                     <th className="py-3 px-3.5 font-semibold bg-[#123524] whitespace-nowrap">Tanggal</th>
-                    <th className="py-3 px-3 font-semibold text-center bg-[#123524]">Rekening Supplier</th>
+                    <th className="py-3 px-3 font-semibold text-center bg-[#123524] whitespace-nowrap">Data Rekening</th>
                     <th className="py-3 px-4 font-semibold bg-[#123524]">Transaksi</th>
                     <PayableColumnFilterTh
                       label="Jenis"
