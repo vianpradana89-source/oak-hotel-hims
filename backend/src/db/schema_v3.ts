@@ -7479,7 +7479,7 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     ALTER TABLE IF EXISTS transactions
       ADD COLUMN IF NOT EXISTS recipient_email VARCHAR(160) DEFAULT NULL;
 
-    INSERT INTO permissions (module, action, key, description, is_system_permission)
+    INSERT INTO permissions (resource, action, key, description, is_system)
     VALUES
       ('room_check', 'view',   'room_check.view',   'Hak akses VIEW pada Pemeriksaan Kamar Pre-Checkout', TRUE),
       ('room_check', 'create', 'room_check.create', 'Hak akses CREATE pada Pemeriksaan Kamar Pre-Checkout', TRUE),
@@ -7492,6 +7492,6 @@ export async function ensureInventoryTahapAR1Schema(pool: Pool): Promise<void> {
     CROSS JOIN permissions p
     WHERE LOWER(BTRIM(r.name)) IN ('super admin', 'general manager', 'owner', 'admin', 'front office', 'receptionist', 'housekeeping')
       AND p.key IN ('room_check.view', 'room_check.create', 'room_check.edit')
-    ON CONFLICT (role_id, permission_id) DO NOTHING;
+    ON CONFLICT DO NOTHING;
   `);
 }
