@@ -6946,6 +6946,27 @@ export async function hardDeleteTransaction(
           tx.correction_group_id || null,
         ]
       );
+      if (tx.po_id) {
+        const linkedPoId = Number(tx.po_id);
+        await safeExec(
+          `DELETE FROM pos_purchase_order_items
+            WHERE po_id = $1
+              AND NOT EXISTS (
+                SELECT 1 FROM pos_goods_receipts gr
+                 WHERE gr.po_id = $1 AND gr.status = 'POSTED'
+              )`,
+          [linkedPoId]
+        );
+        await safeExec(
+          `DELETE FROM pos_purchase_orders
+            WHERE id = $1 AND property_id = $2
+              AND NOT EXISTS (
+                SELECT 1 FROM pos_goods_receipts gr
+                 WHERE gr.po_id = $1 AND gr.status = 'POSTED'
+              )`,
+          [linkedPoId, propertyId]
+        );
+      }
     }
 
     await client.query(
@@ -6995,6 +7016,9 @@ interface LockedPurchaseRow {
   transaction_no: string;
   transaction_type: string;
   transaction_status: string;
+  payment_status: string | null;
+  po_id: number | string | null;
+  deleted_at: string | null;
   receiving_status: string | null;
   verification_status: string | null;
   purchase_workflow_status: string | null;
@@ -7016,6 +7040,7 @@ async function fetchLockedPurchase(
 ): Promise<LockedPurchaseRow> {
   const res = await client.query(
     `SELECT id, transaction_no, transaction_type, transaction_status,
+            payment_status, po_id, deleted_at,
             receiving_status, verification_status, purchase_workflow_status,
             verified_by_user_id, verified_by_name_snapshot, verified_at, received_at,
             approval_status, approved_by_user_id, approved_by_name_snapshot, approved_at, rejection_reason
@@ -7136,7 +7161,15 @@ export async function executePurchaseLifecycle(
     await client.query('BEGIN');
 
     const prev = await fetchLockedPurchase(client, propertyId, id);
-    assertNonTerminal(prev.transaction_status);
+    if (actionUpper !== 'SET_APPROVAL') {
+      assertNonTerminal(prev.transaction_status);
+    }
+
+    if (prev.deleted_at) {
+      const err: any = new Error(`Transaksi #${id} telah dihapus dan tidak dapat diubah.`);
+      err.statusCode = 409;
+      throw err;
+    }
 
     let newReceiving: string | null = prev.receiving_status;
     let newVerification: string | null = prev.verification_status;
@@ -7150,6 +7183,7 @@ export async function executePurchaseLifecycle(
     let newApprovedByName: string | null = prev.approved_by_name_snapshot;
     let newApprovedAt: string | null = prev.approved_at;
     let newRejectionReason: string | null = prev.rejection_reason;
+    let newTransactionStatus: string = prev.transaction_status || 'POSTED';
 
     const autoRules = {
       verified_forced_workflow_complete: false,
@@ -7206,33 +7240,88 @@ export async function executePurchaseLifecycle(
       }
       newWorkflow = w;
     } else if (actionUpper === 'SET_APPROVAL') {
-      const app = dto.approval_status;
+      const app = String(dto.approval_status || '').toUpperCase();
       if (!app || !['PENDING_APPROVAL', 'APPROVED', 'REJECTED'].includes(app)) {
-        const err: any = new Error(`approval_status '${app}' tidak valid`);
+        const err: any = new Error(`approval_status '${dto.approval_status}' tidak valid`);
         err.statusCode = 400;
         throw err;
       }
-      if (app === 'REJECTED' && !reason) {
-        const err: any = new Error('Alasan penolakan (reason) wajib diisi saat menolak pembelian');
-        err.statusCode = 400;
+      if (app === 'REJECTED' && String(prev.payment_status || '').toUpperCase() === 'PAID') {
+        const err: any = new Error('Pembelian yang sudah dibayar (PAID) tidak dapat ditolak. Gunakan Void jika ingin membatalkan.');
+        err.statusCode = 409;
         throw err;
       }
       newApprovalStatus = app;
+      const linkedPoId = prev.po_id ? Number(prev.po_id) : null;
       if (app === 'APPROVED') {
         newApprovedByUserId = actorUserId;
         newApprovedByName = actor;
         newApprovedAt = new Date().toISOString();
         newRejectionReason = null;
+        if (newTransactionStatus === 'CANCELLED' || newTransactionStatus === 'VOIDED') {
+          newTransactionStatus = 'POSTED';
+        }
+        if (linkedPoId && linkedPoId > 0) {
+          await client.query(
+            `UPDATE pos_purchase_orders
+                SET status = CASE WHEN status IN ('DRAFT', 'PENDING_APPROVAL', 'REJECTED') THEN 'APPROVED' ELSE status END,
+                    approval_status = 'APPROVED',
+                    approved_by_user_id = $1,
+                    approved_by_name_snapshot = $2,
+                    approved_at = NOW(),
+                    rejection_reason = NULL,
+                    updated_at = NOW()
+              WHERE id = $3 AND property_id = $4`,
+            [actorUserId, actor, linkedPoId, propertyId]
+          );
+        }
       } else if (app === 'REJECTED') {
+        const rejReason = reason || 'Pengajuan pembelian / PO ditolak oleh Akuntansi';
         newApprovedByUserId = actorUserId;
         newApprovedByName = actor;
         newApprovedAt = new Date().toISOString();
-        newRejectionReason = reason;
+        newRejectionReason = rejReason;
+        newTransactionStatus = 'CANCELLED';
+        newVerification = 'UNVERIFIED';
+        newVerifiedByUserId = null;
+        newVerifiedByName = null;
+        newVerifiedAt = null;
+        if (linkedPoId && linkedPoId > 0) {
+          await client.query(
+            `UPDATE pos_purchase_orders
+                SET status = 'REJECTED',
+                    approval_status = 'REJECTED',
+                    approved_by_user_id = $1,
+                    approved_by_name_snapshot = $2,
+                    approved_at = NOW(),
+                    rejection_reason = $3,
+                    updated_at = NOW()
+              WHERE id = $4 AND property_id = $5`,
+            [actorUserId, actor, rejReason, linkedPoId, propertyId]
+          );
+        }
       } else if (app === 'PENDING_APPROVAL') {
         newApprovedByUserId = null;
         newApprovedByName = null;
         newApprovedAt = null;
         newRejectionReason = null;
+        if (newTransactionStatus === 'CANCELLED' || newTransactionStatus === 'VOIDED') {
+          newTransactionStatus = 'POSTED';
+        }
+        if (linkedPoId && linkedPoId > 0) {
+          await client.query(
+            `UPDATE pos_purchase_orders
+                SET status = CASE WHEN status IN ('DRAFT', 'APPROVED', 'REJECTED') THEN 'PENDING_APPROVAL' ELSE status END,
+                    approval_status = 'PENDING_APPROVAL',
+                    approved_by_user_id = NULL,
+                    approved_by_name_snapshot = NULL,
+                    approved_at = NULL,
+                    rejection_reason = NULL,
+                    updated_at = NOW()
+              WHERE id = $1 AND property_id = $2`,
+            [linkedPoId, propertyId]
+          );
+        }
       }
     } else if (actionUpper === 'ARCHIVE') {
       newWorkflow = 'SELESAI';
@@ -7272,8 +7361,9 @@ export async function executePurchaseLifecycle(
            approved_by_name_snapshot = $10,
            approved_at = $11,
            rejection_reason = $12,
+           transaction_status = $13,
            updated_at = NOW()
-       WHERE id = $13 AND property_id = $14`,
+       WHERE id = $14 AND property_id = $15`,
       [
         newReceiving,
         newReceivedAt,
@@ -7287,6 +7377,7 @@ export async function executePurchaseLifecycle(
         newApprovedByName,
         newApprovedAt,
         newRejectionReason,
+        newTransactionStatus,
         id,
         propertyId,
       ]

@@ -1,4 +1,5 @@
 import type { Pool, PoolClient } from 'pg';
+import { generateTransactionNumber } from '../transactions/transactionNumberService';
 
 export type PosPurchaseOrderStatus =
   | 'DRAFT'
@@ -817,6 +818,43 @@ export async function listPurchaseOrders(
     include_archived?: boolean;
   }
 ): Promise<PosPurchaseOrderRow[]> {
+  // Ensure any non-cancelled PO without a linked PURCHASE transaction is automatically synced
+  try {
+    const missingTxPoRes = await pool.query(
+      `SELECT po.id
+         FROM pos_purchase_orders po
+        WHERE po.property_id = $1
+          AND po.archived_at IS NULL
+          AND po.status <> 'CANCELLED'
+          AND NOT EXISTS (
+            SELECT 1 FROM transactions t
+             WHERE t.property_id = po.property_id
+               AND t.po_id = po.id
+               AND t.transaction_type = 'PURCHASE'
+               AND t.deleted_at IS NULL
+          )
+        ORDER BY po.id ASC
+        LIMIT 25`,
+      [propertyId]
+    );
+    if ((missingTxPoRes.rowCount ?? 0) > 0 && 'connect' in pool) {
+      const syncClient = await (pool as Pool).connect();
+      try {
+        for (const r of missingTxPoRes.rows) {
+          await syncClient.query('BEGIN');
+          await syncPurchaseTransactionForPo(syncClient, propertyId, Number(r.id));
+          await syncClient.query('COMMIT');
+        }
+      } catch {
+        await syncClient.query('ROLLBACK').catch(() => {});
+      } finally {
+        syncClient.release();
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+
   const params: any[] = [propertyId];
   let where = `WHERE po.property_id = $1`;
 
@@ -1416,6 +1454,214 @@ async function validateAndPreparePoItems(
   return { validatedItems, subtotal };
 }
 
+export async function syncPurchaseTransactionForPo(
+  client: PoolClient,
+  propertyId: number,
+  poId: number,
+  options?: {
+    invoiceReference?: string | null;
+    actorName?: string | null;
+  }
+): Promise<number | null> {
+  const poRes = await client.query(
+    `SELECT po.*,
+            COALESCE(s.name, ps.name, 'Supplier PO') AS supplier_name,
+            sl.code AS location_code
+       FROM pos_purchase_orders po
+       LEFT JOIN suppliers s ON s.id = po.supplier_id AND s.property_id = po.property_id
+       LEFT JOIN pos_suppliers ps ON ps.id = COALESCE(po.legacy_pos_supplier_id, po.supplier_id) AND ps.property_id = po.property_id
+       LEFT JOIN stock_locations sl ON sl.id = po.destination_location_id AND sl.property_id = po.property_id
+      WHERE po.id = $1 AND po.property_id = $2`,
+    [poId, propertyId]
+  );
+  if ((poRes.rowCount ?? 0) === 0) return null;
+  const po = poRes.rows[0];
+
+  const itemsRes = await client.query(
+    `SELECT poi.*, pmi.name AS product_name
+       FROM pos_purchase_order_items poi
+       JOIN pos_menu_items pmi ON pmi.id = poi.product_id AND pmi.property_id = poi.property_id
+      WHERE poi.po_id = $1 AND poi.property_id = $2
+      ORDER BY poi.id ASC`,
+    [poId, propertyId]
+  );
+  const items = itemsRes.rows;
+
+  const supplierName = String(po.supplier_name || 'Supplier PO').trim();
+  const firstItemName = items[0]?.product_name ? String(items[0].product_name).trim() : 'Barang Stok';
+  const moreCount = Math.max(0, items.length - 1);
+  const autoDesc = `Pembelian ${firstItemName}${moreCount > 0 ? ` +${moreCount} item lainnya` : ''} — ${supplierName}`;
+  const description = po.notes && String(po.notes).trim() ? `${autoDesc} (${String(po.notes).trim()})` : autoDesc;
+
+  const subtotal = Math.round(Number(po.subtotal_amount ?? po.total_amount ?? 0));
+  const taxAmount = Math.round(Number(po.tax_amount ?? 0));
+  const netAmount = Math.round(Number(po.total_amount ?? po.total_estimated_amount ?? subtotal + taxAmount));
+  const orderDate = normalizeDateOnly(po.order_date);
+  const deptCode = String(po.location_code || 'GENERAL').trim() || 'GENERAL';
+  const supplierId = po.canonical_supplier_id ? Number(po.canonical_supplier_id) : po.supplier_id ? Number(po.supplier_id) : null;
+  const sourceRef =
+    options?.invoiceReference && String(options.invoiceReference).trim()
+      ? String(options.invoiceReference).trim()
+      : String(po.po_number);
+  const actorName = options?.actorName || po.submitted_by_name_snapshot || 'Staff';
+
+  const poApp = String(po.approval_status || '').toUpperCase();
+  const poStatus = String(po.status || '').toUpperCase();
+  const txApprovalStatus =
+    poStatus === 'CANCELLED' || poApp === 'REJECTED' || poStatus === 'REJECTED'
+      ? 'REJECTED'
+      : poApp === 'APPROVED' || ['APPROVED', 'ORDERED', 'PARTIALLY_RECEIVED', 'COMPLETED'].includes(poStatus)
+      ? 'APPROVED'
+      : 'PENDING_APPROVAL';
+
+  const existingTxRes = await client.query(
+    `SELECT * FROM transactions
+      WHERE property_id = $1
+        AND po_id = $2
+        AND transaction_type = 'PURCHASE'
+        AND deleted_at IS NULL
+      ORDER BY id DESC
+      LIMIT 1
+      FOR UPDATE`,
+    [propertyId, poId]
+  );
+
+  let txId: number;
+  if ((existingTxRes.rowCount ?? 0) === 0) {
+    const txNo = await generateTransactionNumber(client, propertyId, orderDate);
+    const txStatus = txApprovalStatus === 'REJECTED' ? 'CANCELLED' : 'POSTED';
+    const insTx = await client.query(
+      `INSERT INTO transactions (
+         property_id, transaction_no, transaction_date, transaction_time,
+         transaction_type, source_type, source_reference, party_name,
+         category_code, category_name, department_code, description,
+         amount, discount_amount, service_amount, tax_amount, rounding_amount, net_amount,
+         payment_status, transaction_status, supplier_id,
+         receiving_status, verification_status, purchase_workflow_status, approval_status,
+         approved_by_name_snapshot, approved_at,
+         source_revision, po_id, is_legacy_without_po, has_po_variance,
+         notes, created_by
+       ) VALUES (
+         $1, $2, $3, CURRENT_TIMESTAMP,
+         'PURCHASE', 'MANUAL_PURCHASE', $4, $5,
+         'PUR_INVENTORY', 'Pembelian Stok & Persediaan', $6, $7,
+         $8, 0, 0, $9, 0, $10,
+         'UNPAID', $11, $12,
+         $13, 'UNVERIFIED', 'PROSES', $14,
+         $15, $16,
+         1, $17, FALSE, FALSE,
+         $18, $19
+       ) RETURNING id`,
+      [
+        propertyId,
+        txNo,
+        orderDate,
+        sourceRef,
+        supplierName,
+        deptCode,
+        description,
+        subtotal,
+        taxAmount,
+        netAmount,
+        txStatus,
+        supplierId,
+        po.receiving_status || 'BELUM_DITERIMA',
+        txApprovalStatus,
+        txApprovalStatus === 'APPROVED' ? (po.approved_by_name_snapshot || actorName) : null,
+        txApprovalStatus === 'APPROVED' ? (po.approved_at || new Date()) : null,
+        poId,
+        po.notes || null,
+        actorName,
+      ]
+    );
+    txId = Number(insTx.rows[0].id);
+  } else {
+    const existingTx = existingTxRes.rows[0];
+    txId = Number(existingTx.id);
+    const isPaid = String(existingTx.payment_status || '').toUpperCase() === 'PAID';
+    const nextApp = isPaid ? 'APPROVED' : txApprovalStatus;
+    const nextTxStatus =
+      isPaid
+        ? existingTx.transaction_status
+        : nextApp === 'REJECTED'
+        ? 'CANCELLED'
+        : 'POSTED';
+    const nextSourceRef =
+      options?.invoiceReference && String(options.invoiceReference).trim()
+        ? String(options.invoiceReference).trim()
+        : existingTx.source_reference || po.po_number;
+
+    await client.query(
+      `UPDATE transactions
+          SET transaction_date = $1,
+              source_reference = $2,
+              party_name = $3,
+              supplier_id = $4,
+              department_code = $5,
+              description = $6,
+              amount = $7,
+              tax_amount = $8,
+              net_amount = $9,
+              receiving_status = $10,
+              approval_status = $11,
+              transaction_status = $12,
+              notes = $13,
+              updated_at = NOW()
+        WHERE id = $14 AND property_id = $15`,
+      [
+        orderDate,
+        nextSourceRef,
+        supplierName,
+        supplierId,
+        deptCode,
+        description,
+        subtotal,
+        taxAmount,
+        netAmount,
+        po.receiving_status || existingTx.receiving_status || 'BELUM_DITERIMA',
+        nextApp,
+        nextTxStatus,
+        po.notes ?? existingTx.notes ?? null,
+        txId,
+        propertyId,
+      ]
+    );
+
+    await client.query(`DELETE FROM transaction_lines WHERE transaction_id = $1 AND property_id = $2`, [
+      txId,
+      propertyId,
+    ]);
+  }
+
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i];
+    const qty = Number(it.ordered_qty || 1);
+    const unitCost = Math.round(Number(it.unit_cost || 0));
+    const lineTotal = Math.round(Number(it.line_total ?? qty * unitCost));
+    await client.query(
+      `INSERT INTO transaction_lines (
+         transaction_id, property_id, po_item_id, product_id, packaging_id,
+         line_type, description_snapshot, quantity, unit, unit_price, discount_amount, line_total, sort_order
+       ) VALUES ($1, $2, $3, $4, $5, 'STOCK_PRODUCT', $6, $7, $8, $9, 0, $10, $11)`,
+      [
+        txId,
+        propertyId,
+        Number(it.id),
+        Number(it.product_id),
+        it.packaging_id != null ? Number(it.packaging_id) : null,
+        String(it.product_name || 'Item PO'),
+        qty,
+        String(it.ordered_unit || it.base_unit || 'PCS'),
+        unitCost,
+        lineTotal,
+        i + 1,
+      ]
+    );
+  }
+
+  return txId;
+}
+
 export async function createPurchaseOrder(
   pool: Pool,
   params: {
@@ -1588,6 +1834,10 @@ export async function createPurchaseOrder(
         propertyId,
       ]
     );
+
+    await syncPurchaseTransactionForPo(client, propertyId, poId, {
+      actorName,
+    });
 
     await client.query('COMMIT');
     return getPurchaseOrderById(pool, propertyId, poId);
@@ -2017,6 +2267,10 @@ export async function updatePurchaseOrder(
       ]
     );
 
+    await syncPurchaseTransactionForPo(client, propertyId, poId, {
+      actorName,
+    });
+
     await client.query('COMMIT');
     return getPurchaseOrderById(pool, propertyId, poId);
   } catch (err) {
@@ -2214,6 +2468,10 @@ export async function updatePurchaseOrderStatus(
         propertyId,
       ]
     );
+
+    await syncPurchaseTransactionForPo(client, propertyId, poId, {
+      actorName,
+    });
 
     await client.query('COMMIT');
     return getPurchaseOrderById(pool, propertyId, poId);

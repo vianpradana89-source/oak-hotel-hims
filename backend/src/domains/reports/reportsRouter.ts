@@ -2647,7 +2647,7 @@ export function createReportsRouter(pool: Pool): Router {
                  approval_status = 'APPROVED',
                  verification_status = 'VERIFIED',
                  verified_at = COALESCE(verified_at, NOW()),
-                 verified_by_name = COALESCE(verified_by_name, 'Akuntansi'),
+                 verified_by_name_snapshot = COALESCE(verified_by_name_snapshot, 'Akuntansi'),
                  purchase_workflow_status = CASE WHEN transaction_type IN ('PURCHASE', 'EXPENSE') THEN 'SELESAI' ELSE purchase_workflow_status END,
                  expense_workflow_status = CASE WHEN transaction_type = 'EXPENSE' THEN 'SELESAI' ELSE expense_workflow_status END,
                  updated_at = NOW()
@@ -2655,6 +2655,17 @@ export function createReportsRouter(pool: Pool): Router {
             [txId]
           );
         }
+        await pool.query(
+          `UPDATE pos_purchase_orders
+              SET approval_status = 'APPROVED',
+                  status = CASE WHEN status IN ('DRAFT', 'PENDING_APPROVAL', 'REJECTED') THEN 'APPROVED' ELSE status END,
+                  approved_by_name_snapshot = COALESCE(approved_by_name_snapshot, 'Akuntansi'),
+                  approved_at = COALESCE(approved_at, NOW()),
+                  rejection_reason = NULL,
+                  updated_at = NOW()
+            WHERE id = (SELECT po_id FROM transactions WHERE id = $1 AND po_id IS NOT NULL)`,
+          [txId]
+        );
 
         // Upload payment proof if provided
         if (req.file) {

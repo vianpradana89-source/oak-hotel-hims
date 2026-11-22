@@ -1,4 +1,5 @@
 import { Pool } from 'pg';
+import { syncPurchaseTransactionForPo } from '../pos/posPurchaseOrderService';
 
 let schemaInitialized = false;
 const initializedProperties = new Set<number>();
@@ -149,9 +150,29 @@ export async function ensureAccountingSchema(pool: Pool, propertyId = 1): Promis
       SET attachment_purpose = 'INVOICE'
       FROM transactions t
       WHERE ta.transaction_id = t.id
-        AND t.transaction_type = 'EXPENSE'
+        AND t.transaction_type IN ('EXPENSE', 'PURCHASE')
         AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
         AND ta.attachment_purpose = 'RECEIPT';
+
+      UPDATE pos_purchase_orders
+      SET status = 'PENDING_APPROVAL',
+          approval_status = 'PENDING_APPROVAL',
+          approved_by_name_snapshot = NULL,
+          approved_at = NULL
+      WHERE po_number = 'PO-20261122-0001'
+        AND COALESCE(receiving_status, 'BELUM_DITERIMA') = 'BELUM_DITERIMA'
+        AND status = 'APPROVED';
+
+      UPDATE transactions
+      SET approval_status = 'PENDING_APPROVAL',
+          approved_by_name_snapshot = NULL,
+          approved_at = NULL
+      WHERE po_id IN (
+        SELECT id FROM pos_purchase_orders
+        WHERE po_number = 'PO-20261122-0001'
+          AND COALESCE(receiving_status, 'BELUM_DITERIMA') = 'BELUM_DITERIMA'
+      )
+        AND UPPER(COALESCE(payment_status, 'UNPAID')) = 'UNPAID';
 
       CREATE TABLE IF NOT EXISTS accounting_manual_receivables (
         id SERIAL PRIMARY KEY,
@@ -277,6 +298,42 @@ export interface AccountingHubContext {
 export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHubContext) {
   await ensureAccountingSchema(pool, ctx.propertyId);
 
+  try {
+    const missingPoRes = await pool.query(
+      `SELECT po.id
+         FROM pos_purchase_orders po
+        WHERE po.property_id = $1
+          AND po.archived_at IS NULL
+          AND po.status <> 'CANCELLED'
+          AND NOT EXISTS (
+            SELECT 1 FROM transactions t
+             WHERE t.property_id = po.property_id
+               AND t.po_id = po.id
+               AND t.transaction_type = 'PURCHASE'
+               AND t.deleted_at IS NULL
+          )
+        ORDER BY po.id ASC
+        LIMIT 25`,
+      [ctx.propertyId]
+    );
+    if ((missingPoRes.rowCount ?? 0) > 0) {
+      const client = await pool.connect();
+      try {
+        for (const r of missingPoRes.rows) {
+          await client.query('BEGIN');
+          await syncPurchaseTransactionForPo(client, ctx.propertyId, Number(r.id));
+          await client.query('COMMIT');
+        }
+      } catch {
+        await client.query('ROLLBACK').catch(() => {});
+      } finally {
+        client.release();
+      }
+    }
+  } catch {
+    // non-fatal
+  }
+
   const [
     coaRes,
     manualBanksRes,
@@ -362,7 +419,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
          SELECT
            t.id,
            t.transaction_type,
-           t.transaction_no,
+           COALESCE(ppo.po_number, t.transaction_no) AS transaction_no,
            to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
            COALESCE(s.name, NULLIF(BTRIM(t.party_name), ''), 'Supplier / Vendor') AS supplier_name,
            COALESCE(
@@ -390,7 +447,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
                WHERE (gr.transaction_id = t.id OR (t.po_id IS NOT NULL AND gr.po_id = t.po_id))
                LIMIT 1
              ),
-             CASE WHEN t.transaction_type = 'EXPENSE' THEN COALESCE(t.department_code, '—') ELSE '—' END
+             CASE WHEN t.transaction_type IN ('EXPENSE', 'PURCHASE') THEN COALESCE(t.department_code, '—') ELSE '—' END
            ) AS warehouse_code,
            (
              SELECT json_build_object(
@@ -404,7 +461,7 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
                AND (
                  ta.attachment_purpose = 'INVOICE'
                  OR (
-                   t.transaction_type = 'EXPENSE'
+                   t.transaction_type IN ('EXPENSE', 'PURCHASE')
                    AND COALESCE(ta.uploaded_by, '') != 'Akuntansi'
                    AND ta.attachment_purpose != 'PAYMENT_PROOF'
                  )
@@ -422,8 +479,8 @@ export async function buildAccountingSubledgerData(pool: Pool, ctx: AccountingHu
              FROM transaction_attachments ta
              WHERE ta.transaction_id = t.id AND ta.property_id = t.property_id
                AND (
-                 (t.transaction_type = 'EXPENSE' AND (ta.attachment_purpose = 'PAYMENT_PROOF' OR COALESCE(ta.uploaded_by, '') = 'Akuntansi'))
-                 OR (t.transaction_type != 'EXPENSE' AND ta.attachment_purpose IN ('PAYMENT_PROOF', 'RECEIPT'))
+                 ta.attachment_purpose = 'PAYMENT_PROOF'
+                 OR COALESCE(ta.uploaded_by, '') = 'Akuntansi'
                )
              ORDER BY CASE WHEN ta.attachment_purpose = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
              LIMIT 1

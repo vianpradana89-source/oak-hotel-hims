@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
-import { useAuth } from '../auth/AuthContext';
 import {
   fetchPurchaseOrders,
   fetchPurchaseOrderById,
@@ -16,6 +15,7 @@ import {
 } from '../posInventory/posPurchaseOrderApi';
 import { fetchStockLocations } from '../posInventory/posInventoryApi';
 import type { StockLocation } from '../posInventory/posInventoryTypes';
+import { uploadTransactionAttachmentApi } from './transactionClient';
 
 interface ProcurementPoSectionProps {
   propertyId: number;
@@ -27,7 +27,7 @@ interface ProcurementPoSectionProps {
   onClearShowCreateModalExternal?: () => void;
   onOpenReceiveGoodsForPo: (po: PosPurchaseOrder) => void;
   onOpenViewReceiptsForPo: (po: PosPurchaseOrder) => void;
-  onOpenCreateInvoiceForPo: (po: PosPurchaseOrder) => void;
+  onOpenCreateInvoiceForPo?: (po: PosPurchaseOrder) => void;
   onOpenInvoiceDetailDrawer: (transactionId: number | string) => void;
   onOpenVendorSupplierMaster?: () => void;
   onRefreshParentTransactions?: () => void;
@@ -97,7 +97,6 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   onClearShowCreateModalExternal,
   onOpenReceiveGoodsForPo,
   onOpenViewReceiptsForPo,
-  onOpenCreateInvoiceForPo,
   onOpenInvoiceDetailDrawer,
   onOpenVendorSupplierMaster,
   onRefreshParentTransactions,
@@ -108,13 +107,6 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
   const [includeArchived, setIncludeArchived] = useState<boolean>(false);
   const [bannerSuccess, setBannerSuccess] = useState<string | null>(null);
-
-  const { user, hasGranularPermission, effectiveAccess } = useAuth();
-  const canApprovePo = useMemo(() => {
-    if (user?.role === 'Super Admin' || effectiveAccess?.is_platform_super_admin) return true;
-    if (effectiveAccess?.effective?.['Persetujuan PO']?.approve?.allowed === true) return true;
-    return hasGranularPermission('purchase_orders.approve');
-  }, [user, effectiveAccess, hasGranularPermission]);
 
   // Detail Drawer state
   const [selectedPo, setSelectedPo] = useState<PosPurchaseOrder | null>(null);
@@ -134,6 +126,8 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
   const [formExpectedDate, setFormExpectedDate] = useState<string>('');
   const [formLocationId, setFormLocationId] = useState<string>('');
   const [formNotes, setFormNotes] = useState<string>('');
+  const [formInvoiceRef, setFormInvoiceRef] = useState<string>('');
+  const [formInvoiceFile, setFormInvoiceFile] = useState<File | null>(null);
   const [formItems, setFormItems] = useState<PoFormLineItem[]>([
     {
       id: null,
@@ -236,6 +230,8 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
     setFormOrderDate(getJakartaDateToday());
     setFormExpectedDate('');
     setFormNotes('');
+    setFormInvoiceRef('');
+    setFormInvoiceFile(null);
     setFormItems([
       {
         id: null,
@@ -286,6 +282,8 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
       setFormExpectedDate(detail.expected_date ? String(detail.expected_date).slice(0, 10) : '');
       setFormLocationId(detail.destination_location_id ? String(detail.destination_location_id) : '');
       setFormNotes(detail.notes || '');
+      setFormInvoiceRef('');
+      setFormInvoiceFile(null);
 
       const items = Array.isArray(detail.items) ? detail.items : [];
       for (const it of items) {
@@ -512,24 +510,36 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
 
     setIsSubmittingForm(true);
     try {
+      const combinedNotes =
+        [
+          formInvoiceRef.trim() ? `No. Nota/Faktur: ${formInvoiceRef.trim()}` : '',
+          formNotes.trim(),
+        ]
+          .filter(Boolean)
+          .join(' • ') || null;
+
       if (editingPo) {
         const updated = await updatePurchaseOrder(propertyId, editingPo.id, {
           supplier_id: Number(formSupplierId),
           order_date: formOrderDate || undefined,
           expected_date: formExpectedDate || null,
           destination_location_id: formLocationId ? Number(formLocationId) : null,
-          notes: formNotes.trim() || null,
+          notes: combinedNotes,
           submit_for_approval: submitForApproval,
           updated_by: currentUserId || currentStaffName,
           actor_name_snapshot: currentStaffName,
           items: cleanedItems,
         });
+        const linkedTxId = updated.linked_invoices?.[0]?.id;
+        if (linkedTxId && formInvoiceFile) {
+          await uploadTransactionAttachmentApi(linkedTxId, propertyId, formInvoiceFile, 'INVOICE', currentStaffName);
+        }
         setShowFormModal(false);
         setEditingPo(null);
         setBannerSuccess(
-          `PO #${updated.po_number} berhasil diperbarui (${
+          `PO #${updated.po_number} berhasil diperbarui dan terhubung ke Akuntansi → Hutang (${
             updated.approval_status === 'PENDING_APPROVAL'
-              ? 'Menunggu Persetujuan Ulang'
+              ? 'Menunggu Persetujuan'
               : updated.approval_status || updated.status
           }).`
         );
@@ -545,18 +555,20 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
           order_date: formOrderDate || undefined,
           expected_date: formExpectedDate || null,
           destination_location_id: formLocationId ? Number(formLocationId) : null,
-          notes: formNotes.trim() || null,
-          submit_for_approval: submitForApproval,
-          initial_status: submitForApproval ? 'PENDING_APPROVAL' : 'DRAFT',
+          notes: combinedNotes,
+          submit_for_approval: true,
+          initial_status: 'PENDING_APPROVAL',
           created_by: currentUserId || currentStaffName,
           actor_name_snapshot: currentStaffName,
           items: cleanedItems,
         });
+        const linkedTxId = created.linked_invoices?.[0]?.id;
+        if (linkedTxId && formInvoiceFile) {
+          await uploadTransactionAttachmentApi(linkedTxId, propertyId, formInvoiceFile, 'INVOICE', currentStaffName);
+        }
         setShowFormModal(false);
         setBannerSuccess(
-          `PO #${created.po_number} berhasil dibuat (${
-            submitForApproval ? 'Menunggu Persetujuan' : 'Draft'
-          }).`
+          `PO #${created.po_number} berhasil dibuat dan diajukan ke Akuntansi → Hutang (Menunggu Persetujuan).`
         );
         await loadOrders();
       }
@@ -925,50 +937,28 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
 
                     <td className="py-2.5 px-4 text-center whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-center gap-1 flex-wrap">
-                        {/* Draft / Rejected -> Submit or Approve */}
-                        {(po.approval_status === 'DRAFT' || po.status === 'DRAFT' || po.approval_status === 'REJECTED') && (
-                          <>
-                            <button
-                              type="button"
-                              disabled={actionBusyId === po.id}
-                              onClick={() => void handlePoStatusAction(po, 'SUBMIT')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 cursor-pointer"
-                            >
-                              Ajukan
-                            </button>
-                            <button
-                              type="button"
-                              disabled={actionBusyId === po.id || !canApprovePo}
-                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                              onClick={() => void handlePoStatusAction(po, 'APPROVE')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              Setujui PO
-                            </button>
-                          </>
+                        {/* Persetujuan PO terpusat di Akuntansi -> Hutang */}
+                        {(po.approval_status === 'DRAFT' ||
+                          po.status === 'DRAFT' ||
+                          po.approval_status === 'PENDING_APPROVAL') && (
+                          <span
+                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-amber-50/70 text-amber-800 border border-amber-200/80"
+                            title="Persetujuan PO diproses melalui menu Akuntansi → Hutang"
+                          >
+                            Persetujuan di Akuntansi
+                          </span>
                         )}
 
-                        {po.approval_status === 'PENDING_APPROVAL' && (
-                          <>
-                            <button
-                              type="button"
-                              disabled={actionBusyId === po.id || !canApprovePo}
-                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                              onClick={() => void handlePoStatusAction(po, 'APPROVE')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              Setujui PO
-                            </button>
-                            <button
-                              type="button"
-                              disabled={actionBusyId === po.id || !canApprovePo}
-                              title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                              onClick={() => void handlePoStatusAction(po, 'REJECT')}
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                            >
-                              Tolak
-                            </button>
-                          </>
+                        {po.approval_status === 'REJECTED' && (
+                          <button
+                            type="button"
+                            disabled={actionBusyId === po.id}
+                            onClick={() => void handlePoStatusAction(po, 'SUBMIT')}
+                            className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 cursor-pointer"
+                            title="Ajukan ulang ke Akuntansi → Hutang"
+                          >
+                            Ajukan Ulang
+                          </button>
                         )}
 
                         {/* Approved PO Operational Actions */}
@@ -1051,49 +1041,21 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                 <div className="flex items-center gap-2 flex-wrap">
                   {(selectedPo.approval_status === 'DRAFT' ||
                     selectedPo.status === 'DRAFT' ||
-                    selectedPo.approval_status === 'REJECTED') && (
-                    <>
-                      <button
-                        type="button"
-                        disabled={actionBusyId === selectedPo.id}
-                        onClick={() => void handlePoStatusAction(selectedPo, 'SUBMIT')}
-                        className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
-                      >
-                        Ajukan Persetujuan
-                      </button>
-                      <button
-                        type="button"
-                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
-                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                        onClick={() => void handlePoStatusAction(selectedPo, 'APPROVE')}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        Setujui PO
-                      </button>
-                    </>
+                    selectedPo.approval_status === 'PENDING_APPROVAL') && (
+                    <span className="px-3 py-1.5 rounded-lg bg-amber-50 text-amber-800 border border-amber-200 font-semibold text-[11px]">
+                      Menunggu Persetujuan di Akuntansi → Hutang
+                    </span>
                   )}
 
-                  {selectedPo.approval_status === 'PENDING_APPROVAL' && (
-                    <>
-                      <button
-                        type="button"
-                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
-                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                        onClick={() => void handlePoStatusAction(selectedPo, 'APPROVE')}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        Setujui PO
-                      </button>
-                      <button
-                        type="button"
-                        disabled={actionBusyId === selectedPo.id || !canApprovePo}
-                        title={!canApprovePo ? 'Memerlukan hak akses Izinkan Approve PO' : undefined}
-                        onClick={() => void handlePoStatusAction(selectedPo, 'REJECT')}
-                        className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                      >
-                        Tolak PO
-                      </button>
-                    </>
+                  {selectedPo.approval_status === 'REJECTED' && (
+                    <button
+                      type="button"
+                      disabled={actionBusyId === selectedPo.id}
+                      onClick={() => void handlePoStatusAction(selectedPo, 'SUBMIT')}
+                      className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
+                    >
+                      Ajukan Ulang ke Akuntansi
+                    </button>
                   )}
 
                   {isPoEligibleForOperationalActions(selectedPo) && (
@@ -1122,24 +1084,6 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                       >
                         Lihat Penerimaan
                       </button>
-
-                      {Array.isArray(selectedPo.linked_invoices) && selectedPo.linked_invoices.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const unpaidInv =
-                              selectedPo.linked_invoices?.find((inv: any) => inv.payment_status !== 'PAID') ||
-                              selectedPo.linked_invoices?.[0];
-                            if (unpaidInv) {
-                              setSelectedPo(null);
-                              onOpenInvoiceDetailDrawer(unpaidInv.id);
-                            }
-                          }}
-                          className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-bold cursor-pointer"
-                        >
-                          Catat Pembayaran
-                        </button>
-                      )}
                     </>
                   )}
 
@@ -1340,20 +1284,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
               {/* Linked Invoices / Purchase Transactions */}
               <div className="border border-slate-200 rounded-xl overflow-hidden">
                 <div className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 font-bold text-slate-700 flex items-center justify-between">
-                  <span>Tagihan / Nota Pembelian Terkait</span>
-                  {isPoEligibleForOperationalActions(selectedPo) && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        const poRef = selectedPo;
-                        setSelectedPo(null);
-                        onOpenCreateInvoiceForPo(poRef);
-                      }}
-                      className="text-[11px] text-blue-700 hover:underline font-semibold cursor-pointer"
-                    >
-                      + Catat Tagihan / Nota Baru →
-                    </button>
-                  )}
+                  <span>Tagihan / Nota Pembelian Terkait (Otomatis Terhubung ke Akuntansi → Hutang)</span>
                 </div>
                 {Array.isArray(selectedPo.linked_invoices) && selectedPo.linked_invoices.length > 0 ? (
                   <table className="w-full text-left text-[11px]" style={{ tableLayout: 'auto' }}>
@@ -1429,7 +1360,7 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                               }}
                               className="px-2 py-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold cursor-pointer"
                             >
-                              Detail / Bayar
+                              Lihat Detail
                             </button>
                           </td>
                         </tr>
@@ -1456,10 +1387,10 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                 <h3 className="text-sm font-bold text-slate-900">
                   {editingPo
                     ? `Edit / Revisi Purchase Order #${editingPo.po_number}`
-                    : 'Buat Purchase Order (PO) Pengadaan Baru'}
+                    : 'Buat Purchase Order (PO) & Tagihan Pengadaan'}
                 </h3>
                 <p className="text-[11px] text-slate-500">
-                  Menggunakan Master Rekanan (`Supplier`). Menyimpan atau menyetujui PO tidak otomatis menambah stok atau membuat tagihan.
+                  Menggunakan Master Rekanan (Supplier). Setelah disimpan, pengajuan PO otomatis masuk ke <strong>Akuntansi → Hutang</strong> untuk persetujuan &amp; pelunasan.
                 </p>
               </div>
               <button
@@ -1544,15 +1475,47 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="block font-bold text-slate-700 mb-1">Catatan PO</label>
-                <input
-                  type="text"
-                  value={formNotes}
-                  onChange={(e) => setFormNotes(e.target.value)}
-                  placeholder="Catatan pengiriman / spesifikasi pesanan..."
-                  className="w-full border border-slate-300 rounded-xl px-3 py-2 bg-white text-slate-800"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    No. Nota / Faktur Supplier (Opsional)
+                  </label>
+                  <input
+                    type="text"
+                    value={formInvoiceRef}
+                    onChange={(e) => setFormInvoiceRef(e.target.value)}
+                    placeholder="Contoh: INV-2026/11/001 (jika sudah ada)"
+                    className="w-full border border-slate-300 rounded-xl px-3 py-2 bg-white text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Catatan PO / Keterangan Pengadaan
+                  </label>
+                  <input
+                    type="text"
+                    value={formNotes}
+                    onChange={(e) => setFormNotes(e.target.value)}
+                    placeholder="Catatan pengiriman / spesifikasi pesanan..."
+                    className="w-full border border-slate-300 rounded-xl px-3 py-2 bg-white text-slate-800"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Lampiran Nota / Penawaran / Bon (Opsional)
+                  </label>
+                  <input
+                    type="file"
+                    accept="image/jpeg,image/png,image/webp,application/pdf"
+                    onChange={(e) => setFormInvoiceFile(e.target.files?.[0] || null)}
+                    className="w-full border border-slate-300 rounded-xl px-2.5 py-1.5 bg-white text-slate-700 text-[11px] file:mr-2 file:py-1 file:px-2.5 file:rounded-lg file:border-0 file:text-[11px] file:font-semibold file:bg-emerald-50 file:text-emerald-800 hover:file:bg-emerald-100"
+                  />
+                  {formInvoiceFile && (
+                    <div className="text-[10px] text-emerald-700 font-medium mt-0.5 truncate">
+                      📎 {formInvoiceFile.name} (otomatis tampil di kolom Nota Akuntansi → Hutang)
+                    </div>
+                  )}
+                </div>
               </div>
 
               {/* Line Items */}
@@ -1890,22 +1853,14 @@ export const ProcurementPoSection: React.FC<ProcurementPoSectionProps> = ({
                 <button
                   type="button"
                   disabled={isSubmittingForm}
-                  onClick={() => void handleSubmitPoForm(false)}
-                  className="px-4 py-2 rounded-xl border border-slate-300 bg-white hover:bg-slate-100 text-xs font-bold text-slate-800 cursor-pointer"
-                >
-                  {isSubmittingForm ? 'Menyimpan...' : editingPo ? 'Simpan Perubahan' : 'Simpan Draft PO'}
-                </button>
-                <button
-                  type="button"
-                  disabled={isSubmittingForm}
                   onClick={() => void handleSubmitPoForm(true)}
                   className="px-4 py-2 rounded-xl bg-[#1b4332] hover:bg-[#143427] text-white text-xs font-bold shadow-sm cursor-pointer"
                 >
                   {isSubmittingForm
                     ? 'Memproses...'
                     : editingPo
-                    ? 'Simpan & Ajukan Persetujuan'
-                    : 'Simpan & Ajukan Persetujuan'}
+                    ? 'Simpan & Ajukan ke Akuntansi'
+                    : 'Simpan & Ajukan PO ke Akuntansi'}
                 </button>
               </div>
             </div>
