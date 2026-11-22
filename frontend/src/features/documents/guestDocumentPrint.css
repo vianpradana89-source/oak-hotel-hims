@@ -214,6 +214,7 @@
   }
 
   .guest-doc-sheet {
+    page: oak-a4-doc;
     width: 100%;
     max-width: none;
     min-height: auto;
@@ -222,8 +223,8 @@
     padding: 12mm 14mm;
   }
 
-  /* A4 page setup */
-  @page {
+  /* A4 page setup scoped to named page so thermal receipts (58mm/80mm) are not forced to A4 */
+  @page oak-a4-doc {
     size: A4 portrait;
     margin: 6mm 8mm !important;
   }
@@ -451,13 +452,14 @@
     visibility: visible;
   }
 
-  @page {
+  @page oak-a4-doc {
     size: A4 portrait;
     margin: 6mm 8mm !important;
   }
 
   /* Position the page at top-left, remove padding/background of wrapper */
   .oak-letterhead {
+    page: oak-a4-doc;
     position: static !important;
     display: block !important;
     min-height: 0 !important;
@@ -2026,7 +2028,7 @@
 }
 
 @media print {
-  @page {
+  @page oak-a4-doc {
     size: A4 portrait;
     margin: 6mm 8mm !important;
     @bottom-right {

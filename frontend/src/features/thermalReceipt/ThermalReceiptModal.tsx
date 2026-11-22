@@ -254,6 +254,65 @@ export default function ThermalReceiptModal({
     setStep('confirm-print');
   }, []);
 
+  useEffect(() => {
+    if (!isOpen) {
+      document.getElementById('oak-thermal-print-page-style')?.remove();
+      return;
+    }
+    document.documentElement.style.setProperty('--thermal-width', `${width}mm`);
+    let styleEl = document.getElementById('oak-thermal-print-page-style') as HTMLStyleElement | null;
+    if (!styleEl) {
+      styleEl = document.createElement('style');
+      styleEl.id = 'oak-thermal-print-page-style';
+      document.head.appendChild(styleEl);
+    }
+    styleEl.textContent = `
+      @media print {
+        @page {
+          size: ${width}mm auto !important;
+          margin: 0mm !important;
+        }
+        html, body {
+          width: ${width}mm !important;
+          min-width: ${width}mm !important;
+          max-width: ${width}mm !important;
+          height: auto !important;
+          min-height: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #fff !important;
+          overflow: visible !important;
+        }
+        body > *:not(#thermal-print-target) {
+          display: none !important;
+        }
+        #thermal-print-target {
+          display: block !important;
+          position: static !important;
+          width: 100% !important;
+          max-width: ${width}mm !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #fff !important;
+          visibility: visible !important;
+        }
+        #thermal-print-target, #thermal-print-target * {
+          visibility: visible !important;
+        }
+        #thermal-print-target .thermal-receipt {
+          width: 100% !important;
+          max-width: ${width}mm !important;
+          margin: 0 !important;
+          padding: 2mm 2.5mm !important;
+          box-sizing: border-box !important;
+        }
+      }
+    `;
+    return () => {
+      document.getElementById('oak-thermal-print-page-style')?.remove();
+    };
+  }, [isOpen, width]);
+
   const handlePrint = useCallback(() => {
     document.documentElement.style.setProperty('--thermal-width', `${width}mm`);
     window.print();
