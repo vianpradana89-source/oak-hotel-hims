@@ -51,6 +51,7 @@ export type SalesReportMode =
   | 'penjualan_kamar'
   | 'overnight_vs_dayuse'
   | 'penjualan_item'
+  | 'penjualan_minibar'
   | 'sumber_penjualan'
   | 'sumber_transaksi'
   | 'laba_rugi'
@@ -84,6 +85,11 @@ export const SALES_MODE_OPTIONS: {
   {
     value: 'penjualan_item',
     label: 'Laporan Penjualan Item',
+    icon: <IconPackage className="w-3.5 h-3.5" />,
+  },
+  {
+    value: 'penjualan_minibar',
+    label: 'Laporan Penjualan Minibar',
     icon: <IconPackage className="w-3.5 h-3.5" />,
   },
   {
@@ -145,7 +151,7 @@ export interface LaporanTabPenjualanProps {
 
 interface UnifiedSaleRow {
   key: string;
-  source: 'POS' | 'KAMAR';
+  source: 'POS' | 'KAMAR' | 'MINIBAR';
   bookingOrOrderNo: string;
   txDate: string;
   txDisplayDate: string;
@@ -231,16 +237,19 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
     const isComp = Boolean(i.is_complimentary);
     const amountPaid = isComp ? 0 : netTotal;
     const profit = amountPaid - hpp;
+    const isMinibar =
+      String(i.sale_source || '').toUpperCase() === 'MINIBAR' ||
+      String(i.category_name || '').toLowerCase().includes('minibar');
     const statusBadge = formatShortStatusBadge('POS', i.payment_status, isComp);
 
     return {
-      key: `pos-${i.order_item_id}`,
-      source: 'POS',
+      key: `${isMinibar ? 'mb' : 'pos'}-${i.order_item_id}`,
+      source: isMinibar ? 'MINIBAR' : 'POS',
       bookingOrOrderNo: i.booking_or_order_no,
       txDate: i.tx_date,
       txDisplayDate: i.tx_datetime || i.tx_date,
-      customerName: i.customer_name || 'Walk-In POS',
-      itemName: `${i.item_name} (x${qty})`,
+      customerName: i.customer_name || (isMinibar ? 'Tamu Kamar' : 'Walk-In POS'),
+      itemName: `${isMinibar ? '[Minibar] ' : ''}${i.item_name} (x${qty})`,
       roomLabel: i.room_or_table && i.room_or_table !== '-' ? i.room_or_table : '-',
       durationOrQty: `${qty} item`,
       grossTotal,
@@ -378,10 +387,12 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
     return <SubViewLaporanPpn data={data} />;
   }
 
-  // Table-based views: rincian_penjualan, penjualan_kamar, penjualan_item, complimentary_only, discounted_only
+  // Table-based views: rincian_penjualan, penjualan_kamar, penjualan_item, penjualan_minibar, complimentary_only, discounted_only
   let modeRows: UnifiedSaleRow[] = [];
   if (reportMode === 'penjualan_item') {
     modeRows = unifiedPosRows;
+  } else if (reportMode === 'penjualan_minibar') {
+    modeRows = unifiedPosRows.filter((r) => r.source === 'MINIBAR');
   } else if (reportMode === 'penjualan_kamar') {
     modeRows = unifiedRoomRows;
   } else if (reportMode === 'complimentary_only') {
@@ -505,7 +516,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
     setTimeout(() => setCopiedBid((prev) => (prev === bid ? null : prev)), 1500);
   };
 
-  const isPosItemOnlyView = reportMode === 'penjualan_item';
+  const isPosItemOnlyView = reportMode === 'penjualan_item' || reportMode === 'penjualan_minibar';
   const isRoomOnlyView = reportMode === 'penjualan_kamar';
 
   const colVals = (colKey: string) => modeRows.map((r) => getColumnDisplayValue(r, colKey));
@@ -643,6 +654,14 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                     onApply={handleApplyColFilter}
                   />
                   <ColumnFilterHeader
+                    columnKey="roomLabel"
+                    label="Kamar / Meja"
+                    allValues={colVals('roomLabel')}
+                    activeSelected={columnFilters.roomLabel?.selectedValues}
+                    activeSort={activeSortCol?.col === 'roomLabel' ? activeSortCol.dir : null}
+                    onApply={handleApplyColFilter}
+                  />
+                  <ColumnFilterHeader
                     columnKey="itemName"
                     label="Item"
                     allValues={colVals('itemName')}
@@ -709,7 +728,7 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
               <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
                 {filteredRows.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-10 text-center text-slate-400">
+                    <td colSpan={11} className="py-10 text-center text-slate-400">
                       Tidak ada data penjualan item pada filter ini
                     </td>
                   </tr>
@@ -740,6 +759,9 @@ export const LaporanTabPenjualan: React.FC<LaporanTabPenjualanProps> = ({
                       </td>
                       <td className="py-2.5 px-3 font-semibold text-blue-700">
                         {row.customerName}
+                      </td>
+                      <td className="py-2.5 px-3 text-slate-700 whitespace-nowrap">
+                        {row.roomLabel}
                       </td>
                       <td className="py-2.5 px-3 text-slate-800">{row.itemName}</td>
                       <td className="py-2.5 px-3 text-right tabular-nums text-orange-600">

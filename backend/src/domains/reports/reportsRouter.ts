@@ -792,7 +792,8 @@ export function createReportsRouter(pool: Pool): Router {
               OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
               OR UPPER(COALESCE(po.status, '')) LIKE '%COMP%'
               OR UPPER(COALESCE(poi.notes, '')) LIKE '%COMP%'
-            ) AS is_complimentary
+            ) AS is_complimentary,
+            'POS'::text AS sale_source
           FROM pos_order_items poi
           JOIN pos_orders po ON po.id = poi.order_id
           LEFT JOIN pos_menu_items pmi ON pmi.id = poi.menu_item_id AND pmi.property_id = po.property_id
@@ -907,10 +908,13 @@ export function createReportsRouter(pool: Pool): Router {
               COALESCE(t.net_amount, 0) <= 0
               OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
               OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
-            ) AS is_complimentary
+            ) AS is_complimentary,
+            'POS'::text AS sale_source
           FROM transactions t
           WHERE t.property_id = $1
             AND t.transaction_type = 'SALE'
+            AND UPPER(COALESCE(t.category_code, '')) != 'MINIBAR_SALES'
+            AND UPPER(COALESCE(t.source_type, '')) != 'MINIBAR'
             AND (
               UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER', 'MANUAL_SALE', 'OTHER_SALE')
               OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
@@ -934,6 +938,145 @@ export function createReportsRouter(pool: Pool): Router {
               WHERE po.property_id = t.property_id
                 AND po.id::text = COALESCE(t.source_id, '')
             )
+
+          UNION ALL
+
+          SELECT
+            (t.id * 1000 + COALESCE(mb_item.item_idx, 0))::bigint AS order_item_id,
+            t.id AS order_id,
+            COALESCE(NULLIF(BTRIM(b.bid), ''), NULLIF(BTRIM(r.booking_number), ''), t.transaction_no) AS booking_or_order_no,
+            to_char(t.transaction_date, 'YYYY-MM-DD') AS tx_date,
+            to_char(t.created_at AT TIME ZONE 'Asia/Jakarta', 'YYYY-MM-DD HH24:MI') AS tx_datetime,
+            COALESCE(NULLIF(BTRIM(r.guest_name), ''), NULLIF(BTRIM(t.guest_name_snapshot), ''), NULLIF(BTRIM(t.party_name), ''), 'Tamu Kamar') AS customer_name,
+            COALESCE(NULLIF(BTRIM(rm.room_number), ''), NULLIF(BTRIM(t.room_number_snapshot), ''), '-') AS room_or_table,
+            COALESCE(NULLIF(BTRIM(mb_item.item_name), ''), NULLIF(BTRIM(pmi_mb.name), ''), NULLIF(BTRIM(t.description), ''), 'Item Minibar') AS item_name,
+            COALESCE(NULLIF(BTRIM(mb_item.item_sku), ''), NULLIF(BTRIM(pmi_mb.item_code), ''), 'MINIBAR') AS item_code,
+            'Minibar'::text AS category_name,
+            COALESCE(mb_item.qty, 1)::numeric(12,3) AS quantity,
+            COALESCE(mb_item.unit_price, t.amount, t.net_amount, 0)::numeric(14,2) AS unit_price,
+            CASE WHEN COALESCE(mb_item.item_idx, 1) = 1 THEN COALESCE(t.discount_amount, 0) ELSE 0 END::numeric(14,2) AS discount_amount,
+            COALESCE(mb_item.subtotal, t.net_amount, 0)::numeric(14,2) AS line_total,
+            (
+              COALESCE(mb_item.qty, 1) * COALESCE(
+                NULLIF(pmi_mb.average_cost, 0),
+                NULLIF(pmi_mb.last_cost, 0),
+                0
+              )
+            )::numeric(14,2) AS total_hpp,
+            COALESCE(NULLIF(pmi_mb.average_cost, 0), NULLIF(pmi_mb.last_cost, 0), 0)::numeric(14,2) AS unit_hpp,
+            COALESCE(
+              NULLIF(BTRIM(t.payment_method), ''),
+              NULLIF(BTRIM(ht_mb.minibar_billing_meta->>'payment_method'), ''),
+              (
+                SELECT NULLIF(BTRIM(pt.payment_method), '')
+                FROM payment_transactions pt
+                WHERE (pt.transaction_id = t.id OR (t.reservation_id IS NOT NULL AND pt.reservation_id = t.reservation_id))
+                  AND pt.status = 'SUCCESS'
+                ORDER BY pt.id DESC
+                LIMIT 1
+              ),
+              'Tagihan Kamar'
+            ) AS payment_method,
+            CASE
+              WHEN t.reservation_id IS NOT NULL AND r.id IS NOT NULL THEN
+                CASE
+                  WHEN UPPER(COALESCE(r.payment_status, '')) = 'PAID'
+                    OR UPPER(COALESCE(t.payment_status, '')) = 'PAID'
+                  THEN 'PAID'
+                  ELSE COALESCE(NULLIF(BTRIM(t.payment_status), ''), NULLIF(BTRIM(r.payment_status), ''), 'PAID')
+                END
+              ELSE COALESCE(NULLIF(BTRIM(t.payment_status), ''), 'PAID')
+            END AS payment_status,
+            t.id AS transaction_id,
+            0::numeric(14,2) AS tax_amount,
+            0::numeric(14,2) AS service_amount,
+            CASE
+              WHEN t.reservation_id IS NOT NULL THEN 'Tamu Menginap'
+              ELSE 'Walk-In / Minibar'
+            END AS guest_segment,
+            (
+              SELECT ta.id
+              FROM transaction_attachments ta
+              WHERE ta.property_id = t.property_id
+                AND ta.transaction_id = t.id
+              ORDER BY CASE WHEN UPPER(COALESCE(ta.attachment_purpose, '')) = 'PAYMENT_PROOF' THEN 0 ELSE 1 END, ta.id DESC
+              LIMIT 1
+            ) AS attachment_id,
+            (
+              COALESCE(mb_item.subtotal, t.net_amount, 0) <= 0
+              OR UPPER(COALESCE(mb_item.item_role, '')) = 'COMPLIMENTARY'
+              OR UPPER(COALESCE(t.payment_method, '')) LIKE '%COMP%'
+              OR UPPER(COALESCE(t.payment_status, '')) LIKE '%COMP%'
+            ) AS is_complimentary,
+            'MINIBAR'::text AS sale_source
+          FROM transactions t
+          LEFT JOIN reservations r ON r.id = t.reservation_id
+          LEFT JOIN bookings b ON b.id = COALESCE(t.booking_id, r.booking_id)
+          LEFT JOIN rooms rm ON rm.id = r.room_id AND rm.property_id = t.property_id
+          LEFT JOIN folio_entries fe_mb
+            ON UPPER(COALESCE(t.source_type, '')) = 'FOLIO_ENTRY'
+           AND fe_mb.id::text = COALESCE(t.source_id, '')
+           AND fe_mb.property_id = t.property_id
+          LEFT JOIN housekeeping_tasks ht_mb
+            ON ht_mb.property_id = t.property_id
+           AND ht_mb.id::text = COALESCE(fe_mb.source_id, CASE WHEN UPPER(COALESCE(t.source_type, '')) = 'MINIBAR' THEN t.source_id ELSE NULL END)
+          LEFT JOIN LATERAL (
+            SELECT
+              (mb_el.ord)::int AS item_idx,
+              NULLIF(BTRIM(mb_el.val->>'menu_item_id'), '')::int AS menu_item_id,
+              NULLIF(BTRIM(mb_el.val->>'name'), '') AS item_name,
+              NULLIF(BTRIM(mb_el.val->>'sku'), '') AS item_sku,
+              NULLIF(BTRIM(mb_el.val->>'item_role'), '') AS item_role,
+              COALESCE(NULLIF(mb_el.val->>'quantity', '')::numeric, 1) AS qty,
+              COALESCE(NULLIF(mb_el.val->>'unit_price', '')::numeric, 0) AS unit_price,
+              COALESCE(
+                NULLIF(mb_el.val->>'subtotal', '')::numeric,
+                COALESCE(NULLIF(mb_el.val->>'quantity', '')::numeric, 1) * COALESCE(NULLIF(mb_el.val->>'unit_price', '')::numeric, 0)
+              ) AS subtotal
+            FROM jsonb_array_elements(
+              CASE
+                WHEN ht_mb.id IS NOT NULL AND jsonb_typeof(ht_mb.minibar_items_json) = 'array' AND jsonb_array_length(ht_mb.minibar_items_json) > 0
+                THEN ht_mb.minibar_items_json
+                ELSE '[]'::jsonb
+              END
+            ) WITH ORDINALITY AS mb_el(val, ord)
+          ) mb_item ON TRUE
+          LEFT JOIN pos_menu_items pmi_mb
+            ON pmi_mb.id = mb_item.menu_item_id
+           AND pmi_mb.property_id = t.property_id
+          WHERE t.property_id = $1
+            AND t.transaction_type = 'SALE'
+            AND (
+              UPPER(COALESCE(t.category_code, '')) = 'MINIBAR_SALES'
+              OR UPPER(COALESCE(t.source_type, '')) = 'MINIBAR'
+              OR (
+                UPPER(COALESCE(t.source_type, '')) = 'FOLIO_ENTRY'
+                AND fe_mb.id IS NOT NULL
+                AND (
+                  UPPER(COALESCE(fe_mb.entry_type, '')) = 'MINIBAR'
+                  OR UPPER(COALESCE(fe_mb.source_type, '')) = 'MINIBAR'
+                  OR UPPER(COALESCE(fe_mb.revenue_category, '')) = 'MINIBAR_SALES'
+                )
+              )
+            )
+            AND t.deleted_at IS NULL
+            AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+            AND NOT EXISTS (
+              SELECT 1 FROM transactions t_rev
+              WHERE t_rev.property_id = t.property_id
+                AND t_rev.reversal_of_transaction_id = t.id
+                AND t_rev.deleted_at IS NULL
+            )
+            AND (
+              t.reservation_id IS NULL
+              OR (
+                UPPER(COALESCE(r.status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND UPPER(COALESCE(r.stay_status, '')) NOT IN ('CANCELLED', 'NO_SHOW')
+                AND COALESCE(b.booking_status, '') != 'CANCELLED'
+              )
+            )
+            AND t.transaction_date >= $2::date
+            AND t.transaction_date <= $3::date
         ) combined_pos
         ORDER BY tx_date DESC, order_id DESC, order_item_id ASC
         `,
@@ -1107,18 +1250,45 @@ export function createReportsRouter(pool: Pool): Router {
             COALESCE(NULLIF(BTRIM(r.guest_name), ''), NULLIF(BTRIM(b.guest_name_snapshot), ''), 'Tamu Hotel') AS guest_name,
             COALESCE(rm.room_number, '-') AS room_number,
             COALESCE(rt.name, r.booked_room_type_name_snapshot, rm.name, 'Kamar') AS room_type_name,
-            COALESCE(
-              NULLIF(r.total_price, 0),
-              (
-                SELECT COALESCE(SUM(t.net_amount), 0)
-                FROM transactions t
-                WHERE t.property_id = b.property_id
-                  AND t.reservation_id = r.id
-                  AND t.transaction_type = 'SALE'
-                  AND t.deleted_at IS NULL
-                  AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
-              ),
-              0
+            GREATEST(
+              0,
+              COALESCE(
+                NULLIF(r.total_price, 0),
+                (
+                  SELECT COALESCE(SUM(t.net_amount), 0)
+                  FROM transactions t
+                  WHERE t.property_id = b.property_id
+                    AND t.reservation_id = r.id
+                    AND t.transaction_type = 'SALE'
+                    AND UPPER(COALESCE(t.category_code, '')) != 'MINIBAR_SALES'
+                    AND t.deleted_at IS NULL
+                    AND COALESCE(t.transaction_status, 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                ),
+                0
+              ) - COALESCE(
+                (
+                  SELECT SUM(fe_ex.amount)
+                  FROM folio_entries fe_ex
+                  WHERE fe_ex.reservation_id = r.id
+                    AND fe_ex.property_id = b.property_id
+                    AND fe_ex.direction = 'DEBIT'
+                    AND COALESCE(fe_ex.is_voided, FALSE) = FALSE
+                    AND COALESCE(UPPER(fe_ex.status), 'POSTED') NOT IN ('VOIDED', 'CANCELLED', 'REVERSED')
+                    AND (
+                      UPPER(COALESCE(fe_ex.entry_type, '')) IN ('MINIBAR', 'POS_ORDER', 'POS')
+                      OR UPPER(COALESCE(fe_ex.source_type, '')) IN ('MINIBAR', 'POS_ORDER', 'POS')
+                      OR UPPER(COALESCE(fe_ex.revenue_category, '')) = 'MINIBAR_SALES'
+                    )
+                    AND EXISTS (
+                      SELECT 1 FROM folio_entries fe_rc
+                      WHERE fe_rc.reservation_id = r.id
+                        AND fe_rc.direction = 'DEBIT'
+                        AND COALESCE(fe_rc.is_voided, FALSE) = FALSE
+                        AND UPPER(COALESCE(fe_rc.entry_type, '')) NOT IN ('MINIBAR', 'POS_ORDER', 'POS')
+                    )
+                ),
+                0
+              )
             )::numeric(14,2) AS full_total_price,
             COALESCE(
               NULLIF(r.discount_amount, 0),
@@ -1793,13 +1963,16 @@ export function createReportsRouter(pool: Pool): Router {
       const cfRow = cashFlowRes.rows[0] || {};
       const bsRow = balanceSheetRes.rows[0] || {};
 
-      // Compute Profit & Loss numbers from active (non-cancelled, non-complimentary) room sales and POS sales
+      // Compute Profit & Loss numbers from active (non-cancelled, non-complimentary) room sales, POS sales, and Minibar sales
       const sb = financialsData.sales_breakdown;
       const activeRoomSalesTotal = roomSalesRes.rows
         .filter((r: any) => !r.is_complimentary)
         .reduce((s: number, r: any) => s + (Number(r.total_price) || 0), 0);
-      const activePosSalesTotal = posItemsRes.rows
-        .filter((p: any) => !p.is_complimentary)
+      const activePosOnlySalesTotal = posItemsRes.rows
+        .filter((p: any) => !p.is_complimentary && String(p.sale_source || 'POS').toUpperCase() !== 'MINIBAR')
+        .reduce((s: number, p: any) => s + (Number(p.line_total) || 0), 0);
+      const activeMinibarSalesTotal = posItemsRes.rows
+        .filter((p: any) => !p.is_complimentary && String(p.sale_source || '').toUpperCase() === 'MINIBAR')
         .reduce((s: number, p: any) => s + (Number(p.line_total) || 0), 0);
       const roomRevTotal =
         activeRoomSalesTotal > 0
@@ -1808,18 +1981,27 @@ export function createReportsRouter(pool: Pool): Router {
           ? Number(sb.room_total)
           : roomsRankingRes.rows.reduce((s: number, r: any) => s + (Number(r.room_revenue) || 0), 0);
       const posRevTotal =
-        activePosSalesTotal > 0
-          ? activePosSalesTotal
+        activePosOnlySalesTotal > 0
+          ? activePosOnlySalesTotal
           : sb && sb.pos_total > 0
           ? Number(sb.pos_total)
-          : posItemsRes.rows.reduce((s: number, p: any) => s + (Number(p.line_total) || 0), 0);
+          : 0;
+      const minibarRevTotal =
+        activeMinibarSalesTotal > 0
+          ? activeMinibarSalesTotal
+          : sb && sb.minibar_total > 0
+          ? Number(sb.minibar_total)
+          : 0;
       const otherIncTotal = Number(financialsData.other_income?.total || 0);
-      const totalRevenue = roomRevTotal + posRevTotal + otherIncTotal;
+      const totalRevenue = roomRevTotal + posRevTotal + minibarRevTotal + otherIncTotal;
 
-      const totalPosHpp = posItemsRes.rows.reduce(
-        (s: number, p: any) => s + (Number(p.total_hpp) || 0),
-        0
-      );
+      const totalPosOnlyHpp = posItemsRes.rows
+        .filter((p: any) => String(p.sale_source || 'POS').toUpperCase() !== 'MINIBAR')
+        .reduce((s: number, p: any) => s + (Number(p.total_hpp) || 0), 0);
+      const totalMinibarHpp = posItemsRes.rows
+        .filter((p: any) => String(p.sale_source || '').toUpperCase() === 'MINIBAR')
+        .reduce((s: number, p: any) => s + (Number(p.total_hpp) || 0), 0);
+      const totalPosHpp = totalPosOnlyHpp + totalMinibarHpp;
       const grossProfit = totalRevenue - totalPosHpp;
 
       const totalExpenses = Number(financialsData.expense?.total || 0);
@@ -1837,6 +2019,7 @@ export function createReportsRouter(pool: Pool): Router {
         revenue: {
           room_sales: roomRevTotal,
           product_sales: posRevTotal,
+          minibar_sales: minibarRevTotal,
           other_income: otherIncTotal,
           shipping_revenue: 0,
           tax_exclude: Number(txAgg.sales_tax || 0),
@@ -1847,7 +2030,8 @@ export function createReportsRouter(pool: Pool): Router {
           total_revenue: totalRevenue
         },
         cogs: {
-          sales_cogs: totalPosHpp,
+          sales_cogs: totalPosOnlyHpp,
+          minibar_cogs: totalMinibarHpp,
           returns_cogs: 0,
           total_cogs: totalPosHpp
         },

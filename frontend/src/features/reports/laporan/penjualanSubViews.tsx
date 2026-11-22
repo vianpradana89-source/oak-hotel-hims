@@ -749,7 +749,7 @@ export const SubViewSumberPenjualan: React.FC<{ roomSales: RoomSaleRow[] }> = ({
 // 4. Sub-View #5: Laporan Sumber Transaksi (Dashboard / POS / Website - Gambar 6 & 12)
 // ============================================================================
 
-type TxOriginFilter = 'ALL' | 'DASHBOARD' | 'POS' | 'WEBSITE';
+type TxOriginFilter = 'ALL' | 'DASHBOARD' | 'POS' | 'MINIBAR' | 'WEBSITE';
 
 export const SubViewSumberTransaksi: React.FC<{
   roomSales: RoomSaleRow[];
@@ -767,7 +767,7 @@ export const SubViewSumberTransaksi: React.FC<{
         key: `r-${r.reservation_id}`,
         bid: r.booking_code,
         date: r.tx_datetime || r.tx_date,
-        origin: (isWeb ? 'WEBSITE' : 'DASHBOARD') as 'DASHBOARD' | 'POS' | 'WEBSITE',
+        origin: (isWeb ? 'WEBSITE' : 'DASHBOARD') as 'DASHBOARD' | 'POS' | 'MINIBAR' | 'WEBSITE',
         customer: r.guest_name || 'Tamu Hotel',
         payment: r.payment_method || '-',
         status:
@@ -780,22 +780,28 @@ export const SubViewSumberTransaksi: React.FC<{
       };
     });
 
-    const posMapped = posItems.map((p) => ({
-      key: `p-${p.order_item_id}`,
-      bid: p.booking_or_order_no,
-      date: p.tx_datetime || p.tx_date,
-      origin: 'POS' as const,
-      customer: p.customer_name || 'Walk-in',
-      payment: p.payment_method || 'Cash',
-      status: 'Selesai',
-      total: Number(p.line_total) || 0,
-    }));
+    const posMapped = posItems.map((p) => {
+      const isMinibar =
+        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
+        String(p.category_name || '').toLowerCase().includes('minibar');
+      return {
+        key: `p-${p.order_item_id}`,
+        bid: p.booking_or_order_no,
+        date: p.tx_datetime || p.tx_date,
+        origin: (isMinibar ? 'MINIBAR' : 'POS') as 'POS' | 'MINIBAR',
+        customer: p.customer_name || (isMinibar ? 'Tamu Kamar' : 'Walk-in'),
+        payment: p.payment_method || 'Cash',
+        status: 'Selesai',
+        total: Number(p.line_total) || 0,
+      };
+    });
 
     return [...roomMapped, ...posMapped].sort((a, b) => b.date.localeCompare(a.date));
   }, [roomSales, posItems]);
 
   const dashItems = allItems.filter((i) => i.origin === 'DASHBOARD');
   const posOnlyItems = allItems.filter((i) => i.origin === 'POS');
+  const minibarItems = allItems.filter((i) => i.origin === 'MINIBAR');
   const webItems = allItems.filter((i) => i.origin === 'WEBSITE');
 
   const filtered =
@@ -809,7 +815,7 @@ export const SubViewSumberTransaksi: React.FC<{
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <div className="text-xs font-bold text-slate-700">
-          Laporan Sumber Transaksi (POS / Website / Dashboard)
+          Laporan Sumber Transaksi (POS / Minibar / Website / Dashboard)
         </div>
         <LaporanDropdown<TxOriginFilter>
           value={originFilter}
@@ -823,12 +829,13 @@ export const SubViewSumberTransaksi: React.FC<{
             { value: 'ALL', label: 'Semua Sumber' },
             { value: 'DASHBOARD', label: 'Dashboard' },
             { value: 'POS', label: 'Point of Sale' },
+            { value: 'MINIBAR', label: 'Minibar' },
             { value: 'WEBSITE', label: 'Website' },
           ]}
         />
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
           <div className="text-xs text-slate-500 font-semibold">Dashboard</div>
           <div className="text-2xl font-extrabold text-blue-700 mt-1">
@@ -850,6 +857,18 @@ export const SubViewSumberTransaksi: React.FC<{
             Total nilai:{' '}
             <strong className="text-slate-800">
               {formatIdr(posOnlyItems.reduce((s, i) => s + i.total, 0))}
+            </strong>
+          </div>
+        </div>
+        <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs">
+          <div className="text-xs text-slate-500 font-semibold">Minibar</div>
+          <div className="text-2xl font-extrabold text-purple-700 mt-1">
+            {minibarItems.length} transaksi
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Total nilai:{' '}
+            <strong className="text-slate-800">
+              {formatIdr(minibarItems.reduce((s, i) => s + i.total, 0))}
             </strong>
           </div>
         </div>
@@ -903,6 +922,8 @@ export const SubViewSumberTransaksi: React.FC<{
                         className={`px-2 py-0.5 rounded text-[10px] font-bold ${
                           row.origin === 'POS'
                             ? 'bg-amber-100 text-amber-800'
+                            : row.origin === 'MINIBAR'
+                            ? 'bg-purple-100 text-purple-800'
                             : row.origin === 'WEBSITE'
                             ? 'bg-emerald-100 text-emerald-800'
                             : 'bg-blue-100 text-blue-800'
@@ -910,6 +931,8 @@ export const SubViewSumberTransaksi: React.FC<{
                       >
                         {row.origin === 'POS'
                           ? 'Point of Sale'
+                          : row.origin === 'MINIBAR'
+                          ? 'Minibar'
                           : row.origin === 'WEBSITE'
                           ? 'Website'
                           : 'Dashboard'}
@@ -976,9 +999,22 @@ export const SubViewPenjualanLabaRugi: React.FC<{
     .filter((r) => !r.is_complimentary)
     .reduce((s, r) => s + (Number(r.total_price) || 0), 0);
   const posRevenue = posItems
-    .filter((p) => !p.is_complimentary)
+    .filter(
+      (p) =>
+        !p.is_complimentary &&
+        String(p.sale_source || '').toUpperCase() !== 'MINIBAR' &&
+        !String(p.category_name || '').toLowerCase().includes('minibar')
+    )
     .reduce((s, p) => s + (Number(p.line_total) || 0), 0);
-  const totalRevenue = roomRevenue + posRevenue;
+  const minibarRevenue = posItems
+    .filter(
+      (p) =>
+        !p.is_complimentary &&
+        (String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
+          String(p.category_name || '').toLowerCase().includes('minibar'))
+    )
+    .reduce((s, p) => s + (Number(p.line_total) || 0), 0);
+  const totalRevenue = roomRevenue + posRevenue + minibarRevenue;
 
   const expenseItems = financials?.expense?.items || [];
   const totalExpenses =
@@ -1016,8 +1052,12 @@ export const SubViewPenjualanLabaRugi: React.FC<{
           <span className="font-bold text-emerald-700 tabular-nums">{formatIdr(roomRevenue)}</span>
         </div>
         <div className="flex items-center justify-between px-3.5 py-2.5 rounded-lg bg-slate-50 text-xs">
-          <span className="text-slate-700 font-medium">Penjualan Produk</span>
+          <span className="text-slate-700 font-medium">Penjualan Produk & POS</span>
           <span className="font-bold text-emerald-700 tabular-nums">{formatIdr(posRevenue)}</span>
+        </div>
+        <div className="flex items-center justify-between px-3.5 py-2.5 rounded-lg bg-slate-50 text-xs">
+          <span className="text-slate-700 font-medium">Penjualan Minibar</span>
+          <span className="font-bold text-emerald-700 tabular-nums">{formatIdr(minibarRevenue)}</span>
         </div>
       </div>
 
@@ -1142,7 +1182,27 @@ export const SubViewRekapItem: React.FC<{
   const productRecap = useMemo(() => {
     const map = new Map<string, { name: string; qty: number; subtotal: number }>();
     for (const p of posItems) {
+      const isMinibar =
+        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
+        String(p.category_name || '').toLowerCase().includes('minibar');
+      if (isMinibar) continue;
       const name = p.item_name || 'Item POS';
+      const cur = map.get(name) || { name, qty: 0, subtotal: 0 };
+      cur.qty += Number(p.quantity) || 1;
+      cur.subtotal += p.is_complimentary ? 0 : Number(p.line_total) || 0;
+      map.set(name, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => b.subtotal - a.subtotal);
+  }, [posItems]);
+
+  const minibarRecap = useMemo(() => {
+    const map = new Map<string, { name: string; qty: number; subtotal: number }>();
+    for (const p of posItems) {
+      const isMinibar =
+        String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
+        String(p.category_name || '').toLowerCase().includes('minibar');
+      if (!isMinibar) continue;
+      const name = p.item_name || 'Item Minibar';
       const cur = map.get(name) || { name, qty: 0, subtotal: 0 };
       cur.qty += Number(p.quantity) || 1;
       cur.subtotal += p.is_complimentary ? 0 : Number(p.line_total) || 0;
@@ -1153,10 +1213,11 @@ export const SubViewRekapItem: React.FC<{
 
   const totalRoomRev = roomRecap.reduce((s, r) => s + r.revenue, 0);
   const totalProdRev = productRecap.reduce((s, p) => s + p.subtotal, 0);
+  const totalMinibarRev = minibarRecap.reduce((s, p) => s + p.subtotal, 0);
 
   return (
     <div className="space-y-4">
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div className="bg-blue-50/60 border border-blue-200 rounded-xl p-4">
           <div className="text-xs text-slate-600 font-semibold">Penjualan Kamar</div>
           <div className="text-2xl font-extrabold text-blue-700 mt-1">
@@ -1167,12 +1228,21 @@ export const SubViewRekapItem: React.FC<{
           </div>
         </div>
         <div className="bg-emerald-50/60 border border-emerald-200 rounded-xl p-4">
-          <div className="text-xs text-slate-600 font-semibold">Penjualan Produk</div>
+          <div className="text-xs text-slate-600 font-semibold">Penjualan Produk & POS</div>
           <div className="text-2xl font-extrabold text-emerald-700 mt-1">
             {productRecap.length} item
           </div>
           <div className="text-xs text-slate-500 mt-1">
             Total pendapatan: <strong className="text-slate-800">{formatIdr(totalProdRev)}</strong>
+          </div>
+        </div>
+        <div className="bg-purple-50/60 border border-purple-200 rounded-xl p-4">
+          <div className="text-xs text-slate-600 font-semibold">Penjualan Minibar</div>
+          <div className="text-2xl font-extrabold text-purple-700 mt-1">
+            {minibarRecap.length} item
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Total pendapatan: <strong className="text-slate-800">{formatIdr(totalMinibarRev)}</strong>
           </div>
         </div>
       </div>
@@ -1216,7 +1286,7 @@ export const SubViewRekapItem: React.FC<{
 
       {/* Rincian Penjualan Produk */}
       <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
-        <div className="text-xs font-bold text-slate-800">Rincian Penjualan Produk</div>
+        <div className="text-xs font-bold text-slate-800">Rincian Penjualan Produk & POS</div>
         <div className="overflow-auto max-h-[calc(100vh-280px)]">
           <table className="min-w-full text-xs divide-y divide-slate-200">
             <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
@@ -1239,6 +1309,41 @@ export const SubViewRekapItem: React.FC<{
                     <td className="py-2.5 px-3.5 font-medium text-slate-800">{p.name}</td>
                     <td className="py-2.5 px-3.5 text-center font-semibold">{formatNumber(p.qty)}</td>
                     <td className="py-2.5 px-3.5 text-right font-bold text-emerald-700 tabular-nums">
+                      {formatIdr(p.subtotal)}
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Rincian Penjualan Minibar */}
+      <div className="bg-white border border-slate-200 rounded-xl p-4 shadow-xs space-y-2.5">
+        <div className="text-xs font-bold text-slate-800">Rincian Penjualan Minibar</div>
+        <div className="overflow-auto max-h-[calc(100vh-280px)]">
+          <table className="min-w-full text-xs divide-y divide-slate-200">
+            <thead className="sticky top-0 z-20 bg-slate-50 text-slate-600 font-semibold text-[11px] shadow-2xs">
+              <tr>
+                <th className="py-2.5 px-3.5 text-left">Item Minibar</th>
+                <th className="py-2.5 px-3.5 text-center">Qty</th>
+                <th className="py-2.5 px-3.5 text-right">Subtotal</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {minibarRecap.length === 0 ? (
+                <tr>
+                  <td colSpan={3} className="py-6 text-center text-slate-400">
+                    Belum ada penjualan minibar
+                  </td>
+                </tr>
+              ) : (
+                minibarRecap.map((p) => (
+                  <tr key={p.name} className="hover:bg-slate-50/80">
+                    <td className="py-2.5 px-3.5 font-medium text-slate-800">{p.name}</td>
+                    <td className="py-2.5 px-3.5 text-center font-semibold">{formatNumber(p.qty)}</td>
+                    <td className="py-2.5 px-3.5 text-right font-bold text-purple-700 tabular-nums">
                       {formatIdr(p.subtotal)}
                     </td>
                   </tr>

@@ -118,6 +118,7 @@ export interface ProfitLossStatementData {
   revenue: {
     room_sales: number;
     product_sales: number;
+    minibar_sales?: number;
     other_income: number;
     shipping_revenue: number;
     tax_exclude: number;
@@ -129,6 +130,7 @@ export interface ProfitLossStatementData {
   };
   cogs: {
     sales_cogs: number;
+    minibar_cogs?: number;
     returns_cogs: number;
     total_cogs: number;
   };
@@ -245,6 +247,7 @@ export interface PosItemSaleRow {
   guest_segment?: string;
   attachment_id?: number | null;
   is_complimentary: boolean;
+  sale_source?: 'POS' | 'MINIBAR' | string;
 }
 
 export interface PurchaseLineRow {
@@ -576,6 +579,8 @@ export interface FinancialsData {
     room_count: number;
     pos_total: number;
     pos_count: number;
+    minibar_total?: number;
+    minibar_count?: number;
     paid_total: number;
     unpaid_total: number;
   };

@@ -149,15 +149,29 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
     return <EmptyState title="Belum ada data" message="Pilih periode untuk memuat laporan." />;
   }
 
-  // 1. Financial metrics (non-cancelled active reservations & POS orders)
+  // 1. Financial metrics (non-cancelled active reservations, POS orders & Minibar)
   const sb = financials?.sales_breakdown;
   const activeRoomSalesRows = (analytics?.room_sales || []).filter((r) => !r.is_complimentary);
   const activePosSalesRows = (analytics?.pos_item_sales || []).filter((p) => !p.is_complimentary);
+  const activePosOnlySalesRows = activePosSalesRows.filter(
+    (p) =>
+      String(p.sale_source || '').toUpperCase() !== 'MINIBAR' &&
+      !String(p.category_name || '').toLowerCase().includes('minibar')
+  );
+  const activeMinibarSalesRows = activePosSalesRows.filter(
+    (p) =>
+      String(p.sale_source || '').toUpperCase() === 'MINIBAR' ||
+      String(p.category_name || '').toLowerCase().includes('minibar')
+  );
   const roomSalesFromAnalytics =
     activeRoomSalesRows.length > 0
       ? activeRoomSalesRows.reduce((s, r) => s + (Number(r.total_price) || 0), 0)
       : (analytics?.room_ranking || []).reduce((s, r) => s + (Number(r.room_revenue) || 0), 0);
-  const posSalesFromAnalytics = activePosSalesRows.reduce(
+  const posSalesFromAnalytics = activePosOnlySalesRows.reduce(
+    (s, p) => s + (Number(p.line_total) || 0),
+    0
+  );
+  const minibarSalesFromAnalytics = activeMinibarSalesRows.reduce(
     (s, p) => s + (Number(p.line_total) || 0),
     0
   );
@@ -173,7 +187,12 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
     : sb && sb.pos_total > 0
     ? sb.pos_total
     : posSalesFromAnalytics;
-  const totalSales = roomSalesTotal + posSalesTotal;
+  const minibarSalesTotal = hasAnalyticsSales
+    ? minibarSalesFromAnalytics
+    : sb && (sb.minibar_total ?? 0) > 0
+    ? Number(sb.minibar_total)
+    : minibarSalesFromAnalytics;
+  const totalSales = roomSalesTotal + posSalesTotal + minibarSalesTotal;
   const roomPaidTotal = activeRoomSalesRows.reduce((s, r) => {
     const net = Number(r.total_price) || 0;
     const paidRaw = Number(r.amount_paid) || 0;
@@ -361,13 +380,15 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
     const pl = analytics?.accounting_statements?.profit_loss;
     const pendapatanKamar = pl?.revenue.room_sales ?? roomSalesTotal;
     const pendapatanPos = pl?.revenue.product_sales ?? posSalesTotal;
+    const pendapatanMinibar = pl?.revenue.minibar_sales ?? minibarSalesTotal;
     const pendapatanLain = pl?.revenue.other_income ?? otherIncomeTotal;
     const potonganDiskon = pl?.revenue.returns_and_discounts ?? totalDiscountAmount;
     const subTotalPendapatan =
-      pl?.revenue.total_revenue ?? pendapatanKamar + pendapatanPos + pendapatanLain;
+      pl?.revenue.total_revenue ?? pendapatanKamar + pendapatanPos + pendapatanMinibar + pendapatanLain;
 
     const hppProduk = pl?.cogs.sales_cogs ?? 0;
-    const subTotalHpp = pl?.cogs.total_cogs ?? hppProduk;
+    const hppMinibar = pl?.cogs.minibar_cogs ?? 0;
+    const subTotalHpp = pl?.cogs.total_cogs ?? hppProduk + hppMinibar;
     const labaKotor = pl?.gross_profit ?? subTotalPendapatan - subTotalHpp;
 
     const expCategories: ExpenseByCategory[] =
@@ -397,10 +418,13 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
               ['Bagian', 'Keterangan', 'Nilai (Rp)'],
               ['A. Pendapatan', 'Penjualan Kamar', pendapatanKamar],
               ['A. Pendapatan', 'Penjualan Produk & POS', pendapatanPos],
+              ['A. Pendapatan', 'Penjualan Minibar', pendapatanMinibar],
               ['A. Pendapatan', 'Pemasukan Lain', pendapatanLain],
               ['A. Pendapatan', 'Info Diskon Kamar & POS', potonganDiskon],
               ['A. Pendapatan', 'Sub Total Pendapatan', subTotalPendapatan],
-              ['B. Harga Pokok Penjualan', 'HPP Produk & F&B', subTotalHpp],
+              ['B. Harga Pokok Penjualan', 'HPP Produk & F&B', hppProduk],
+              ['B. Harga Pokok Penjualan', 'HPP Minibar', hppMinibar],
+              ['B. Harga Pokok Penjualan', 'Sub Total HPP', subTotalHpp],
               ['C. Laba Kotor', 'Pendapatan - HPP', labaKotor],
               ...expCategories.map((c: ExpenseByCategory) => [
                 'D. Pengeluaran',
@@ -442,10 +466,12 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                   endDate: String(analytics?.end_date || financials?.end_date || ''),
                   pendapatanKamar,
                   pendapatanPos,
+                  pendapatanMinibar,
                   pendapatanLain,
                   potonganDiskon,
                   subTotalPendapatan,
                   hppProduk,
+                  hppMinibar,
                   subTotalHpp,
                   labaKotor,
                   expCategories,
@@ -509,6 +535,12 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center justify-between py-1.5">
+                  <span className="text-slate-600">Penjualan Minibar (Housekeeping)</span>
+                  <span className="font-semibold text-slate-900 tabular-nums">
+                    {formatIdr(pendapatanMinibar)}
+                  </span>
+                </div>
+                <div className="flex items-center justify-between py-1.5">
                   <span className="text-slate-600">Pemasukan Lain (Non-Kamar / Non-POS)</span>
                   <span className="font-semibold text-slate-900 tabular-nums">
                     {formatIdr(pendapatanLain)}
@@ -550,6 +582,10 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
                 <div className="flex items-center justify-between py-1.5">
                   <span className="text-slate-600">HPP Produk & F&B Terjual</span>
                   <span className="font-semibold text-slate-900 tabular-nums">{formatIdr(hppProduk)}</span>
+                </div>
+                <div className="flex items-center justify-between py-1.5">
+                  <span className="text-slate-600">HPP Minibar Terjual</span>
+                  <span className="font-semibold text-slate-900 tabular-nums">{formatIdr(hppMinibar)}</span>
                 </div>
                 <div className="flex items-center justify-between pt-2.5 font-bold text-slate-900">
                   <span>Sub Total HPP</span>
@@ -1298,6 +1334,10 @@ export const LaporanTabKeseluruhan: React.FC<LaporanTabKeseluruhanProps> = ({
               <div className="flex items-center justify-between text-slate-600">
                 <span>Produk / POS:</span>
                 <span className="font-semibold text-slate-900 tabular-nums">{formatIdr(posSalesTotal)}</span>
+              </div>
+              <div className="flex items-center justify-between text-slate-600">
+                <span>Minibar:</span>
+                <span className="font-semibold text-slate-900 tabular-nums">{formatIdr(minibarSalesTotal)}</span>
               </div>
             </div>
           </div>

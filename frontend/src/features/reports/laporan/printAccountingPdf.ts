@@ -429,10 +429,12 @@ export async function printLabaRugiPdf(params: {
   endDate: string;
   pendapatanKamar: number;
   pendapatanPos: number;
+  pendapatanMinibar?: number;
   pendapatanLain: number;
   potonganDiskon: number;
   subTotalPendapatan: number;
   hppProduk: number;
+  hppMinibar?: number;
   subTotalHpp: number;
   labaKotor: number;
   expCategories: Array<{ category_code: string; category_name: string; total: number }>;
@@ -487,6 +489,10 @@ export async function printLabaRugiPdf(params: {
           <span>${escapeHtml(formatIdr(params.pendapatanPos))}</span>
         </div>
         <div class="oak-acc-pdf-row">
+          <span>Penjualan Minibar (Housekeeping)</span>
+          <span>${escapeHtml(formatIdr(params.pendapatanMinibar || 0))}</span>
+        </div>
+        <div class="oak-acc-pdf-row">
           <span>Pemasukan Lain (Non-Kamar / Non-POS)</span>
           <span>${escapeHtml(formatIdr(params.pendapatanLain))}</span>
         </div>
@@ -515,6 +521,10 @@ export async function printLabaRugiPdf(params: {
         <div class="oak-acc-pdf-row">
           <span>HPP Produk & F&B Terjual</span>
           <span>${escapeHtml(formatIdr(params.hppProduk))}</span>
+        </div>
+        <div class="oak-acc-pdf-row">
+          <span>HPP Minibar Terjual</span>
+          <span>${escapeHtml(formatIdr(params.hppMinibar || 0))}</span>
         </div>
         <div class="oak-acc-pdf-row oak-acc-pdf-row-bold">
           <span>Sub Total HPP</span>

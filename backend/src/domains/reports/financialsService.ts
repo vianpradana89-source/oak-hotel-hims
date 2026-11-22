@@ -74,6 +74,8 @@ export interface FinancialsReportResult {
     room_count: number;
     pos_total: number;
     pos_count: number;
+    minibar_total: number;
+    minibar_count: number;
     paid_total: number;
     unpaid_total: number;
   };
@@ -189,15 +191,44 @@ export async function calculateFinancials(
       )
   `;
 
-  // 0. Sales Breakdown (Room vs POS vs Total SALE — strictly excluding cancelled reservations/bookings/POS orders)
+  const isMinibarSql = `(
+    UPPER(COALESCE(t.category_code, '')) = 'MINIBAR_SALES'
+    OR UPPER(COALESCE(t.source_type, '')) = 'MINIBAR'
+    OR (
+      UPPER(COALESCE(t.source_type, '')) = 'FOLIO_ENTRY'
+      AND EXISTS (
+        SELECT 1 FROM folio_entries fe_mb
+        WHERE fe_mb.id::text = COALESCE(t.source_id, '')
+          AND fe_mb.property_id = t.property_id
+          AND (
+            UPPER(COALESCE(fe_mb.entry_type, '')) = 'MINIBAR'
+            OR UPPER(COALESCE(fe_mb.source_type, '')) = 'MINIBAR'
+            OR UPPER(COALESCE(fe_mb.revenue_category, '')) = 'MINIBAR_SALES'
+          )
+      )
+    )
+  )`;
+  const isPosSql = `(
+    NOT ${isMinibarSql}
+    AND (
+      UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER')
+      OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%'
+      OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%'
+    )
+  )`;
+  const isRoomSql = `(NOT ${isMinibarSql} AND NOT ${isPosSql})`;
+
+  // 0. Sales Breakdown (Room vs POS vs Minibar vs Total SALE — strictly excluding cancelled reservations/bookings/POS orders)
   const salesBreakdownQuery = `
     SELECT
       COALESCE(SUM(t.net_amount), 0)::numeric(14,2) AS total,
       COUNT(*)::int AS count,
-      COALESCE(SUM(CASE WHEN UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER') OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%' OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%' THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS pos_total,
-      COUNT(*) FILTER (WHERE UPPER(COALESCE(t.source_type, '')) IN ('POS', 'POS_ORDER') OR UPPER(COALESCE(t.category_code, '')) LIKE '%POS%' OR UPPER(COALESCE(t.category_code, '')) LIKE '%FNB%')::int AS pos_count,
-      COALESCE(SUM(CASE WHEN UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER') AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%POS%' AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%FNB%' THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS room_total,
-      COUNT(*) FILTER (WHERE UPPER(COALESCE(t.source_type, '')) NOT IN ('POS', 'POS_ORDER') AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%POS%' AND UPPER(COALESCE(t.category_code, '')) NOT LIKE '%FNB%')::int AS room_count,
+      COALESCE(SUM(CASE WHEN ${isPosSql} THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS pos_total,
+      COUNT(*) FILTER (WHERE ${isPosSql})::int AS pos_count,
+      COALESCE(SUM(CASE WHEN ${isMinibarSql} THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS minibar_total,
+      COUNT(*) FILTER (WHERE ${isMinibarSql})::int AS minibar_count,
+      COALESCE(SUM(CASE WHEN ${isRoomSql} THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS room_total,
+      COUNT(*) FILTER (WHERE ${isRoomSql})::int AS room_count,
       COALESCE(SUM(CASE WHEN UPPER(COALESCE(t.payment_status, '')) = 'PAID' THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS paid_total,
       COALESCE(SUM(CASE WHEN UPPER(COALESCE(t.payment_status, '')) != 'PAID' THEN t.net_amount ELSE 0 END), 0)::numeric(14,2) AS unpaid_total
     FROM transactions t
@@ -681,6 +712,8 @@ export async function calculateFinancials(
       room_count: Number(sbRow.room_count || 0),
       pos_total: Number(sbRow.pos_total || 0),
       pos_count: Number(sbRow.pos_count || 0),
+      minibar_total: Number(sbRow.minibar_total || 0),
+      minibar_count: Number(sbRow.minibar_count || 0),
       paid_total: Number(sbRow.paid_total || 0),
       unpaid_total: Number(sbRow.unpaid_total || 0),
     },

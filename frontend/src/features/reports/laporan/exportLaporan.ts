@@ -221,15 +221,23 @@ export function buildLaporanSheets(opts: {
   }
   sheets.push({ name: 'Penjualan Kamar', rows: roomSalesRows });
 
-  // Penjualan POS
+  // Penjualan POS & Minibar
   const salesRows: ExportRow[] = [
-    ['Tanggal', 'No. Order', 'Item', 'Kategori', 'Qty', 'Harga', 'Total', 'HPP', 'Metode'],
+    ['Tanggal', 'No. Order', 'Sumber', 'Kamar / Meja', 'Item', 'Kategori', 'Qty', 'Harga', 'Total', 'HPP', 'Metode'],
+  ];
+  const minibarRows: ExportRow[] = [
+    ['Tanggal', 'No. Booking / Ref', 'Kamar', 'Tamu', 'Item Minibar', 'Qty', 'Harga', 'Total', 'HPP', 'Metode'],
   ];
   if (analytics) {
     for (const s of analytics.pos_item_sales || []) {
+      const isMb =
+        String(s.sale_source || '').toUpperCase() === 'MINIBAR' ||
+        String(s.category_name || '').toLowerCase().includes('minibar');
       salesRows.push([
         s.tx_date,
         s.booking_or_order_no,
+        isMb ? 'Minibar' : 'POS',
+        s.room_or_table || '-',
         s.item_name,
         s.category_name,
         money(s.quantity),
@@ -238,9 +246,24 @@ export function buildLaporanSheets(opts: {
         money(s.total_hpp),
         s.payment_method,
       ]);
+      if (isMb) {
+        minibarRows.push([
+          s.tx_date,
+          s.booking_or_order_no,
+          s.room_or_table || '-',
+          s.customer_name || '-',
+          s.item_name,
+          money(s.quantity),
+          money(s.unit_price),
+          money(s.line_total),
+          money(s.total_hpp),
+          s.payment_method,
+        ]);
+      }
     }
   }
   sheets.push({ name: 'Penjualan', rows: salesRows });
+  sheets.push({ name: 'Penjualan Minibar', rows: minibarRows });
 
   // Metode Bayar
   const methodRows: ExportRow[] = [
